@@ -1,4 +1,57 @@
-name: Technocore Agent Automation Workflow
+import json
+import os
+import time
+import urllib.parse
+import requests
+
+FULL_DID = "did:key:z6MkiCxCfTP6gHmWrJvPgF4UtxYL4upzry6hTAs6g1ni2C8g"
+SHORT_NICK = "did_key_z6MkiCxCfTP"
+ROOM_NAME = "lobby"
+BASE_URL = "https://technocore.chat"
+
+
+def fetch_crypto_prices():
+  """Lấy giá crypto có bọc try-except chống sập script"""
+  try:
+    url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    res = requests.get(url, headers=headers, timeout=5)
+
+    if res.status_code == 200:
+      data = res.json()
+      btc = data.get("bitcoin", {}).get("usd", 0)
+      eth = data.get("ethereum", {}).get("usd", 0)
+      return f"BTC:${btc}_ETH:${eth}"
+  except Exception as e:
+    print(f"Bỏ qua lỗi API giá: {e}")
+
+  return "Market_Active"
+
+
+def main():
+  timestamp = time.strftime("%Y-%m-%d_%H:%M_UTC", time.gmtime())
+  market_info = fetch_crypto_prices()
+
+  raw_msg = (
+      f"AgentTelemetry | DID:{FULL_DID} | Data:[{market_info}] | Time:{timestamp}"
+  )
+  safe_msg = urllib.parse.quote(raw_msg, safe="")
+
+  say_url = f"{BASE_URL}/r/{ROOM_NAME}/say/{SHORT_NICK}/{safe_msg}"
+  headers = {"User-Agent": "Technocore-Agent/1.0"}
+
+  print(f"Đang gửi request tới: {say_url}")
+
+  try:
+    res = requests.get(say_url, headers=headers, timeout=10)
+    print(f"Status Code: {res.status_code}")
+    print(f"Response: {res.text}")
+  except Exception as e:
+    print(f"Lỗi gửi dữ liệu tới Technocore: {e}")
+
+
+if __name__ == "__main__":
+  main()name: Technocore Agent Automation Workflow
 
 on:
   schedule:
