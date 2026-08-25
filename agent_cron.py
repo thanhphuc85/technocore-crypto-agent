@@ -11,12 +11,10 @@ BASE_URL = "https://technocore.chat"
 
 
 def fetch_crypto_prices():
-  """Lấy giá crypto có bọc try-except chống sập script"""
   try:
     url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd"
     headers = {"User-Agent": "Mozilla/5.0"}
     res = requests.get(url, headers=headers, timeout=5)
-
     if res.status_code == 200:
       data = res.json()
       btc = data.get("bitcoin", {}).get("usd", 0)
@@ -24,7 +22,6 @@ def fetch_crypto_prices():
       return f"BTC:${btc}_ETH:${eth}"
   except Exception as e:
     print(f"Bỏ qua lỗi API giá: {e}")
-
   return "Market_Active"
 
 
@@ -40,158 +37,11 @@ def main():
   say_url = f"{BASE_URL}/r/{ROOM_NAME}/say/{SHORT_NICK}/{safe_msg}"
   headers = {"User-Agent": "Technocore-Agent/1.0"}
 
-  print(f"Đang gửi request tới: {say_url}")
-
-  try:
-    res = requests.get(say_url, headers=headers, timeout=10)
-    print(f"Status Code: {res.status_code}")
-    print(f"Response: {res.text}")
-  except Exception as e:
-    print(f"Lỗi gửi dữ liệu tới Technocore: {e}")
-
-
-if __name__ == "__main__":
-  main()name: Technocore Agent Automation Workflow
-
-on:
-  schedule:
-    - cron: '*/30 * * * *'
-  workflow_dispatch:
-
-jobs:
-  run-technocore-agent:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: Install Dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests
-
-      - name: Run Agent Script
-        run: python agent_cron.pyimport json
-import os
-import time
-import urllib.parse
-import requests
-
-# Khóa DID đầy đủ để đưa vào nội dung tin nhắn
-FULL_DID = "did:key:z6MkiCxCfTP6gHmWrJvPgF4UtxYL4upzry6hTAs6g1ni2C8g"
-# Nickname ngắn gọn đúng chuẩn Technocore (< 47 ký tự, chỉ chứa a-z, 0-9, _)
-SHORT_NICK = "did_key_z6MkiCxCfTP"
-
-ROOM_NAME = "lobby"
-BASE_URL = "https://technocore.chat"
-
-
-def fetch_crypto_prices():
-  try:
-    url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd"
-    res = requests.get(url, timeout=5).json()
-    btc = res.get("bitcoin", {}).get("usd", 0)
-    eth = res.get("ethereum", {}).get("usd", 0)
-    return f"BTC:${btc}_ETH:${eth}"
-  except Exception:
-    return "Market_Active"
-
-
-def main():
-  timestamp = time.strftime("%Y-%m-%d_%H:%M_UTC", time.gmtime())
-  market_info = fetch_crypto_prices()
-
-  # Đưa FULL_DID vào nội dung tin nhắn để dự án xác minh
-  raw_msg = (
-      f"AgentTelemetry | DID:{FULL_DID} | Data:[{market_info}] | Time:{timestamp}"
-  )
-  safe_msg = urllib.parse.quote(raw_msg, safe="")
-
-  say_url = f"{BASE_URL}/r/{ROOM_NAME}/say/{SHORT_NICK}/{safe_msg}"
-  headers = {"User-Agent": "Technocore-Agent/1.0"}
-
   try:
     res = requests.get(say_url, headers=headers, timeout=10)
     print(f"Status Code: {res.status_code} - Response: {res.text}")
   except Exception as e:
     print(f"Error: {e}")
-
-
-if __name__ == "__main__":
-  main()import json
-import os
-import time
-import urllib.parse
-import requests
-
-# 1. Cấu hình DID và Endpoint Technocore
-MY_DID = os.getenv("DID_NICK", "did:flop:0x9a8b7c6d5e4f3a2b1c0d")
-ROOM_NAME = "lobby"
-BASE_URL = "https://technocore.chat"
-
-
-def fetch_crypto_prices():
-  """Thu thập dữ liệu giá crypto thực tế từ CoinGecko làm nội dung hữu ích"""
-  try:
-    url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,solana&vs_currencies=usd"
-    res = requests.get(url, timeout=10).json()
-
-    btc = res.get("bitcoin", {}).get("usd", 0)
-    eth = res.get("ethereum", {}).get("usd", 0)
-    sol = res.get("solana", {}).get("usd", 0)
-
-    return f"BTC:${btc}_ETH:${eth}_SOL:${sol}"
-  except Exception as e:
-    print(f"Error fetching prices: {e}")
-    return "Market_Data_Active"
-
-
-def main():
-  timestamp = time.strftime("%Y-%m-%d_%H:%M_UTC", time.gmtime())
-  market_info = fetch_crypto_prices()
-
-  # Tạo thông điệp mang giá trị thật đóng góp cho cộng đồng Agent
-  raw_message = (
-      f"AgentReport | DID:{MY_DID} | Status:Active | Data:[{market_info}] |"
-      f" Time:{timestamp}"
-  )
-
-  # Mã hóa URL để tránh gãy ký tự đặc biệt
-  safe_did = urllib.parse.quote(MY_DID, safe="")
-  safe_msg = urllib.parse.quote(raw_message, safe="")
-
-  # 2. Gửi thông tin vào Phòng Chat công khai (/r/lobby)
-  say_url = f"{BASE_URL}/r/{ROOM_NAME}/say/{safe_did}/{safe_msg}"
-
-  # 3. Lưu trạng thái bền vững vào Key-Value Store (/kv/...)
-  kv_url = f"{BASE_URL}/kv/{safe_did}/status/set/{safe_msg}"
-
-  headers = {
-      "User-Agent": (
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Technocore-Agent/1.0"
-      )
-  }
-
-  print(f"--- Bắt đầu kích hoạt Agent [{timestamp}] ---")
-  try:
-    # Gửi tới Room
-    r_say = requests.get(say_url, headers=headers, timeout=10)
-    print(f"[Say Status]: {r_say.status_code} - Response: {r_say.text[:100]}")
-
-    # Lưu KV Store
-    r_kv = requests.get(kv_url, headers=headers, timeout=10)
-    print(f"[KV Status]: {r_kv.status_code} - Response: {r_kv.text[:100]}")
-
-    print("---> Tác vụ thành công!")
-
-  except Exception as e:
-    print(f"Xảy ra lỗi kết nối: {e}")
 
 
 if __name__ == "__main__":
