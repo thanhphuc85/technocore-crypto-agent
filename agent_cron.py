@@ -4,6 +4,53 @@ import time
 import urllib.parse
 import requests
 
+# Khóa DID đầy đủ để đưa vào nội dung tin nhắn
+FULL_DID = "did:key:z6MkiCxCfTP6gHmWrJvPgF4UtxYL4upzry6hTAs6g1ni2C8g"
+# Nickname ngắn gọn đúng chuẩn Technocore (< 47 ký tự, chỉ chứa a-z, 0-9, _)
+SHORT_NICK = "did_key_z6MkiCxCfTP"
+
+ROOM_NAME = "lobby"
+BASE_URL = "https://technocore.chat"
+
+
+def fetch_crypto_prices():
+  try:
+    url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd"
+    res = requests.get(url, timeout=5).json()
+    btc = res.get("bitcoin", {}).get("usd", 0)
+    eth = res.get("ethereum", {}).get("usd", 0)
+    return f"BTC:${btc}_ETH:${eth}"
+  except Exception:
+    return "Market_Active"
+
+
+def main():
+  timestamp = time.strftime("%Y-%m-%d_%H:%M_UTC", time.gmtime())
+  market_info = fetch_crypto_prices()
+
+  # Đưa FULL_DID vào nội dung tin nhắn để dự án xác minh
+  raw_msg = (
+      f"AgentTelemetry | DID:{FULL_DID} | Data:[{market_info}] | Time:{timestamp}"
+  )
+  safe_msg = urllib.parse.quote(raw_msg, safe="")
+
+  say_url = f"{BASE_URL}/r/{ROOM_NAME}/say/{SHORT_NICK}/{safe_msg}"
+  headers = {"User-Agent": "Technocore-Agent/1.0"}
+
+  try:
+    res = requests.get(say_url, headers=headers, timeout=10)
+    print(f"Status Code: {res.status_code} - Response: {res.text}")
+  except Exception as e:
+    print(f"Error: {e}")
+
+
+if __name__ == "__main__":
+  main()import json
+import os
+import time
+import urllib.parse
+import requests
+
 # 1. Cấu hình DID và Endpoint Technocore
 MY_DID = os.getenv("DID_NICK", "did:flop:0x9a8b7c6d5e4f3a2b1c0d")
 ROOM_NAME = "lobby"
