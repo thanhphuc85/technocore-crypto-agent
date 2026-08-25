@@ -1,0 +1,31 @@
+name: Technocore Agent Automation Workflow
+
+on:
+  schedule:
+    # Tự động chạy mỗi 30 phút một lần (Khuyên dùng)
+    - cron: '*/30 * * * *'
+  workflow_dispatch: # Nút cho phép bấm chạy thủ công để kiểm tra ngay
+
+jobs:
+  run-technocore-agent:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: Run Agent Script
+        env:
+          # THAY MÃ DID THỰC TẾ CỦA BẠN VÀO DÒNG DƯỚI ĐÂY
+          DID_NICK: "did:flop:0x9a8b7c6d5e4f3a2b1c0d"
+        run: python agent_cron.py
