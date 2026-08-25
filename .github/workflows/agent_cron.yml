@@ -2,9 +2,8 @@ name: Technocore Agent Automation Workflow
 
 on:
   schedule:
-    # Tự động chạy mỗi 30 phút một lần (Khuyên dùng)
     - cron: '*/30 * * * *'
-  workflow_dispatch: # Nút cho phép bấm chạy thủ công để kiểm tra ngay
+  workflow_dispatch:
 
 jobs:
   run-technocore-agent:
@@ -22,10 +21,9 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests
+          pip install requests pynacl
 
       - name: Run Agent Script
         env:
-          # THAY MÃ DID THỰC TẾ CỦA BẠN VÀO DÒNG DƯỚI ĐÂY
-          DID_NICK: "did:flop:0x9a8b7c6d5e4f3a2b1c0d"
+          AGENT_PRIVATE_KEY: ${{ secrets.AGENT_PRIVATE_KEY }}
         run: python agent_cron.py
