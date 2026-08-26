@@ -179,39 +179,38 @@ def _active_provider():
 _gemini_model_cache = None
 
 
-def _gemini_choose_model() -> str:
-    """Tự dò model Gemini hợp lệ trên key hiện tại (tránh 404 do đoán sai tên)."""
-    global _gemini_model_cache
-    if _gemini_model_cache:
-        return _gemini_model_cache
-    if GEMINI_MODEL:                     # user ép model cụ thể -> tôn trọng
-        _gemini_model_cache = GEMINI_MODEL
-        return _gemini_model_cache
-    models = []
+def _gemini_list_models():
+    """Danh sách model hỗ trợ generateContent trên key hiện tại (đã strip 'models/')."""
+    r = requests.get(
+        f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}&pageSize=1000",
+        timeout=15,
+    )
+    r.raise_for_status()
+    return [
+        m["name"].split("/")[-1]
+        for m in r.json().get("models", [])
+        if "generateContent" in m.get("supportedGenerationMethods", [])
+    ]
+
+
+def _gemini_candidates():
+    """Danh sách model để thử lần lượt, xếp theo độ ưu tiên."""
+    if GEMINI_MODEL:                     # user ép model cụ thể
+        return [GEMINI_MODEL]
     try:
-        r = requests.get(
-            f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}&pageSize=200",
-            timeout=15,
-        )
-        r.raise_for_status()
-        models = [
-            m["name"].split("/")[-1]
-            for m in r.json().get("models", [])
-            if "generateContent" in m.get("supportedGenerationMethods", [])
-        ]
+        models = _gemini_list_models()
     except Exception as e:
         print(f"[llm:gemini] list models failed | {e}")
-    chosen = next((p for p in GEMINI_PREFERRED if p in models), None)
-    if not chosen:
-        flash = [m for m in models if "flash" in m]
-        chosen = (flash or models or ["gemini-2.0-flash"])[0]
-    _gemini_model_cache = chosen
-    print(f"[llm:gemini] model = {chosen}")
-    return chosen
+        return list(GEMINI_PREFERRED)    # đoán khi không list được
+    print(f"[llm:gemini] available ({len(models)}): {', '.join(models[:12])}"
+          + (" ..." if len(models) > 12 else ""))
+    ordered = [p for p in GEMINI_PREFERRED if p in models]
+    ordered += [m for m in models if "flash" in m and m not in ordered]
+    ordered += [m for m in models if m not in ordered]
+    return ordered or list(GEMINI_PREFERRED)
 
 
-def _gemini_reply(user_text: str) -> str:
-    model = _gemini_choose_model()
+def _gemini_call(model: str, user_text: str) -> str:
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/models/"
         f"{model}:generateContent?key={GEMINI_API_KEY}"
@@ -224,6 +223,25 @@ def _gemini_reply(user_text: str) -> str:
     r = requests.post(url, json=body, timeout=20)
     r.raise_for_status()
     return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+
+
+def _gemini_reply(user_text: str) -> str:
+    """Thử từng model tới khi gọi được (bỏ qua model 404/không phục vụ)."""
+    global _gemini_model_cache
+    candidates = [_gemini_model_cache] if _gemini_model_cache else _gemini_candidates()
+    last_err = None
+    for model in candidates:
+        try:
+            text = _gemini_call(model, user_text)
+            if _gemini_model_cache != model:
+                print(f"[llm:gemini] model = {model}")
+            _gemini_model_cache = model
+            return text
+        except Exception as e:
+            last_err = e
+            print(f"[llm:gemini] {model} -> {str(e)[:80]}")
+            _gemini_model_cache = None
+    raise last_err or RuntimeError("no gemini model available")
 
 
 def _openai_reply(user_text: str) -> str:
