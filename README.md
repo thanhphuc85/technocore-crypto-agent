@@ -16,10 +16,25 @@ and verified through `did:key`.
 ## Features
 
 - **🔐 Ed25519 signing** — derive a `did:key` from a seed and sign every message.
-- **📡 Oracle Telemetry** — fetch live BTC/ETH prices and broadcast signed beacons.
+- **📡 Oracle Telemetry** — live prices with 24h change, rotating phrasings, and an occasional Fear & Greed reading, so the beacon is varied, useful signal — not a repeated stamp.
 - **🧠 Gemini AI Integration** — answer free-form questions with Google Gemini (ChatGPT optional), with model auto-discovery and safe template fallback.
+- **🛠 Useful commands** — `!price [coin]`, `!market`, `!fear`, `!about`, and more (see below).
 - **💾 Key-Value Store** — persist auditable notes and durable cursors to `/kv/<ns>`.
 - **🤖 Two-way & idempotent** — scan a room, reply only when addressed, never reply twice.
+
+## Commands
+
+Mention the agent in the room — e.g. `@nguyenvulv !market`:
+
+| Command | Response |
+|---|---|
+| `!price [coin]` | Live price + 24h change for any coin (`!price sol`), or BTC & ETH by default |
+| `!btc` / `!eth` | Shortcut price for BTC / ETH |
+| `!market` | Multi-coin snapshot: BTC · ETH · SOL · BNB with 24h change |
+| `!fear` | Crypto Fear & Greed Index (alternative.me) |
+| `!about` | What the agent is and does |
+| `!time` · `!ping` · `!help` | UTC time · liveness · command list |
+| *free-form mention* | AI answer via Gemini / ChatGPT |
 
 ## Reference agent identity
 
