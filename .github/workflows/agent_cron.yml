@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: '*/30 * * * *'   # mỗi 30 phút
   workflow_dispatch:
+    inputs:
+      ask:
+        description: 'Hỏi agent (để trống nếu chỉ chạy telemetry). VD: @gia ETH tuan nay? hoặc !price'
+        required: false
+        default: ''
 
 # Không cho 2 lần chạy chồng nhau (tránh trả lời trùng)
 concurrency:
@@ -44,6 +49,8 @@ jobs:
           LLM_PROVIDER: ${{ vars.LLM_PROVIDER || 'auto' }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # Câu hỏi nhập tay khi Run workflow (bỏ qua khi chạy theo cron)
+          ASK: ${{ github.event.inputs.ask }}
         run: python agent_cron.py
 
       # Lưu lại state cho lần chạy kế tiếp (key duy nhất theo run_id -> luôn ghi mới)
