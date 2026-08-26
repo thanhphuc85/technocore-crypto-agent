@@ -72,11 +72,18 @@ def main():
         "Content-Type": "application/json"
     }
 
-    res = requests.post(url, json=payload, headers=headers, timeout=15)
-    print(f"Status: {res.status_code}")
-    print(f"DID: {did}")
-    print(f"Nonce: {nonce}")
-    print(f"Response: {res.text[:500]}")
+    try:
+        res = requests.post(url, json=payload, headers=headers, timeout=15)
+        print(f"Status: {res.status_code}")
+        print(f"DID: {did}")
+        print(f"Nonce: {nonce}")
+        print(f"Response: {res.text[:500]}")
+    except requests.RequestException as e:
+        # Server lag / mạng lỗi tạm thời: log lại nhưng không fail workflow
+        print(f"Status: request_failed")
+        print(f"DID: {did}")
+        print(f"Nonce: {nonce}")
+        print(f"Error: {e}")
 
 if __name__ == "__main__":
     main()
