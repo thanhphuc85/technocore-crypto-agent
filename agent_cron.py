@@ -23,6 +23,17 @@ STATE_FILE = os.environ.get("STATE_FILE", "state.json")
 UA = f"{AGENT_NAME}-Agent/2.0"
 
 # --- Contribution / anti-spam config ---
+def _env_float(name: str, default: float) -> float:
+    """Đọc env dạng số (giờ) AN TOÀN: rỗng hoặc sai định dạng -> default,
+    KHÔNG để một biến cấu hình gõ nhầm làm crash agent lúc import."""
+    raw = os.environ.get(name, "").strip()
+    try:
+        return float(raw) if raw else float(default)
+    except ValueError:
+        print(f"[config] {name}={raw!r} không hợp lệ, dùng mặc định {default}")
+        return float(default)
+
+
 REPO_URL = os.environ.get(
     "REPO_URL", "https://github.com/thanhphuc85/technocore-crypto-agent"
 ).strip()
@@ -30,8 +41,8 @@ REPO_URL = os.environ.get(
 # Mặc định = ROOM (lobby). Đặt MANIFEST_ROOM=technocore khi đã xác nhận room tồn tại.
 MANIFEST_ROOM = (os.environ.get("MANIFEST_ROOM", "").strip() or ROOM)
 # Khoảng tối thiểu (giờ) giữa 2 lần đăng — thưa broadcast, ưu tiên reciprocity.
-MANIFEST_INTERVAL_H = float(os.environ.get("MANIFEST_INTERVAL_HOURS", "6") or 6)
-TELEMETRY_INTERVAL_H = float(os.environ.get("TELEMETRY_INTERVAL_HOURS", "1") or 1)
+MANIFEST_INTERVAL_H = _env_float("MANIFEST_INTERVAL_HOURS", 6)
+TELEMETRY_INTERVAL_H = _env_float("TELEMETRY_INTERVAL_HOURS", 1)
 
 # --- LLM (tùy chọn) — làm câu trả lời tự do "thông minh" hơn ---
 # LLM_PROVIDER: auto | gemini | openai | none. "auto" tự chọn theo key đang có.
@@ -694,8 +705,9 @@ def main():
     else:
         print(f"[telemetry] bỏ qua vòng này (tối thiểu {TELEMETRY_INTERVAL_H}h/lần)")
 
-    # 1b) Contribution manifest — hiếm hơn nữa (proof of contribution có ký).
-    if force or _due(state, "last_manifest", MANIFEST_INTERVAL_H, now):
+    # 1b) Contribution manifest — LUÔN tôn trọng gate (không force theo dispatch)
+    #     để test AI nhiều lần không đăng lặp manifest, giữ đúng mục tiêu chống spam.
+    if _due(state, "last_manifest", MANIFEST_INTERVAL_H, now):
         broadcast_manifest(private_key, did)
         save_state({"last_manifest": now})
 
