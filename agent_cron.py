@@ -14,7 +14,8 @@ HANDLE = "@nguyenvulv"          # nick để người khác mention agent (viế
 
 # --- Auto-responder config ---
 MAX_REPLIES = 5                 # giới hạn số câu trả lời mỗi lần chạy (chống spam)
-FETCH_LIMIT = 50                # server trả tối đa 50 tin gần nhất
+FETCH_LIMIT = 200               # server cho tối đa 200 tin gần nhất (rộng hơn -> dễ bắt mention)
+ASK = os.environ.get("ASK", "").strip()  # câu hỏi nhập tay khi Run workflow
 STATE_FILE = os.environ.get("STATE_FILE", "state.json")
 UA = f"{AGENT_NAME}-Agent/2.0"
 
@@ -138,7 +139,7 @@ def post_message(private_key, did, text) -> bool:
 
 
 def fetch_messages(since=None):
-    url = f"{BASE_URL}/r/{ROOM}?format=json"
+    url = f"{BASE_URL}/r/{ROOM}?format=json&limit={FETCH_LIMIT}"
     if since:
         url += f"&since={since}"
     try:
@@ -302,7 +303,13 @@ def main():
     # 1) Phát telemetry một chiều (liveness proof — giữ hành vi cũ)
     broadcast_telemetry(private_key, did)
 
-    # 2) Tương tác 2 chiều: đọc room & trả lời tin gọi đích danh
+    # 2) Câu hỏi nhập tay khi Run workflow (test AI mà không lo firehose)
+    if ASK:
+        print(f"[ask] {ASK}")
+        reply = build_reply("you", ASK)
+        post_message(private_key, did, reply)
+
+    # 3) Tương tác 2 chiều: đọc room & trả lời tin gọi đích danh
     auto_respond(private_key, did)
 
 
