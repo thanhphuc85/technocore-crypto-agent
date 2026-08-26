@@ -11,6 +11,7 @@ BASE_URL = "https://technocore.chat"
 # --- Agent branding (độc quyền) ---
 AGENT_NAME = "NguyenVuLV"       # tên riêng của agent — hiện trong mọi tin nhắn
 HANDLE = "@nguyenvulv"          # nick để người khác mention agent (viết thường)
+KV_NS = "nguyenvulv"            # namespace Key-Value Store trên /kv/<ns> (server-side)
 
 # --- Auto-responder config ---
 MAX_REPLIES = 5                 # giới hạn số câu trả lời mỗi lần chạy (chống spam)
@@ -151,6 +152,34 @@ def fetch_messages(since=None):
         return requests.get(url, headers={"User-Agent": UA}, timeout=10).json()
     except (requests.RequestException, ValueError) as e:
         print(f"[fetch] request_failed | {e}")
+        return None
+
+
+# --- Key-Value Store (NOTES) trên server: /kv/<ns>/<key> ---
+def kv_set(key: str, value: str) -> bool:
+    try:
+        r = requests.post(
+            f"{BASE_URL}/kv/{KV_NS}/{key}",
+            json={"value": value},
+            headers={"User-Agent": UA, "Content-Type": "application/json"},
+            timeout=10,
+        )
+        print(f"[kv] set {KV_NS}/{key} -> {r.status_code}")
+        return r.status_code == 200
+    except requests.RequestException as e:
+        print(f"[kv] set failed | {e}")
+        return False
+
+
+def kv_get(key: str):
+    """Đọc note; bỏ dòng cảnh báo untrusted, trả về nội dung value."""
+    try:
+        r = requests.get(f"{BASE_URL}/kv/{KV_NS}/{key}", headers={"User-Agent": UA}, timeout=10)
+        if r.status_code != 200:
+            return None
+        lines = [ln for ln in r.text.splitlines() if ln.strip() and not ln.startswith("!!")]
+        return lines[-1].strip() if lines else None
+    except requests.RequestException:
         return None
 
 
@@ -310,12 +339,20 @@ def broadcast_telemetry(private_key, did):
     else:
         text = f"[{AGENT_NAME}] Telemetry | market_active | Time:{ts}"
     post_message(private_key, did, text)
+    # Lưu status vào Key-Value Store để bất kỳ ai cũng audit được (GET /kv/nguyenvulv/status)
+    kv_set("status", text)
 
 
 def auto_respond(private_key, did):
     my_nick = short_nick(did)
     state = load_state()
     last_seq = state.get("last_seq")
+    # Cursor bền vững qua KV store (dự phòng khi cache GitHub bị xóa)
+    if last_seq is None:
+        kv_cursor = kv_get("cursor")
+        if kv_cursor and kv_cursor.isdigit():
+            last_seq = int(kv_cursor)
+            print(f"[respond] khôi phục cursor từ KV -> {last_seq}")
 
     data = fetch_messages(since=last_seq)
     if not data or "messages" not in data:
@@ -328,6 +365,7 @@ def auto_respond(private_key, did):
     if last_seq is None:
         print(f"[respond] lần đầu — đặt cursor tại seq {new_last}, bỏ qua backlog.")
         save_state({"last_seq": new_last})
+        kv_set("cursor", str(new_last))
         return
 
     replies = 0
@@ -348,7 +386,9 @@ def auto_respond(private_key, did):
             replies += 1
         time.sleep(0.3)                   # lịch sự, tránh dồn dập
 
-    save_state({"last_seq": max(new_last or 0, last_seq)})
+    final_cursor = max(new_last or 0, last_seq)
+    save_state({"last_seq": final_cursor})
+    kv_set("cursor", str(final_cursor))
     print(f"[respond] đã trả lời {replies} tin | cursor -> {new_last}")
 
 
