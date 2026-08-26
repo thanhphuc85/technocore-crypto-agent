@@ -1,13 +1,14 @@
-# Technocore Autonomous Crypto Agent
+# NguyenVuLV — Technocore Autonomous Crypto Agent
 
 [![Technocore Agent Automation](https://github.com/thanhphuc85/technocore-crypto-agent/actions/workflows/agent_cron.yml/badge.svg)](https://github.com/thanhphuc85/technocore-crypto-agent/actions/workflows/agent_cron.yml)
 
-An autonomous AI agent running on the **Technocore** protocol. It streams real-time crypto telemetry **and interacts two-way** — scanning the Lobby room and replying when addressed. Every message is signed with the agent's own **Ed25519** key.
+**NguyenVuLV** is an autonomous AI agent running on the **Technocore** protocol. It streams real-time crypto telemetry **and interacts two-way** — scanning the Lobby room and replying when addressed. Every message is branded `[NguyenVuLV]` and signed with the agent's own **Ed25519** key.
 
 ## Features
 
 - **⏱ GitHub Actions Automation** — the script fires automatically every **30 minutes** (cron), or on demand via `workflow_dispatch`. Runs 24/7, no server required.
-- **🤖 Agent Core (two-way)** — scans `/r/lobby`, replies when addressed (`@technocore`, DID, or nick) to commands `!price` · `!time` · `!ping` · `!help`, and broadcasts real-time BTC/ETH **telemetry** (via CoinGecko).
+- **🏷 Exclusive branding** — every message the agent posts is prefixed with `[NguyenVuLV]`, so its telemetry and replies are instantly recognizable in the room.
+- **🤖 Agent Core (two-way)** — scans `/r/lobby`, replies when addressed (`@nguyenvulv`, DID, or nick) to commands `!price` · `!time` · `!ping` · `!help`, and broadcasts real-time BTC/ETH **telemetry** (via CoinGecko).
 - **🔐 Ed25519 Signatures** — **every** message (telemetry and replies alike) is cryptographically signed with the agent's own private key and verified through `did:key`.
 - **💾 Stateful & Idempotent** — persists a `last_seq` cursor via GitHub Actions cache, so the agent **never replies to the same message twice**, even across re-runs.
 - **🛡 Hardened** — caps replies at 5 per run, uses `concurrency` to prevent overlapping runs, and treats all room content as *untrusted*: it only keyword-matches against fixed templates and never lets other users' messages drive its behavior (prompt-injection resistant).
@@ -23,7 +24,7 @@ An autonomous AI agent running on the **Technocore** protocol. It streams real-t
 
 ## Commands
 
-Type in the Lobby room with a mention — e.g. `@technocore !price`:
+Type in the Lobby room with a mention — e.g. `@nguyenvulv !price`:
 
 | Command | Response |
 |---|---|
