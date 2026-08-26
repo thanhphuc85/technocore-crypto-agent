@@ -118,13 +118,50 @@ def next_nonce() -> str:
     return str(n)
 
 
-def get_prices():
+# Ánh xạ ký hiệu quen thuộc -> CoinGecko id (cho lệnh !price <coin>)
+COIN_IDS = {
+    "btc": "bitcoin", "eth": "ethereum", "sol": "solana", "bnb": "binancecoin",
+    "xrp": "ripple", "ada": "cardano", "doge": "dogecoin", "avax": "avalanche-2",
+    "link": "chainlink", "dot": "polkadot", "matic": "matic-network",
+    "ton": "the-open-network", "trx": "tron", "atom": "cosmos", "near": "near",
+    "bitcoin": "bitcoin", "ethereum": "ethereum", "solana": "solana",
+}
+
+
+def _fmt_chg(chg) -> str:
+    """Định dạng % thay đổi 24h, có dấu +/-."""
+    if chg is None:
+        return ""
+    return f" ({'+' if chg >= 0 else ''}{chg:.1f}% 24h)"
+
+
+def get_market(ids):
+    """Lấy giá USD + %24h cho danh sách coingecko id. Trả {id: {'usd':.., 'chg':..}}."""
     try:
-        p = requests.get(
-            "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd",
+        r = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": ",".join(ids), "vs_currencies": "usd", "include_24hr_change": "true"},
             timeout=8,
-        ).json()
-        return p.get("bitcoin", {}).get("usd"), p.get("ethereum", {}).get("usd")
+        )
+        data = r.json()
+        return {i: {"usd": data.get(i, {}).get("usd"),
+                    "chg": data.get(i, {}).get("usd_24h_change")} for i in ids}
+    except Exception:
+        return {}
+
+
+def get_prices():
+    """Tương thích ngược: trả (btc_usd, eth_usd)."""
+    m = get_market(["bitcoin", "ethereum"])
+    return m.get("bitcoin", {}).get("usd"), m.get("ethereum", {}).get("usd")
+
+
+def get_fear_greed():
+    """Chỉ số Crypto Fear & Greed (alternative.me — miễn phí, không cần key)."""
+    try:
+        d = requests.get("https://api.alternative.me/fng/", timeout=8).json()
+        x = d["data"][0]
+        return x.get("value"), x.get("value_classification")
     except Exception:
         return None, None
 
@@ -377,32 +414,80 @@ def build_reply(sender_nick: str, text: str) -> str:
     để nó điều khiển hành vi hay chèn thẳng vào lệnh."""
     sender_nick = safe_nick(sender_nick)       # nick echo lại phải sạch
     t = text.lower()
-    if "!price" in t or "!btc" in t or "!eth" in t:
-        btc, eth = get_prices()
-        if btc is None:
-            return f"[{AGENT_NAME}] @{sender_nick} price feed tạm offline, thử lại sau nhé."
-        return f"[{AGENT_NAME}] @{sender_nick} BTC:${btc} ETH:${eth} (live via CoinGecko, signed Ed25519)"
-    if "!time" in t:
-        return f"[{AGENT_NAME}] @{sender_nick} UTC {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}"
-    if "!ping" in t:
-        return f"[{AGENT_NAME}] @{sender_nick} pong — {AGENT_NAME} agent alive & signing every payload."
+    tokens = t.split()
+
+    def tag(msg: str) -> str:
+        return f"[{AGENT_NAME}] @{sender_nick} {msg}"
+
     if "!help" in t:
-        return f"[{AGENT_NAME}] @{sender_nick} commands: !price · !time · !ping · !help — autonomous Ed25519 agent."
+        return tag("commands: !price [coin] · !market · !fear · !time · !ping · !about — "
+                   "or just @mention me a question and I'll answer with AI.")
+    if "!about" in t:
+        return tag(f"I'm {AGENT_NAME}, an autonomous Ed25519 agent: signed oracle telemetry, "
+                   "Gemini AI replies, KV store, injection-guarded. Open-source SDK on GitHub.")
+    if "!fear" in t:
+        val, cls = get_fear_greed()
+        if val is None:
+            return tag("Fear & Greed feed tạm offline, thử lại sau.")
+        return tag(f"Crypto Fear & Greed Index: {val}/100 ({cls}) — signed Ed25519")
+    if "!market" in t:
+        pairs = [("BTC", "bitcoin"), ("ETH", "ethereum"), ("SOL", "solana"), ("BNB", "binancecoin")]
+        m = get_market([cid for _, cid in pairs])
+        parts = [f"{sym} ${m[cid]['usd']}{_fmt_chg(m[cid].get('chg'))}"
+                 for sym, cid in pairs if m.get(cid, {}).get("usd") is not None]
+        return tag(" · ".join(parts)) if parts else tag("market feed tạm offline, thử lại sau.")
+    if "!price" in t or "!btc" in t or "!eth" in t:
+        # !price <coin> cho bất kỳ đồng nào; !btc/!eth là lối tắt
+        sym = "btc" if "!btc" in t else "eth" if "!eth" in t else None
+        if sym is None:
+            sym = next((tok for tok in tokens if tok in COIN_IDS), None)
+        if sym:
+            cid = COIN_IDS[sym]
+            d = get_market([cid]).get(cid, {})
+            if d.get("usd") is None:
+                return tag(f"price feed cho {sym.upper()} tạm offline.")
+            return tag(f"{sym.upper()} ${d['usd']}{_fmt_chg(d.get('chg'))} — live via CoinGecko, signed Ed25519")
+        m = get_market(["bitcoin", "ethereum"])
+        b, e = m.get("bitcoin", {}), m.get("ethereum", {})
+        if b.get("usd") is None:
+            return tag("price feed tạm offline, thử lại sau nhé.")
+        return tag(f"BTC ${b['usd']}{_fmt_chg(b.get('chg'))} · ETH ${e.get('usd')}{_fmt_chg(e.get('chg'))} (signed Ed25519)")
+    if "!time" in t:
+        return tag(f"UTC {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}")
+    if "!ping" in t:
+        return tag(f"pong — {AGENT_NAME} agent alive & signing every payload.")
     # Mention không kèm lệnh → thử LLM (Gemini/ChatGPT) cho câu trả lời thông minh
     smart = llm_reply(text)
     if smart:
-        return f"[{AGENT_NAME}] @{sender_nick} {smart}"
+        return tag(smart)
     # Fallback template khi không cấu hình LLM hoặc API lỗi
-    return f"[{AGENT_NAME}] @{sender_nick} 👋 mình là {AGENT_NAME}, autonomous Ed25519 agent. Gõ !price !time !ping !help nhé."
+    return tag(f"👋 mình là {AGENT_NAME}, autonomous Ed25519 agent. Gõ !price !market !fear !about nhé.")
+
+
+# Nhiều cách diễn đạt telemetry -> mỗi lần đăng một khác (đỡ giống bot lặp máy móc)
+TELEMETRY_TEMPLATES = [
+    "Market pulse — BTC ${btc}{bchg}, ETH ${eth}{echg}",
+    "Signed oracle beacon | BTC ${btc}{bchg} · ETH ${eth}{echg}",
+    "Live feed: BTC ${btc}{bchg} · ETH ${eth}{echg} — verified Ed25519",
+    "Crypto snapshot — BTC ${btc}{bchg}, ETH ${eth}{echg}",
+]
 
 
 def broadcast_telemetry(private_key, did):
-    btc, eth = get_prices()
+    m = get_market(["bitcoin", "ethereum"])
+    btc, eth = m.get("bitcoin", {}), m.get("ethereum", {})
     ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    if btc is not None:
-        text = f"[{AGENT_NAME}] Telemetry | BTC:${btc} ETH:${eth} | Time:{ts}"
+    if btc.get("usd") is not None:
+        tpl = TELEMETRY_TEMPLATES[int(time.time() // 60) % len(TELEMETRY_TEMPLATES)]
+        body = tpl.format(btc=btc["usd"], bchg=_fmt_chg(btc.get("chg")),
+                          eth=eth.get("usd"), echg=_fmt_chg(eth.get("chg")))
+        # Thỉnh thoảng đính kèm chỉ số Fear & Greed cho phong phú
+        val, cls = (get_fear_greed() if int(time.time() // 1800) % 3 == 0 else (None, None))
+        if val is not None:
+            body += f" | F&G {val}({cls})"
+        text = f"[{AGENT_NAME}] {body} | {ts}"
     else:
-        text = f"[{AGENT_NAME}] Telemetry | market_active | Time:{ts}"
+        text = f"[{AGENT_NAME}] Telemetry | market feed unavailable | {ts}"
     post_message(private_key, did, text)
     # Lưu status vào Key-Value Store để bất kỳ ai cũng audit được (GET /kv/nguyenvulv/status)
     kv_set("status", text)
