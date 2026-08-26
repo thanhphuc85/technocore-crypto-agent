@@ -8,12 +8,15 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 ROOM = "lobby"
 BASE_URL = "https://technocore.chat"
 
+# --- Agent branding (độc quyền) ---
+AGENT_NAME = "NguyenVuLV"       # tên riêng của agent — hiện trong mọi tin nhắn
+HANDLE = "@nguyenvulv"          # nick để người khác mention agent (viết thường)
+
 # --- Auto-responder config ---
-HANDLE = "@technocore"          # nick thân thiện để người khác mention agent
 MAX_REPLIES = 5                 # giới hạn số câu trả lời mỗi lần chạy (chống spam)
 FETCH_LIMIT = 50                # server trả tối đa 50 tin gần nhất
 STATE_FILE = os.environ.get("STATE_FILE", "state.json")
-UA = "Technocore-Interactive-Agent/2.0"
+UA = f"{AGENT_NAME}-Agent/2.0"
 
 SEED_HEX = os.environ.get("AGENT_PRIVATE_KEY")
 if not SEED_HEX or len(SEED_HEX.strip()) != 64:
@@ -140,25 +143,25 @@ def build_reply(sender_nick: str, text: str) -> str:
     if "!price" in t or "!btc" in t or "!eth" in t:
         btc, eth = get_prices()
         if btc is None:
-            return f"@{sender_nick} price feed tạm offline, thử lại sau nhé."
-        return f"@{sender_nick} BTC:${btc} ETH:${eth} (live via CoinGecko, signed Ed25519)"
+            return f"[{AGENT_NAME}] @{sender_nick} price feed tạm offline, thử lại sau nhé."
+        return f"[{AGENT_NAME}] @{sender_nick} BTC:${btc} ETH:${eth} (live via CoinGecko, signed Ed25519)"
     if "!time" in t:
-        return f"@{sender_nick} UTC {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}"
+        return f"[{AGENT_NAME}] @{sender_nick} UTC {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}"
     if "!ping" in t:
-        return f"@{sender_nick} pong — Technocore agent alive & signing every payload."
+        return f"[{AGENT_NAME}] @{sender_nick} pong — {AGENT_NAME} agent alive & signing every payload."
     if "!help" in t:
-        return f"@{sender_nick} commands: !price · !time · !ping · !help — autonomous Ed25519 agent."
+        return f"[{AGENT_NAME}] @{sender_nick} commands: !price · !time · !ping · !help — autonomous Ed25519 agent."
     # Mention thường, không kèm lệnh
-    return f"@{sender_nick} 👋 mình là Technocore autonomous agent. Gõ !price !time !ping !help nhé."
+    return f"[{AGENT_NAME}] @{sender_nick} 👋 mình là {AGENT_NAME}, autonomous Ed25519 agent. Gõ !price !time !ping !help nhé."
 
 
 def broadcast_telemetry(private_key, did):
     btc, eth = get_prices()
     ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     if btc is not None:
-        text = f"AgentTelemetry | BTC:${btc} ETH:${eth} | Time:{ts}"
+        text = f"[{AGENT_NAME}] Telemetry | BTC:${btc} ETH:${eth} | Time:{ts}"
     else:
-        text = f"AgentTelemetry | market_active | Time:{ts}"
+        text = f"[{AGENT_NAME}] Telemetry | market_active | Time:{ts}"
     post_message(private_key, did, text)
 
 
