@@ -5,6 +5,11 @@ on:
     - cron: '*/30 * * * *'   # mỗi 30 phút
   workflow_dispatch:
 
+# Không cho 2 lần chạy chồng nhau (tránh trả lời trùng)
+concurrency:
+  group: technocore-agent
+  cancel-in-progress: false
+
 jobs:
   run-agent:
     runs-on: ubuntu-latest
@@ -21,7 +26,25 @@ jobs:
           python -m pip install --upgrade pip
           pip install cryptography requests
 
+      # Khôi phục state (cursor last_seq) từ lần chạy trước
+      - name: Restore agent state
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: technocore-state-${{ github.run_id }}
+          restore-keys: |
+            technocore-state-
+
       - name: Run signed agent
         env:
           AGENT_PRIVATE_KEY: ${{ secrets.AGENT_PRIVATE_KEY }}
+          STATE_FILE: state.json
         run: python agent_cron.py
+
+      # Lưu lại state cho lần chạy kế tiếp (key duy nhất theo run_id -> luôn ghi mới)
+      - name: Save agent state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: technocore-state-${{ github.run_id }}
