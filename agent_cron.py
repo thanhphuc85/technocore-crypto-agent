@@ -102,9 +102,13 @@ def load_private_key() -> Ed25519PrivateKey:
     raise ở top-level — nhờ vậy có thể `import agent_cron` làm thư viện (dùng
     các helper sign/post/kv) mà không bắt buộc phải set AGENT_PRIVATE_KEY."""
     seed_hex = (SEED_HEX or "").strip()
-    if len(seed_hex) != 64:
-        raise ValueError("Thiếu AGENT_PRIVATE_KEY (64 hex characters)")
-    return Ed25519PrivateKey.from_private_bytes(bytes.fromhex(seed_hex))
+    try:
+        seed = bytes.fromhex(seed_hex)   # kiểm cả TÍNH HỢP LỆ hex, không chỉ độ dài
+    except ValueError:
+        seed = b""
+    if len(seed) != 32:                  # 32-byte seed = đúng 64 ký tự hex (0-9a-f)
+        raise ValueError("AGENT_PRIVATE_KEY phải là 64 ký tự hex (32-byte Ed25519 seed)")
+    return Ed25519PrivateKey.from_private_bytes(seed)
 
 
 MULTICODEC_ED25519 = b"\xed\x01"
