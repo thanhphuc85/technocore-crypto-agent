@@ -44,6 +44,12 @@ MANIFEST_ROOM = (os.environ.get("MANIFEST_ROOM", "").strip() or ROOM)
 MANIFEST_INTERVAL_H = _env_float("MANIFEST_INTERVAL_HOURS", 6)
 TELEMETRY_INTERVAL_H = _env_float("TELEMETRY_INTERVAL_HOURS", 1)
 
+# --- Trí tuệ (grounding data-live / trí nhớ / cảnh báo biến động) ---
+MEM_TURNS = 3                   # số lượt hội thoại nhớ cho mỗi user
+MEM_MAX_USERS = 40              # trần số user lưu trong bộ nhớ (chống phình state.json)
+MEM_MAX_CHARS = 160             # cắt mỗi câu q/a khi lưu vào bộ nhớ
+ALERT_MOVE_PCT = _env_float("ALERT_MOVE_PCT", 5)   # % biến động BTC/ETH kích hoạt cảnh báo (0 = tắt)
+
 # --- LLM (tùy chọn) — làm câu trả lời tự do "thông minh" hơn ---
 # LLM_PROVIDER: auto | gemini | openai | none. "auto" tự chọn theo key đang có.
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "auto").lower()
@@ -192,6 +198,27 @@ COIN_IDS = {
     "bitcoin": "bitcoin", "ethereum": "ethereum", "solana": "solana",
 }
 
+# CoinGecko id -> Binance symbol (nguồn giá DỰ PHÒNG khi CoinGecko lỗi/thiếu)
+BINANCE_SYMBOLS = {
+    "bitcoin": "BTCUSDT", "ethereum": "ETHUSDT", "solana": "SOLUSDT",
+    "binancecoin": "BNBUSDT", "ripple": "XRPUSDT", "cardano": "ADAUSDT",
+    "dogecoin": "DOGEUSDT", "tron": "TRXUSDT", "chainlink": "LINKUSDT",
+    "polkadot": "DOTUSDT", "cosmos": "ATOMUSDT", "near": "NEARUSDT",
+    "avalanche-2": "AVAXUSDT",
+}
+
+
+def _build_id_to_sym():
+    """coingecko id -> ticker NGẮN để hiển thị (vd 'cardano' -> 'ADA')."""
+    out = {}
+    for tk, cid in COIN_IDS.items():
+        if cid not in out or len(tk) < len(out[cid]):
+            out[cid] = tk                 # ưu tiên key ngắn nhất = ticker
+    return {cid: tk.upper() for cid, tk in out.items()}
+
+
+ID_TO_SYM = _build_id_to_sym()
+
 
 def _fmt_chg(chg) -> str:
     """Định dạng % thay đổi 24h, có dấu +/-."""
@@ -200,8 +227,20 @@ def _fmt_chg(chg) -> str:
     return f" ({'+' if chg >= 0 else ''}{chg:.1f}% 24h)"
 
 
+def _binance_ticker(symbol):
+    """Giá + %24h từ Binance (keyless) cho 1 symbol (vd BTCUSDT). None nếu lỗi."""
+    try:
+        r = requests.get("https://api.binance.com/api/v3/ticker/24hr",
+                         params={"symbol": symbol}, timeout=8)
+        d = r.json()
+        return float(d["lastPrice"]), float(d["priceChangePercent"])
+    except Exception:
+        return None
+
+
 def get_market(ids):
-    """Lấy giá USD + %24h cho danh sách coingecko id. Trả {id: {'usd':.., 'chg':..}}."""
+    """Giá USD + %24h cho danh sách coingecko id. Trả {id: {'usd':.., 'chg':..}}.
+    CoinGecko là nguồn chính; id nào thiếu -> thử Binance dự phòng (đỡ 'feed offline')."""
     try:
         r = requests.get(
             "https://api.coingecko.com/api/v3/simple/price",
@@ -209,10 +248,18 @@ def get_market(ids):
             timeout=8,
         )
         data = r.json()
-        return {i: {"usd": data.get(i, {}).get("usd"),
-                    "chg": data.get(i, {}).get("usd_24h_change")} for i in ids}
     except Exception:
-        return {}
+        data = {}
+    out = {}
+    for i in ids:
+        d = data.get(i, {})
+        usd, chg = d.get("usd"), d.get("usd_24h_change")
+        if usd is None and i in BINANCE_SYMBOLS:      # dự phòng Binance
+            bt = _binance_ticker(BINANCE_SYMBOLS[i])
+            if bt:
+                usd, chg = bt
+        out[i] = {"usd": usd, "chg": chg}
+    return out
 
 
 def get_prices():
@@ -229,6 +276,53 @@ def get_fear_greed():
         return x.get("value"), x.get("value_classification")
     except Exception:
         return None, None
+
+
+def get_top_movers(n=3):
+    """Top gainers 24h trong top-100 market cap (CoinGecko, keyless). List (SYM, %)."""
+    try:
+        r = requests.get(
+            "https://api.coingecko.com/api/v3/coins/markets",
+            params={"vs_currency": "usd", "order": "market_cap_desc",
+                    "per_page": 100, "page": 1, "price_change_percentage": "24h"},
+            timeout=10,
+        )
+        rows = [x for x in r.json() if x.get("price_change_percentage_24h") is not None]
+        rows.sort(key=lambda x: x["price_change_percentage_24h"], reverse=True)
+        return [(x["symbol"].upper(), x["price_change_percentage_24h"]) for x in rows[:n]]
+    except Exception:
+        return []
+
+
+def get_trending(n=4):
+    """Coin đang trending trên CoinGecko (theo lượt tìm). List SYM."""
+    try:
+        r = requests.get("https://api.coingecko.com/api/v3/search/trending", timeout=10)
+        return [c["item"]["symbol"].upper() for c in r.json().get("coins", [])[:n]]
+    except Exception:
+        return []
+
+
+def get_dominance():
+    """Thị phần vốn hóa BTC/ETH (%) — CoinGecko global. Trả (btc%, eth%)."""
+    try:
+        r = requests.get("https://api.coingecko.com/api/v3/global", timeout=10)
+        mc = r.json()["data"]["market_cap_percentage"]
+        return mc.get("btc"), mc.get("eth")
+    except Exception:
+        return None, None
+
+
+def get_eth_gas():
+    """Giá gas ETH (gwei) qua JSON-RPC eth_gasPrice trên node công cộng (keyless)."""
+    for node in ("https://ethereum.publicnode.com", "https://cloudflare-eth.com"):
+        try:
+            r = requests.post(node, json={"jsonrpc": "2.0", "method": "eth_gasPrice",
+                                          "params": [], "id": 1}, timeout=8)
+            return round(int(r.json()["result"], 16) / 1e9, 2)   # wei -> gwei
+        except Exception:
+            continue
+    return None
 
 
 def post_message(private_key, did, text, room=ROOM) -> bool:
@@ -489,13 +583,91 @@ def pick_tone(text: str):
     return "default", f"{LLM_SAFETY}\n{LLM_DEFAULT_TONE[0]}", LLM_DEFAULT_TONE[1]
 
 
-def llm_reply(user_text: str):
-    """Trả về câu trả lời LLM (giọng theo ngữ cảnh), hoặc None nếu không có provider / lỗi."""
+# --- Ngôn ngữ & grounding (data-live) cho LLM ---
+_VI_CHARS = set("ăâđêôơưàảãáạằẳẵắặầẩẫấậèẻẽéẹềểễếệìỉĩíịòỏõóọồổỗốộờởỡớợùủũúụừửữứựỳỷỹýỵ")
+_VI_WORDS = {"gia", "thi", "truong", "sao", "khong", "ban", "minh", "nhe",
+             "duoc", "the", "gi", "vay", "chao", "nghi"}
+
+
+def detect_lang(text: str) -> str:
+    """Đoán ngôn ngữ đơn giản: có dấu tiếng Việt (hoặc >=2 từ VI không dấu) -> 'vi'."""
+    low = text.lower()
+    if any(ch in _VI_CHARS for ch in low):
+        return "vi"
+    toks = set(re.findall(r"\w+", low))
+    return "vi" if len(toks & _VI_WORDS) >= 2 else "en"
+
+
+def extract_coins(text: str, limit: int = 3):
+    """Coin được nhắc trong câu -> list coingecko id (ưu tiên xuất hiện, không trùng)."""
+    ids = []
+    for tok in re.findall(r"[a-z0-9\-]+", text.lower()):
+        cid = COIN_IDS.get(tok)
+        if cid and cid not in ids:
+            ids.append(cid)
+            if len(ids) >= limit:
+                break
+    return ids
+
+
+def build_market_context(extra_ids=None) -> str:
+    """Snapshot thị trường LIVE (BTC/ETH/SOL + coin được nhắc + F&G) để chèn vào
+    prompt LLM -> câu trả lời bám số THẬT thay vì bịa theo kiến thức cũ."""
+    ids = ["bitcoin", "ethereum", "solana"]
+    for i in (extra_ids or []):
+        if i not in ids:
+            ids.append(i)
+    m = get_market(ids)
+    parts = []
+    for i in ids:
+        d = m.get(i, {})
+        if d.get("usd") is not None:
+            parts.append(f"{ID_TO_SYM.get(i, i[:6].upper())} ${d['usd']}{_fmt_chg(d.get('chg'))}")
+    val, cls = get_fear_greed()
+    if val is not None:
+        parts.append(f"Fear&Greed {val}({cls})")
+    if not parts:
+        return ""
+    return f"LIVE MARKET DATA ({time.strftime('%H:%MZ', time.gmtime())}): " + " · ".join(parts)
+
+
+# --- Trí nhớ hội thoại theo user (lưu trong state.json, persist qua actions/cache) ---
+def mem_get(state, nick):
+    """Vài lượt hội thoại gần nhất với 'nick' (list {q,a}); [] nếu không có state."""
+    if not state or not nick:
+        return []
+    return (state.get("mem") or {}).get(nick, [])
+
+
+def mem_add(state, nick, q, a):
+    """Ghi thêm 1 lượt vào bộ nhớ của 'nick', giữ N lượt gần nhất & trần số user."""
+    if state is None or not nick:
+        return
+    mem = state.setdefault("mem", {})
+    turns = mem.get(nick, [])
+    turns.append({"q": q[:MEM_MAX_CHARS], "a": a[:MEM_MAX_CHARS]})
+    mem[nick] = turns[-MEM_TURNS:]                    # giữ N lượt gần nhất
+    if len(mem) > MEM_MAX_USERS:                      # chống phình: bỏ user cũ nhất
+        for k in list(mem.keys())[:len(mem) - MEM_MAX_USERS]:
+            mem.pop(k, None)
+
+
+def llm_reply(user_text: str, sender_nick=None, state=None):
+    """Câu trả lời LLM THÔNG MINH: bám data-live (grounding) + nhớ hội thoại của
+    user + đáp đúng ngôn ngữ. Trả None nếu không có provider hoặc lỗi."""
     provider = _active_provider()
     if not provider:
         return None
-    tone, system, temperature = pick_tone(user_text)    # đổi giọng theo ngữ cảnh
-    prompt = isolate_for_llm(user_text)                 # cô lập + bọc delimiter
+    tone, system, temperature = pick_tone(user_text)          # giọng theo ngữ cảnh
+    lang = detect_lang(user_text)                             # trả lời đúng ngôn ngữ
+    system += "\nReply in Vietnamese." if lang == "vi" else "\nReply in English."
+    ctx = build_market_context(extract_coins(user_text))      # chèn giá live -> hết bịa số
+    history = mem_get(state, sender_nick)                     # trí nhớ theo user
+    hist_txt = ""
+    if history:
+        hist_txt = ("Recent conversation with this user (oldest first):\n"
+                    + "\n".join(f"- user: {h['q']}\n  you: {h['a']}" for h in history) + "\n\n")
+    prompt = (f"{ctx}\n\n" if ctx else "") + hist_txt + isolate_for_llm(user_text)
     try:
         raw = (_gemini_reply(prompt, system, temperature) if provider == "gemini"
                else _openai_reply(prompt, system, temperature))
@@ -505,14 +677,17 @@ def llm_reply(user_text: str):
     text = guard_output(" ".join((raw or "").split()).strip())   # lọc output
     if not text:
         return None
-    print(f"[llm:{provider}] ok (tone={tone}, temp={temperature})")
-    return text[:LLM_MAX_CHARS]
+    text = text[:LLM_MAX_CHARS]
+    mem_add(state, sender_nick, user_text, text)              # cập nhật trí nhớ
+    print(f"[llm:{provider}] ok (tone={tone}, lang={lang}, grounded={bool(ctx)})")
+    return text
 
 
-def build_reply(sender_nick: str, text: str) -> str:
-    """Sinh câu trả lời từ TEMPLATE cố định.
+def build_reply(sender_nick: str, text: str, state=None) -> str:
+    """Sinh câu trả lời từ TEMPLATE cố định (hoặc LLM cho mention tự do).
     Nội dung tin nhắn là UNTRUSTED — chỉ dùng để khớp từ khóa, không bao giờ
-    để nó điều khiển hành vi hay chèn thẳng vào lệnh."""
+    để nó điều khiển hành vi hay chèn thẳng vào lệnh. `state` (nếu có) dùng cho
+    trí nhớ hội thoại của LLM."""
     sender_nick = safe_nick(sender_nick)       # nick echo lại phải sạch
     t = text.lower()
     tokens = t.split()
@@ -521,8 +696,9 @@ def build_reply(sender_nick: str, text: str) -> str:
         return f"[{AGENT_NAME}] @{sender_nick} {msg}"
 
     if "!help" in t:
-        return tag("commands: !price [coin] · !market · !fear · !time · !ping · !about — "
-                   "or just @mention me a question and I'll answer with AI.")
+        return tag("commands: !price [coin] · !market · !top · !trending · !dominance · "
+                   "!gas · !fear · !time · !ping · !about — or just @mention me a question "
+                   "and I'll answer with live-grounded AI.")
     if "!about" in t:
         return tag(f"I'm {AGENT_NAME}, an autonomous Ed25519 agent: signed oracle telemetry, "
                    "Gemini AI replies, KV store, injection-guarded. Open-source SDK on GitHub.")
@@ -537,6 +713,24 @@ def build_reply(sender_nick: str, text: str) -> str:
         parts = [f"{sym} ${m[cid]['usd']}{_fmt_chg(m[cid].get('chg'))}"
                  for sym, cid in pairs if m.get(cid, {}).get("usd") is not None]
         return tag(" · ".join(parts)) if parts else tag("market feed tạm offline, thử lại sau.")
+    if "!top" in t:
+        movers = get_top_movers(3)
+        if not movers:
+            return tag("top-movers feed tạm offline, thử lại sau.")
+        return tag("Top 24h gainers: " + " · ".join(f"{s} {c:+.1f}%" for s, c in movers)
+                   + " — signed Ed25519")
+    if "!trending" in t:
+        tr = get_trending(5)
+        return tag("Trending now: " + " · ".join(tr)) if tr else tag("trending feed tạm offline.")
+    if "!dominance" in t or "!dom" in t:
+        b, e = get_dominance()
+        if b is None:
+            return tag("dominance feed tạm offline, thử lại sau.")
+        return tag(f"Market dominance — BTC {b:.1f}% · ETH {e:.1f}% (signed Ed25519)")
+    if "!gas" in t:
+        g = get_eth_gas()
+        return tag(f"ETH gas ~{g} gwei (base fee, via public RPC)" if g is not None
+                   else "gas feed tạm offline, thử lại sau.")
     if "!price" in t or "!btc" in t or "!eth" in t:
         # !price <coin> cho bất kỳ đồng nào; !btc/!eth là lối tắt
         sym = "btc" if "!btc" in t else "eth" if "!eth" in t else None
@@ -562,8 +756,8 @@ def build_reply(sender_nick: str, text: str) -> str:
         return tag(f"UTC {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}")
     if "!ping" in t:
         return tag(f"pong — {AGENT_NAME} agent alive & signing every payload.")
-    # Mention không kèm lệnh → thử LLM (Gemini/ChatGPT) cho câu trả lời thông minh
-    smart = llm_reply(text)
+    # Mention không kèm lệnh → LLM: grounding data-live + trí nhớ + đúng ngôn ngữ
+    smart = llm_reply(text, sender_nick=sender_nick, state=state)
     if smart:
         return tag(smart)
     # Fallback template khi không cấu hình LLM hoặc API lỗi
@@ -643,19 +837,20 @@ def auto_respond(private_key, did):
         if replies >= MAX_REPLIES:
             break                         # HẾT QUOTA: dừng, KHÔNG tiến cursor qua tin chưa trả lời
         sender = short_nick(frm) if frm.startswith("did:key:") else "friend"
-        if post_message(private_key, did, build_reply(sender, text)):
+        if post_message(private_key, did, build_reply(sender, text, state=state)):
             replies += 1                  # chỉ tính quota khi post thành công
         cursor = seq                      # đã xét xong tin này (kể cả post lỗi) -> tiến cursor
         time.sleep(0.3)                   # lịch sự, tránh dồn dập
 
     final_cursor = max(cursor or 0, last_seq)
-    save_state({"last_seq": final_cursor})
+    save_state({"last_seq": final_cursor, "mem": state.get("mem", {})})   # lưu cả trí nhớ
     kv_set(private_key, did, "cursor", str(final_cursor))
     print(f"[respond] đã trả lời {replies} tin | cursor -> {final_cursor}")
 
 
 # --- Contribution manifest (proof of contribution, CÓ KÝ) ---
-COMMANDS = ["!price", "!market", "!fear", "!about", "!time", "!ping", "!help"]
+COMMANDS = ["!price", "!market", "!top", "!trending", "!dominance", "!gas",
+            "!fear", "!about", "!time", "!ping", "!help"]
 
 
 def broadcast_manifest(private_key, did):
@@ -691,6 +886,32 @@ def _due(state: dict, key: str, interval_h: float, now: int) -> bool:
     return (now - last) >= int(interval_h * 3600)
 
 
+def check_price_alert(private_key, did, state):
+    """Cảnh báo biến động MẠNH (event-driven, không spam): nếu BTC/ETH đổi
+    >= ALERT_MOVE_PCT% so với mốc lần cảnh báo trước thì đăng 1 alert có ký và
+    reset mốc. Mốc lưu trong state -> chỉ báo 1 lần cho mỗi bước biến động."""
+    m = get_market(["bitcoin", "ethereum"])
+    base = dict(state.get("last_alert_price") or {})
+    hits = []
+    for i, sym in (("bitcoin", "BTC"), ("ethereum", "ETH")):
+        p = m.get(i, {}).get("usd")
+        if p is None:
+            continue
+        prev = base.get(i)
+        if prev is None:
+            base[i] = p                       # lần đầu thấy: đặt mốc, CHƯA cảnh báo
+            continue
+        move = (p - prev) / prev * 100.0
+        if abs(move) >= ALERT_MOVE_PCT:
+            hits.append(f"{sym} {move:+.1f}% → ${p}")
+            base[i] = p                       # reset mốc sau khi cảnh báo
+    if hits:
+        ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        post_message(private_key, did, f"[{AGENT_NAME}] ⚠️ Move alert | {' · '.join(hits)} | {ts}")
+    state["last_alert_price"] = base
+    save_state({"last_alert_price": base})
+
+
 def main():
     private_key = load_private_key()
     did = did_of(private_key)
@@ -715,11 +936,15 @@ def main():
         broadcast_manifest(private_key, did)
         save_state({"last_manifest": now})
 
+    # 1c) Cảnh báo biến động mạnh (chỉ đăng khi vượt ngưỡng -> signal, không spam).
+    if ALERT_MOVE_PCT > 0:
+        check_price_alert(private_key, did, state)
+
     # 2) Câu hỏi nhập tay khi Run workflow (test AI mà không lo firehose)
     if ASK:
         ask = sanitize_input(ASK)
         print(f"[ask] {ask}")
-        post_message(private_key, did, build_reply("you", ask))
+        post_message(private_key, did, build_reply("you", ask, state=state))
 
     # 3) Tương tác 2 chiều: đọc room & trả lời tin gọi đích danh (LUÔN chạy)
     auto_respond(private_key, did)

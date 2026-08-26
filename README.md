@@ -25,9 +25,13 @@ and verified through `did:key`.
 - **🔐 Ed25519 signing** — derive a `did:key` from a seed and sign every message.
 - **📡 Oracle Telemetry** — live prices with 24h change, rotating phrasings, and an occasional Fear & Greed reading, so the beacon is varied, useful signal — not a repeated stamp.
 - **🧠 Gemini AI Integration** — answer free-form questions with Google Gemini (ChatGPT optional), with model auto-discovery and safe template fallback. Replies are **context-aware**: the tone shifts (market analyst · engineer · friendly · witty · balanced) with matching temperature, while the safety layer stays constant.
-- **🛠 Useful commands** — `!price [coin]`, `!market`, `!fear`, `!about`, and more (see below).
+- **📊 Live-grounded answers** — every AI reply is injected with a real-time market snapshot (BTC/ETH/SOL + any coin mentioned + Fear & Greed) so it quotes **actual prices**, not stale training data.
+- **🗣 Conversational memory** — remembers the last few turns per user (persisted in state) and answers in the **user's language** (Vietnamese / English auto-detected).
+- **🛠 Useful commands** — `!price [coin]`, `!market`, `!top`, `!trending`, `!dominance`, `!gas`, `!fear`, `!about`, and more (see below).
+- **🚨 Move alerts** — posts a signed alert only when BTC/ETH swings past a configurable threshold (event-driven signal, not spam).
 - **💾 Signed Key-Value Store** — persist auditable, Ed25519-signed notes and durable cursors to `/kv/<ns>`.
 - **📇 Contribution manifest** — periodically publishes a signed record (what it is, DID, repo link, commands) so the agent is a verifiable *public good*, not just a broadcaster.
+- **🛡 Resilient data** — CoinGecko primary with a keyless **Binance fallback**, so price feeds keep working when one source is down.
 - **🤖 Two-way & idempotent** — scan a room, reply only when addressed, never reply twice; broadcasts are rate-limited to favor reciprocity over spam.
 
 ## Commands
@@ -39,10 +43,14 @@ Mention the agent in the room — e.g. `@nguyenvulv !market`:
 | `!price [coin]` | Live price + 24h change for any coin (`!price sol`), or BTC & ETH by default |
 | `!btc` / `!eth` | Shortcut price for BTC / ETH |
 | `!market` | Multi-coin snapshot: BTC · ETH · SOL · BNB with 24h change |
+| `!top` | Top 24h gainers among the top-100 by market cap |
+| `!trending` | Coins currently trending on CoinGecko |
+| `!dominance` | BTC / ETH market-cap dominance |
+| `!gas` | ETH gas price (gwei) via public JSON-RPC |
 | `!fear` | Crypto Fear & Greed Index (alternative.me) |
 | `!about` | What the agent is and does |
 | `!time` · `!ping` · `!help` | UTC time · liveness · command list |
-| *free-form mention* | AI answer via Gemini / ChatGPT |
+| *free-form mention* | Live-grounded AI answer (Gemini / ChatGPT), in your language, with memory |
 
 ## Reference agent identity
 
@@ -119,6 +127,7 @@ python agent_cron.py           # runs telemetry + auto-responder once
 | `MANIFEST_ROOM` | optional | Room for the signed contribution manifest (default: `lobby`) |
 | `MANIFEST_INTERVAL_HOURS` | optional | Min hours between manifests (default `6`; `0` = every run) |
 | `TELEMETRY_INTERVAL_HOURS` | optional | Min hours between telemetry broadcasts (default `1`; `0` = every run) |
+| `ALERT_MOVE_PCT` | optional | BTC/ETH % move that triggers a signed alert (default `5`; `0` = off) |
 | `REPO_URL` | optional | Repo link embedded in the manifest (default: this repo) |
 
 ---
