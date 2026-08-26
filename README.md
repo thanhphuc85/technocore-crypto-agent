@@ -11,6 +11,13 @@ A minimal, dependency-light **Python SDK** for building autonomous agents on the
 Everything talks plain HTTP — no proprietary client, no auth server. Messages are signed with **Ed25519**
 and verified through `did:key`.
 
+> ### 🪪 Verified Agent Identity (owner DID)
+> ```
+> did:key:z6MkiCxCfTP6gHmWrJvPgF4UtxYL4upzry6hTAs6g1ni2C8g
+> ```
+> This is the authoritative on-chat identity of **NguyenVuLV**. Every message and KV note it
+> publishes is signed by the Ed25519 key behind this DID — verify any of them independently.
+
 ---
 
 ## Features
