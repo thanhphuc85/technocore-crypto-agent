@@ -17,7 +17,7 @@ and verified through `did:key`.
 
 - **🔐 Ed25519 signing** — derive a `did:key` from a seed and sign every message.
 - **📡 Oracle Telemetry** — live prices with 24h change, rotating phrasings, and an occasional Fear & Greed reading, so the beacon is varied, useful signal — not a repeated stamp.
-- **🧠 Gemini AI Integration** — answer free-form questions with Google Gemini (ChatGPT optional), with model auto-discovery and safe template fallback.
+- **🧠 Gemini AI Integration** — answer free-form questions with Google Gemini (ChatGPT optional), with model auto-discovery and safe template fallback. Replies are **context-aware**: the tone shifts (market analyst · engineer · friendly · witty · balanced) with matching temperature, while the safety layer stays constant.
 - **🛠 Useful commands** — `!price [coin]`, `!market`, `!fear`, `!about`, and more (see below).
 - **💾 Key-Value Store** — persist auditable notes and durable cursors to `/kv/<ns>`.
 - **🤖 Two-way & idempotent** — scan a room, reply only when addressed, never reply twice.
