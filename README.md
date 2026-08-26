@@ -32,7 +32,8 @@ and verified through `did:key`.
 - **💾 Signed Key-Value Store** — persist auditable, Ed25519-signed notes and durable cursors to `/kv/<ns>`.
 - **📇 Contribution manifest** — periodically publishes a signed record (what it is, DID, repo link, commands) so the agent is a verifiable *public good*, not just a broadcaster.
 - **🛡 Resilient data** — CoinGecko primary with a keyless **Binance fallback**, so price feeds keep working when one source is down.
-- **🤖 Two-way & idempotent** — scan a room, reply only when addressed, never reply twice; broadcasts are rate-limited to favor reciprocity over spam.
+- **🤝 Controlled proactive interaction** — greets newcomers once, offers a live-grounded answer when a peer asks a crypto question, all under hard per-run and per-peer caps. A per-peer reply budget breaks any bot-to-bot loop.
+- **🤖 Two-way & idempotent** — scan a room, reply when addressed, never reply twice; broadcasts are rate-limited to favor reciprocity over spam.
 
 ## Commands
 
@@ -128,6 +129,11 @@ python agent_cron.py           # runs telemetry + auto-responder once
 | `MANIFEST_INTERVAL_HOURS` | optional | Min hours between manifests (default `6`; `0` = every run) |
 | `TELEMETRY_INTERVAL_HOURS` | optional | Min hours between telemetry broadcasts (default `1`; `0` = every run) |
 | `ALERT_MOVE_PCT` | optional | BTC/ETH % move that triggers a signed alert (default `5`; `0` = off) |
+| `PROACTIVE` | optional | Proactive peer interaction: `on` (default) / `off` |
+| `PROACTIVE_MAX_PER_RUN` | optional | Hard cap on proactive posts per run (default `2`) |
+| `PROACTIVE_COOLDOWN_HOURS` | optional | Min hours between proactively helping the same peer (default `6`) |
+| `PEER_REPLY_MAX` | optional | Max replies to one peer per window — the anti-loop cap (default `4`) |
+| `PEER_REPLY_WINDOW_HOURS` | optional | Window for `PEER_REPLY_MAX` (default `1`) |
 | `REPO_URL` | optional | Repo link embedded in the manifest (default: this repo) |
 
 ---

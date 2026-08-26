@@ -50,6 +50,14 @@ MEM_MAX_USERS = 40              # trần số user lưu trong bộ nhớ (chốn
 MEM_MAX_CHARS = 160             # cắt mỗi câu q/a khi lưu vào bộ nhớ
 ALERT_MOVE_PCT = _env_float("ALERT_MOVE_PCT", 5)   # % biến động BTC/ETH kích hoạt cảnh báo (0 = tắt)
 
+# --- Tương tác agent CHỦ ĐỘNG (có kiểm soát, chống loop) ---
+PROACTIVE = os.environ.get("PROACTIVE", "on").strip().lower() != "off"   # bật/tắt chủ động
+PEER_REPLY_WINDOW_H = _env_float("PEER_REPLY_WINDOW_HOURS", 1)  # cửa sổ đếm reply/peer
+PEER_REPLY_MAX = int(_env_float("PEER_REPLY_MAX", 4))          # TRẦN reply cho 1 peer/cửa sổ -> CHẶN LOOP
+PROACTIVE_MAX_PER_RUN = int(_env_float("PROACTIVE_MAX_PER_RUN", 2))   # trần hành động chủ động/run
+PROACTIVE_COOLDOWN_H = _env_float("PROACTIVE_COOLDOWN_HOURS", 6)      # nghỉ giữa 2 lần chủ động giúp cùng 1 peer
+GREET_MAX_DIDS = 300           # trần số DID đã-chào lưu trong state (chống phình)
+
 # --- LLM (tùy chọn) — làm câu trả lời tự do "thông minh" hơn ---
 # LLM_PROVIDER: auto | gemini | openai | none. "auto" tự chọn theo key đang có.
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "auto").lower()
@@ -818,8 +826,60 @@ def broadcast_telemetry(private_key, did):
     kv_set(private_key, did, "status", text)
 
 
+# --- Tương tác peer: theo dõi để CHẶN LOOP + hành động chủ động có kiểm soát ---
+GREET_WORDS = {"gm", "gn", "hello", "hi", "hey", "yo", "sup", "wagmi", "chao",
+               "chào", "introducing", "ra_mat", "onboard"}
+
+
+def _peer_count(state, did, now, window_h):
+    """Số lần đã tương tác với peer 'did' trong cửa sổ window_h giờ."""
+    win = window_h * 3600
+    return sum(1 for ts in (state.get("peer_log") or {}).get(did, []) if now - ts <= win)
+
+
+def _peer_touch(state, did, now):
+    """Ghi 1 lần tương tác với peer 'did' (dùng chung cho reply lẫn chủ động)."""
+    pl = state.setdefault("peer_log", {})
+    log = [ts for ts in pl.get(did, []) if now - ts <= 24 * 3600][-19:]   # giữ 24h, tối đa 20
+    log.append(now)
+    pl[did] = log
+    if len(pl) > 400:                                    # chống phình: bỏ peer cũ nhất
+        for k in sorted(pl, key=lambda k: pl[k][-1])[:len(pl) - 400]:
+            pl.pop(k, None)
+
+
+def _is_crypto_question(low: str) -> bool:
+    """Câu hỏi crypto rõ ràng (để chủ động giúp) — thận trọng, tránh nhiễu."""
+    asked = ("?" in low) or any(w in low for w in ("bao nhieu", "how much", "giá", "gia "))
+    topical = bool(set(re.findall(r"[a-z0-9\-]+", low)) & set(COIN_IDS)) or \
+        any(w in low for w in ("crypto", "market", "price", "altcoin", "fear", "greed", "dominance"))
+    return asked and topical
+
+
+def proactive_engage(state, frm, text, now, greeted):
+    """Chọn 1 hành động CHỦ ĐỘNG với peer (chào / giúp) hoặc None.
+    Guard: chào 1 lần/DID; giúp có cooldown theo peer. Loop-cap áp riêng ở caller."""
+    nick = short_nick(frm)
+    low = text.lower()
+    toks = set(re.findall(r"\w+", low))
+    # 1) Chào peer MỚI khi họ chào / giới thiệu (đúng 1 lần/DID)
+    if frm not in greeted and ((toks & GREET_WORDS) or "!about" in low or "did:key:" in low):
+        greeted.append(frm)
+        if len(greeted) > GREET_MAX_DIDS:
+            del greeted[:len(greeted) - GREET_MAX_DIDS]
+        return (f"[{AGENT_NAME}] gm {nick} 👋 — signed Ed25519 market agent. "
+                "Hỏi mình !price/!market/!top hay @nguyenvulv bất cứ lúc nào nhé.")
+    # 2) Giúp khi peer hỏi crypto (KHÔNG @mình) — chỉ khi chưa đụng peer này trong cooldown
+    if _peer_count(state, frm, now, PROACTIVE_COOLDOWN_H) == 0 and _is_crypto_question(low):
+        ans = llm_reply(text, sender_nick=nick, state=state) if _active_provider() else None
+        if ans:
+            return f"[{AGENT_NAME}] @{nick} {ans}"
+    return None
+
+
 def auto_respond(private_key, did):
     my_nick = short_nick(did)
+    now = int(time.time())
     state = load_state()
     last_seq = state.get("last_seq")
     # Cursor bền vững qua KV store (dự phòng khi cache GitHub bị xóa)
@@ -844,6 +904,8 @@ def auto_respond(private_key, did):
         return
 
     replies = 0
+    proactive = 0
+    greeted = state.setdefault("greeted", [])
     # Cursor chỉ tiến tới tin đã THỰC SỰ xét. Khi hết quota reply mà vẫn còn tin
     # gọi đích danh chưa trả lời, DỪNG lại tại đó -> lần sau chạy tiếp, không bỏ sót.
     cursor = last_seq
@@ -856,26 +918,42 @@ def auto_respond(private_key, did):
             cursor = seq                  # tin của chính mình (telemetry): coi như đã xét
             continue
         text = sanitize_input(m.get("text", ""))   # cô lập input tại ranh giới ingestion
-        if not is_addressed(text, did, my_nick):
-            cursor = seq                  # không gọi đích danh: đã xét, tiến cursor
-            continue
-        if replies >= MAX_REPLIES:
-            break                         # HẾT QUOTA: dừng, KHÔNG tiến cursor qua tin chưa trả lời
-        sender = short_nick(frm) if frm.startswith("did:key:") else "friend"
+        is_peer = frm.startswith("did:key:")
         try:
-            # Bọc toàn bộ build+post: 1 tin lỗi (API lạ, format...) KHÔNG được
-            # làm sập cả run hay kẹt cursor -> tránh 1 tin độc lặp lại gây DoS.
-            if post_message(private_key, did, build_reply(sender, text, state=state)):
-                replies += 1              # chỉ tính quota khi post thành công
+            if is_addressed(text, did, my_nick):
+                # --- PHẢN HỒI (được gọi đích danh) ---
+                if replies >= MAX_REPLIES:
+                    break                 # HẾT QUOTA: dừng, KHÔNG tiến cursor qua tin chưa trả lời
+                # CHẶN LOOP: giới hạn số lần đối đáp với cùng 1 peer trong cửa sổ
+                # -> 2 bot không thể ping-pong vô tận (reply luôn @mention người gửi).
+                if is_peer and _peer_count(state, frm, now, PEER_REPLY_WINDOW_H) >= PEER_REPLY_MAX:
+                    print(f"[respond] {short_nick(frm)} đạt trần {PEER_REPLY_MAX}/"
+                          f"{PEER_REPLY_WINDOW_H}h -> nghỉ (chống loop)")
+                else:
+                    sender = short_nick(frm) if is_peer else "friend"
+                    if post_message(private_key, did, build_reply(sender, text, state=state)):
+                        replies += 1
+                    if is_peer:
+                        _peer_touch(state, frm, now)
+                    time.sleep(0.3)
+            elif (PROACTIVE and is_peer and proactive < PROACTIVE_MAX_PER_RUN
+                  and _peer_count(state, frm, now, PEER_REPLY_WINDOW_H) < PEER_REPLY_MAX):
+                # --- CHỦ ĐỘNG (không bị gọi) — chào peer mới / giúp hỏi crypto ---
+                msg = proactive_engage(state, frm, text, now, greeted)
+                if msg and post_message(private_key, did, msg):
+                    proactive += 1
+                    _peer_touch(state, frm, now)
+                    time.sleep(0.3)
         except Exception as e:
+            # 1 tin lỗi KHÔNG được làm sập run hay kẹt cursor (chống DoS).
             print(f"[respond] lỗi khi xử lý seq {seq}: {str(e)[:100]}")
         cursor = seq                      # đã xét xong tin này (kể cả lỗi) -> tiến cursor
-        time.sleep(0.3)                   # lịch sự, tránh dồn dập
 
     final_cursor = max(cursor or 0, last_seq)
-    save_state({"last_seq": final_cursor, "mem": state.get("mem", {})})   # lưu cả trí nhớ
+    save_state({"last_seq": final_cursor, "mem": state.get("mem", {}),
+                "greeted": greeted, "peer_log": state.get("peer_log", {})})
     kv_set(private_key, did, "cursor", str(final_cursor))
-    print(f"[respond] đã trả lời {replies} tin | cursor -> {final_cursor}")
+    print(f"[respond] trả lời {replies} tin, chủ động {proactive} | cursor -> {final_cursor}")
 
 
 # --- Contribution manifest (proof of contribution, CÓ KÝ) ---
