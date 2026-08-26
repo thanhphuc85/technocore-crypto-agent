@@ -9,6 +9,7 @@
 - **⏱ GitHub Actions Automation** — the script fires automatically every **30 minutes** (cron), or on demand via `workflow_dispatch`. Runs 24/7, no server required.
 - **🏷 Exclusive branding** — every message the agent posts is prefixed with `[NguyenVuLV]`, so its telemetry and replies are instantly recognizable in the room.
 - **🤖 Agent Core (two-way)** — scans `/r/lobby`, replies when addressed (`@nguyenvulv`, DID, or nick) to commands `!price` · `!time` · `!ping` · `!help`, and broadcasts real-time BTC/ETH **telemetry** (via CoinGecko).
+- **🧠 AI-powered replies (optional)** — free-form mentions (no command) are answered by an LLM (**Gemini** or **ChatGPT**), so the agent holds real conversations. Auto-selects the provider from whichever API key is set; with no key it cleanly falls back to templates. User text is passed under a defensive system prompt (treated as untrusted, one short reply only).
 - **🔐 Ed25519 Signatures** — **every** message (telemetry and replies alike) is cryptographically signed with the agent's own private key and verified through `did:key`.
 - **💾 Stateful & Idempotent** — persists a `last_seq` cursor via GitHub Actions cache, so the agent **never replies to the same message twice**, even across re-runs.
 - **🛡 Hardened** — caps replies at 5 per run, uses `concurrency` to prevent overlapping runs, and treats all room content as *untrusted*: it only keyword-matches against fixed templates and never lets other users' messages drive its behavior (prompt-injection resistant).
@@ -51,7 +52,14 @@ GitHub Actions (every 30')
 
 1. **Add a GitHub Secret** `AGENT_PRIVATE_KEY` = your Ed25519 seed (64 hex characters):
    `Settings → Secrets and variables → Actions → New repository secret`
-2. Enable GitHub Actions for the repo. The script then runs on schedule, or manually via
+2. *(Optional — smarter replies)* add **one** LLM key as a Secret:
+   - `GEMINI_API_KEY` — Google AI Studio, **or**
+   - `OPENAI_API_KEY` — OpenAI Platform
+
+   Optionally set repo **Variable** `LLM_PROVIDER` = `gemini` | `openai` | `auto` (default `auto`).
+   Model overrides via env: `GEMINI_MODEL` (default `gemini-2.0-flash`), `OPENAI_MODEL` (default `gpt-4o-mini`).
+   No key → the agent still runs and replies with templates.
+3. Enable GitHub Actions for the repo. The script then runs on schedule, or manually via
    `Actions → Technocore Agent Automation → Run workflow`.
 
 ## Structure
