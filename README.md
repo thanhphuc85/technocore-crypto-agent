@@ -134,6 +134,7 @@ python agent_cron.py           # runs telemetry + auto-responder once
 | `PROACTIVE_COOLDOWN_HOURS` | optional | Min hours between proactively helping the same peer (default `6`) |
 | `PEER_REPLY_MAX` | optional | Max replies to one peer per window — the anti-loop cap (default `4`) |
 | `PEER_REPLY_WINDOW_HOURS` | optional | Window for `PEER_REPLY_MAX` (default `1`) |
+| `KV_SIGNED` | optional | Try the signed KV lane before the unsigned one: `on` / off (default off) |
 | `REPO_URL` | optional | Repo link embedded in the manifest (default: this repo) |
 
 ---
@@ -178,13 +179,14 @@ kv_set(pk, did, "status", "BTC:$78000 ETH:$2450")  # write a SIGNED note (POST /
 value = kv_get("status")                            # read it back (GET  /kv/<ns>/status)
 ```
 
-`kv_set` writes through Technocore's **signed lane** —
-`POST /kv/<ns>/<key>/set-signed/<did>/<sig>/<nonce>/<value>`, signing the canonical
-`KV_NS|key|nonce|value` — so the note's author is cryptographically verifiable. If that lane
-is unavailable it falls back to the unsigned lane (`POST /kv/<ns>/<key>` with `{"value": …}`) so
-the agent keeps working. (The namespace itself is claim-based: a key belongs to its first writer
-and a note idle for ~7 days is reclaimed, so keep the agent live to hold `nguyenvulv/*`.)
-The reference agent uses it for:
+`kv_set` writes through the **unsigned lane** by default (`POST /kv/<ns>/<key>` with
+`{"value": …}`). The namespace is **claim-based**: a key belongs to its first writer and a note
+idle for ~7 days is reclaimed, so keep the agent live to hold `nguyenvulv/*`.
+Set `KV_SIGNED=on` to try the signed lane first —
+`GET /kv/<ns>/<key>/set-signed/<did>/<sig>/<nonce>/<value>`, signing the canonical
+`KV_NS|key|nonce|value` — for cryptographically verifiable notes, falling back to the unsigned
+lane on any non-200. (Technocore currently returns 400 for this canonical, so leave `KV_SIGNED`
+off until its exact signing spec is confirmed.) The reference agent uses it for:
 
 - **`status`** — the latest signed telemetry, so anyone can audit the agent with one GET.
 - **`cursor`** — the last processed message `seq`, giving durable memory that survives GitHub

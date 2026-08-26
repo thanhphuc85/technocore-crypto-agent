@@ -15,6 +15,9 @@ BASE_URL = "https://technocore.chat"
 AGENT_NAME = "NguyenVuLV"       # tên riêng của agent — hiện trong mọi tin nhắn
 HANDLE = "@nguyenvulv"          # nick để người khác mention agent (viết thường)
 KV_NS = "nguyenvulv"            # namespace Key-Value Store trên /kv/<ns> (server-side)
+# Thử lane KÝ khi ghi KV (mặc định tắt — server hiện chưa nhận canonical suy đoán,
+# lane unsigned + claim-namespace đã đủ). Bật KV_SIGNED=on khi có spec ký chính xác.
+KV_SIGNED = os.environ.get("KV_SIGNED", "").strip().lower() == "on"
 
 # --- Auto-responder config ---
 MAX_REPLIES = 5                 # giới hạn số câu trả lời mỗi lần chạy (chống spam)
@@ -390,31 +393,31 @@ def fetch_messages(since=None):
 
 # --- Key-Value Store (NOTES) trên server: /kv/<ns>/<key> ---
 def kv_set(private_key, did, key: str, value: str) -> bool:
-    """Ghi note qua LANE CÓ KÝ của Technocore:
-        POST /kv/<ns>/<key>/set-signed/<did>/<sig>/<nonce>/<value>
-    canonical = KV_NS|key|nonce|value. Đây là lane server THỰC SỰ verify chữ ký,
-    nên note chứng minh được chủ sở hữu (không phải lane unsigned /kv/<ns>/<key>
-    mà ai cũng ghi đè & extra field bị bỏ). Value được sweep (không cắt) trước khi ký
-    để chữ ký khớp đúng nội dung. Nếu lane ký lỗi/không hỗ trợ -> fallback lane
-    unsigned để cursor/status vẫn ghi được (agent không chết)."""
+    """Ghi note vào KV store.
+    MẶC ĐỊNH đi lane unsigned `POST /kv/<ns>/<key>` (server bảo mật KV bằng CLAIM
+    namespace: ai ghi trước sở hữu, note idle 7 ngày bị thu hồi — không verify chữ ký).
+    Đặt KV_SIGNED=on để thử lane ký `GET /kv/<ns>/<key>/set-signed/<did>/<sig>/<nonce>/<value>`
+    (canonical KV_NS|key|nonce|value) — server hiện trả 400 cho định dạng này, nên chỉ
+    bật khi đã có spec ký chính xác của technocore. Value được sweep (không cắt) trước."""
     value = sweep_for_sign(value)
-    nonce = next_nonce()
-    canonical = f"{KV_NS}|{key}|{nonce}|{value}"
-    sig = sign_message(private_key, canonical)
-    signed_url = (
-        f"{BASE_URL}/kv/{KV_NS}/{key}/set-signed/"
-        f"{quote(did, safe='')}/{quote(sig, safe='')}/{nonce}/{quote(value, safe='')}"
-    )
-    try:
-        # Lane ký dùng GET (value nằm trong URL path); server trả 405 nếu POST.
-        r = requests.get(signed_url, headers={"User-Agent": UA}, timeout=10)
-        if r.status_code == 200:
-            print(f"[kv] set-signed {KV_NS}/{key} -> 200")
-            return True
-        print(f"[kv] set-signed {KV_NS}/{key} -> {r.status_code}, thử lane unsigned")
-    except requests.RequestException as e:
-        print(f"[kv] set-signed failed | {e}, thử lane unsigned")
-    # Fallback: lane unsigned (đảm bảo agent vẫn hoạt động dù lane ký chưa dùng được)
+    # (1) Lane ký — TÙY CHỌN (mặc định tắt vì server chưa nhận canonical suy đoán).
+    if KV_SIGNED:
+        nonce = next_nonce()
+        canonical = f"{KV_NS}|{key}|{nonce}|{value}"
+        sig = sign_message(private_key, canonical)
+        signed_url = (
+            f"{BASE_URL}/kv/{KV_NS}/{key}/set-signed/"
+            f"{quote(did, safe='')}/{quote(sig, safe='')}/{nonce}/{quote(value, safe='')}"
+        )
+        try:
+            r = requests.get(signed_url, headers={"User-Agent": UA}, timeout=10)
+            if r.status_code == 200:
+                print(f"[kv] set-signed {KV_NS}/{key} -> 200")
+                return True
+            print(f"[kv] set-signed {KV_NS}/{key} -> {r.status_code}, thử lane unsigned")
+        except requests.RequestException as e:
+            print(f"[kv] set-signed failed | {e}, thử lane unsigned")
+    # (2) Lane unsigned — mặc định (claim-based). Ghi thẳng, không request thừa.
     try:
         r = requests.post(
             f"{BASE_URL}/kv/{KV_NS}/{key}",
@@ -422,7 +425,7 @@ def kv_set(private_key, did, key: str, value: str) -> bool:
             headers={"User-Agent": UA, "Content-Type": "application/json"},
             timeout=10,
         )
-        print(f"[kv] set(unsigned) {KV_NS}/{key} -> {r.status_code}")
+        print(f"[kv] set {KV_NS}/{key} -> {r.status_code}")
         return r.status_code == 200
     except requests.RequestException as e:
         print(f"[kv] set failed | {e}")
