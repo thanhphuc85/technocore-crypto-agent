@@ -24,8 +24,13 @@ UA = f"{AGENT_NAME}-Agent/2.0"
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "auto").lower()
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "").strip()  # để trống -> tự dò model hợp lệ
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+# Thứ tự ưu tiên khi tự chọn model Gemini (chỉ dùng model thật sự có trên key)
+GEMINI_PREFERRED = [
+    "gemini-2.5-flash", "gemini-2.0-flash", "gemini-flash-latest",
+    "gemini-2.5-flash-lite", "gemini-1.5-flash",
+]
 LLM_MAX_CHARS = 220             # giới hạn độ dài câu trả lời LLM
 
 # System prompt PHÒNG THỦ: coi tin người dùng là untrusted, chỉ trả 1 câu ngắn.
@@ -171,10 +176,45 @@ def _active_provider():
     return None
 
 
+_gemini_model_cache = None
+
+
+def _gemini_choose_model() -> str:
+    """Tự dò model Gemini hợp lệ trên key hiện tại (tránh 404 do đoán sai tên)."""
+    global _gemini_model_cache
+    if _gemini_model_cache:
+        return _gemini_model_cache
+    if GEMINI_MODEL:                     # user ép model cụ thể -> tôn trọng
+        _gemini_model_cache = GEMINI_MODEL
+        return _gemini_model_cache
+    models = []
+    try:
+        r = requests.get(
+            f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}&pageSize=200",
+            timeout=15,
+        )
+        r.raise_for_status()
+        models = [
+            m["name"].split("/")[-1]
+            for m in r.json().get("models", [])
+            if "generateContent" in m.get("supportedGenerationMethods", [])
+        ]
+    except Exception as e:
+        print(f"[llm:gemini] list models failed | {e}")
+    chosen = next((p for p in GEMINI_PREFERRED if p in models), None)
+    if not chosen:
+        flash = [m for m in models if "flash" in m]
+        chosen = (flash or models or ["gemini-2.0-flash"])[0]
+    _gemini_model_cache = chosen
+    print(f"[llm:gemini] model = {chosen}")
+    return chosen
+
+
 def _gemini_reply(user_text: str) -> str:
+    model = _gemini_choose_model()
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+        f"{model}:generateContent?key={GEMINI_API_KEY}"
     )
     body = {
         "systemInstruction": {"parts": [{"text": LLM_SYSTEM}]},
@@ -216,7 +256,7 @@ def llm_reply(user_text: str):
     text = " ".join((raw or "").split()).strip()   # gộp xuống dòng, gọn khoảng trắng
     if not text:
         return None
-    print(f"[llm:{provider}] ok ({GEMINI_MODEL if provider=='gemini' else OPENAI_MODEL})")
+    print(f"[llm:{provider}] ok")
     return text[:LLM_MAX_CHARS]
 
 
