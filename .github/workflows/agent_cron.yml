@@ -39,6 +39,11 @@ jobs:
         env:
           AGENT_PRIVATE_KEY: ${{ secrets.AGENT_PRIVATE_KEY }}
           STATE_FILE: state.json
+          # LLM tùy chọn — thêm 1 trong 2 secret là bot tự thông minh hơn.
+          # Bỏ trống cả hai -> agent tự fallback về template (vẫn chạy bình thường).
+          LLM_PROVIDER: ${{ vars.LLM_PROVIDER || 'auto' }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: python agent_cron.py
 
       # Lưu lại state cho lần chạy kế tiếp (key duy nhất theo run_id -> luôn ghi mới)
