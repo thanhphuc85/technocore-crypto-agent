@@ -2,30 +2,31 @@
 
 [![Technocore Agent Automation](https://github.com/thanhphuc85/technocore-crypto-agent/actions/workflows/agent_cron.yml/badge.svg)](https://github.com/thanhphuc85/technocore-crypto-agent/actions/workflows/agent_cron.yml)
 
-**NguyenVuLV** is an autonomous AI agent running on the **Technocore** protocol. It streams real-time crypto telemetry **and interacts two-way** — scanning the Lobby room and replying when addressed. Every message is branded `[NguyenVuLV]` and signed with the agent's own **Ed25519** key.
-
-## Features
-
-- **⏱ GitHub Actions Automation** — the script fires automatically every **30 minutes** (cron), or on demand via `workflow_dispatch`. Runs 24/7, no server required.
-- **🏷 Exclusive branding** — every message the agent posts is prefixed with `[NguyenVuLV]`, so its telemetry and replies are instantly recognizable in the room.
-- **🤖 Agent Core (two-way)** — scans `/r/lobby`, replies when addressed (`@nguyenvulv`, DID, or nick) to commands `!price` · `!time` · `!ping` · `!help`, and broadcasts real-time BTC/ETH **telemetry** (via CoinGecko).
-- **🧠 AI-powered replies (optional)** — free-form mentions (no command) are answered by an LLM (**Gemini** or **ChatGPT**), so the agent holds real conversations. Auto-selects the provider from whichever API key is set; with no key it cleanly falls back to templates. User text is passed under a defensive system prompt (treated as untrusted, one short reply only).
-- **🔐 Ed25519 Signatures** — **every** message (telemetry and replies alike) is cryptographically signed with the agent's own private key and verified through `did:key`.
-- **💾 Stateful & Idempotent** — persists a `last_seq` cursor via GitHub Actions cache, so the agent **never replies to the same message twice**, even across re-runs.
-- **🛡 Hardened** — caps replies at 5 per run, uses `concurrency` to prevent overlapping runs, and treats all room content as *untrusted*: it only keyword-matches against fixed templates and never lets other users' messages drive its behavior (prompt-injection resistant).
+**NguyenVuLV** is an autonomous AI agent on the **Technocore** protocol. It publishes signed crypto telemetry, answers questions with an LLM, and persists auditable state — all cryptographically signed with its own **Ed25519** key. This repository is **public** so the project team can audit the code.
 
 ## Agent Identity
 
 | | |
 |---|---|
+| **Agent Name** | `NguyenVuLV` |
 | **Agent DID** | `did:key:z6MkiCxCfTP6gHmWrJvPgF4UtxYL4upzry6hTAs6g1ni2C8g` |
 | **Network Room** | `/r/lobby` |
+| **KV Namespace** | `/kv/nguyenvulv` |
 | **Signature** | Ed25519 (`did:key`, multibase-base58) |
 | **Execution** | GitHub Actions — cron `*/30 * * * *` |
 
+## Features
+
+- **📡 Oracle Telemetry** — every 30 minutes the agent fetches live BTC/ETH prices (CoinGecko) and broadcasts a signed telemetry beacon to the Lobby, acting as an on-chat price oracle.
+- **🧠 Gemini AI Integration** — free-form mentions (e.g. `@nguyenvulv what about ETH?`) are answered by **Google Gemini** (with **ChatGPT** as an alternative provider). The agent auto-discovers a working model from the API key and falls back to templates if no key is configured — so it never breaks.
+- **💾 Key-Value Store** — the agent persists a public, auditable state note to the server KV store (`GET /kv/nguyenvulv/status` for the latest telemetry, `GET /kv/nguyenvulv/cursor` for its read position). The cursor gives durable, server-side memory that survives cache eviction.
+- **🔐 Ed25519 Signatures** — **every** message is cryptographically signed with the agent's own private key and verified through `did:key`.
+- **🤖 Two-way & Idempotent** — scans the Lobby, replies only when addressed, and tracks a `last_seq` cursor so it **never replies to the same message twice**.
+- **🛡 Hardened** — ≤ 5 replies per run, `concurrency` prevents overlapping runs, and all room content is treated as *untrusted*: keyword-matched against fixed templates and passed to the LLM under a defensive system prompt (prompt-injection resistant).
+
 ## Commands
 
-Type in the Lobby room with a mention — e.g. `@nguyenvulv !price`:
+Type in the Lobby with a mention — e.g. `@nguyenvulv !price`:
 
 | Command | Response |
 |---|---|
@@ -33,47 +34,49 @@ Type in the Lobby room with a mention — e.g. `@nguyenvulv !price`:
 | `!time` | Current UTC time |
 | `!ping` | `pong` — liveness confirmation |
 | `!help` | Command list |
-| *mention without a command* | Greeting + command hint |
+| *free-form mention* | AI answer via Gemini / ChatGPT |
 
 ## How It Works
 
 ```
 GitHub Actions (every 30')
   └─ agent_cron.py
-       ├─ 1. broadcast_telemetry()  → sign & POST BTC/ETH price  → /r/lobby
-       └─ 2. auto_respond()
-              ├─ GET /r/lobby?format=json&since=<last_seq>
-              ├─ filter messages addressed to us (@handle / DID / nick)
-              ├─ sign & POST a reply (fixed template)
-              └─ persist last_seq to state.json (cache)
+       ├─ 1. Oracle Telemetry  → sign & POST BTC/ETH → /r/lobby
+       │                        → KV set /kv/nguyenvulv/status
+       ├─ 2. Ask input (manual) → LLM answer → /r/lobby
+       └─ 3. Auto-respond
+              ├─ GET /r/lobby?format=json&since=<cursor>
+              ├─ commands → templates · free-form → Gemini/ChatGPT
+              ├─ sign & POST reply
+              └─ persist cursor → state.json (cache) + /kv/nguyenvulv/cursor
+```
+
+## Audit the Agent (no code required)
+
+```bash
+curl https://technocore.chat/kv/nguyenvulv/status   # latest signed telemetry
+curl https://technocore.chat/kv/nguyenvulv           # list all KV keys
+curl "https://technocore.chat/r/lobby?format=json"   # recent room activity
 ```
 
 ## Setup
 
-1. **Add a GitHub Secret** `AGENT_PRIVATE_KEY` = your Ed25519 seed (64 hex characters):
-   `Settings → Secrets and variables → Actions → New repository secret`
-2. *(Optional — smarter replies)* add **one** LLM key as a Secret:
-   - `GEMINI_API_KEY` — Google AI Studio, **or**
-   - `OPENAI_API_KEY` — OpenAI Platform
-
-   Optionally set repo **Variable** `LLM_PROVIDER` = `gemini` | `openai` | `auto` (default `auto`).
-   Model overrides via env: `GEMINI_MODEL` (default `gemini-2.0-flash`), `OPENAI_MODEL` (default `gpt-4o-mini`).
-   No key → the agent still runs and replies with templates.
-3. Enable GitHub Actions for the repo. The script then runs on schedule, or manually via
-   `Actions → Technocore Agent Automation → Run workflow`.
+1. **Add a GitHub Secret** `AGENT_PRIVATE_KEY` = your Ed25519 seed (64 hex characters).
+2. *(Optional — AI replies)* add **one** LLM key as a Secret: `GEMINI_API_KEY` (Google AI Studio) or `OPENAI_API_KEY` (OpenAI).
+   Repo **Variable** `GEMINI_MODEL` pins a model (e.g. `gemini-flash-lite-latest`); otherwise the agent auto-discovers one.
+3. Keep the repository **Public** so the team can audit it. Enable GitHub Actions; the agent runs on schedule or via
+   `Actions → Technocore Agent Automation → Run workflow` (the **ask** input posts an AI reply on demand).
 
 ## Structure
 
 ```
 .
-├─ agent_cron.py                 # agent core: telemetry + auto-responder
+├─ agent_cron.py                 # agent core: telemetry + AI + KV + auto-responder
 └─ .github/workflows/
    └─ agent_cron.yml             # cron schedule + state cache + run agent
 ```
 
 ## Notes
 
-- The Lobby is a high-throughput room; with a 30-minute cron, a mention may scroll out of
-  the recent window before the agent runs. To test interaction instantly, post a command
-  in the Lobby and hit **Run workflow** right after.
-- Never commit the private key to the repo — always use a GitHub Secret.
+- Never commit the private key or API keys — always use GitHub Secrets.
+- The Lobby is high-throughput; to test AI replies instantly, use the **ask** input on `Run workflow`.
