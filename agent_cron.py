@@ -22,6 +22,28 @@ ASK = os.environ.get("ASK", "").strip()  # câu hỏi nhập tay khi Run workflo
 STATE_FILE = os.environ.get("STATE_FILE", "state.json")
 UA = f"{AGENT_NAME}-Agent/2.0"
 
+# --- Contribution / anti-spam config ---
+def _env_float(name: str, default: float) -> float:
+    """Đọc env dạng số (giờ) AN TOÀN: rỗng hoặc sai định dạng -> default,
+    KHÔNG để một biến cấu hình gõ nhầm làm crash agent lúc import."""
+    raw = os.environ.get(name, "").strip()
+    try:
+        return float(raw) if raw else float(default)
+    except ValueError:
+        print(f"[config] {name}={raw!r} không hợp lệ, dùng mặc định {default}")
+        return float(default)
+
+
+REPO_URL = os.environ.get(
+    "REPO_URL", "https://github.com/thanhphuc85/technocore-crypto-agent"
+).strip()
+# Room để đăng "contribution manifest" (đây là tool gì, giúp ai, link, DID).
+# Mặc định = ROOM (lobby). Đặt MANIFEST_ROOM=technocore khi đã xác nhận room tồn tại.
+MANIFEST_ROOM = (os.environ.get("MANIFEST_ROOM", "").strip() or ROOM)
+# Khoảng tối thiểu (giờ) giữa 2 lần đăng — thưa broadcast, ưu tiên reciprocity.
+MANIFEST_INTERVAL_H = _env_float("MANIFEST_INTERVAL_HOURS", 6)
+TELEMETRY_INTERVAL_H = _env_float("TELEMETRY_INTERVAL_HOURS", 1)
+
 # --- LLM (tùy chọn) — làm câu trả lời tự do "thông minh" hơn ---
 # LLM_PROVIDER: auto | gemini | openai | none. "auto" tự chọn theo key đang có.
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "auto").lower()
@@ -137,9 +159,13 @@ def load_state() -> dict:
 
 
 def save_state(state: dict) -> None:
+    """Ghi state kiểu MERGE: gộp với nội dung cũ thay vì ghi đè, để các khóa
+    độc lập (last_seq cursor, last_telemetry, last_manifest) không xoá lẫn nhau."""
     try:
+        merged = load_state()
+        merged.update(state)
         with open(STATE_FILE, "w") as f:
-            json.dump(state, f)
+            json.dump(merged, f)
     except Exception as e:
         print(f"[state] không lưu được: {e}")
 
@@ -205,17 +231,17 @@ def get_fear_greed():
         return None, None
 
 
-def post_message(private_key, did, text) -> bool:
+def post_message(private_key, did, text, room=ROOM) -> bool:
     text = sanitize_input(text)          # quét sạch (control/bidi/zero-width) TRƯỚC khi ký
     nonce = next_nonce()
-    to_sign = f"{ROOM}|{nonce}|{text}"
+    to_sign = f"{room}|{nonce}|{text}"   # canonical ký theo ĐÚNG room sẽ đăng
     sig = sign_message(private_key, to_sign)
     payload = {"did": did, "sig": sig, "nonce": nonce, "text": text}
     headers = {"User-Agent": UA, "Content-Type": "application/json"}
     try:
-        res = requests.post(f"{BASE_URL}/r/{ROOM}", json=payload, headers=headers, timeout=15)
+        res = requests.post(f"{BASE_URL}/r/{room}", json=payload, headers=headers, timeout=15)
         ok = res.status_code == 200
-        print(f"[post] {res.status_code} | {text[:70]}")
+        print(f"[post] {res.status_code} | r/{room} | {text[:60]}")
         return ok
     except requests.RequestException as e:
         # Server lag / mạng lỗi tạm thời: log lại nhưng không fail workflow
@@ -628,13 +654,66 @@ def auto_respond(private_key, did):
     print(f"[respond] đã trả lời {replies} tin | cursor -> {final_cursor}")
 
 
+# --- Contribution manifest (proof of contribution, CÓ KÝ) ---
+COMMANDS = ["!price", "!market", "!fear", "!about", "!time", "!ping", "!help"]
+
+
+def broadcast_manifest(private_key, did):
+    """Đăng 1 'contribution record' CÓ KÝ mô tả TRUNG THỰC: đây là tool gì, giúp
+    ai, link GitHub, DID — và lưu bản audit vào KV note /kv/<ns>/manifest. Đây là
+    'proof of contribution' mà nhiều guide cộng đồng coi trọng hơn broadcast giá."""
+    msg = (
+        f"[{AGENT_NAME}] 🤖 open-source Ed25519 agent SDK — signed telemetry, "
+        f"Gemini AI replies, KV store. Ai cũng chạy/import được: {REPO_URL} "
+        f"| cmds: !price !market !fear !about | DID {did}"
+    )
+    post_message(private_key, did, msg, room=MANIFEST_ROOM)
+    manifest = {
+        "agent": AGENT_NAME,
+        "did": did,
+        "repo": REPO_URL,
+        "desc": ("Open-source Ed25519 crypto agent SDK: signed oracle telemetry, "
+                 "context-aware Gemini AI replies, injection-guarded, KV store. "
+                 "Runnable & importable by anyone."),
+        "commands": COMMANDS,
+        "reusable": True,
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    kv_set(private_key, did, "manifest", json.dumps(manifest, ensure_ascii=False))
+
+
+def _due(state: dict, key: str, interval_h: float, now: int) -> bool:
+    """True nếu đã đủ interval_h giờ kể từ lần cuối (hoặc chưa từng chạy)."""
+    try:
+        last = int(state.get(key, 0))
+    except (TypeError, ValueError):
+        last = 0
+    return (now - last) >= int(interval_h * 3600)
+
+
 def main():
     private_key = load_private_key()
     did = did_of(private_key)
     print(f"[agent] DID: {did}")
 
-    # 1) Phát telemetry một chiều (liveness proof — giữ hành vi cũ)
-    broadcast_telemetry(private_key, did)
+    state = load_state()
+    now = int(time.time())
+    # Run thủ công (workflow_dispatch) luôn phát để dễ kiểm chứng.
+    force = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+
+    # 1) Telemetry một chiều — THƯA hơn (tối thiểu TELEMETRY_INTERVAL_H giờ/lần)
+    #    để giảm spam lobby; auto_respond (reciprocity) vẫn chạy mỗi vòng.
+    if force or _due(state, "last_telemetry", TELEMETRY_INTERVAL_H, now):
+        broadcast_telemetry(private_key, did)
+        save_state({"last_telemetry": now})
+    else:
+        print(f"[telemetry] bỏ qua vòng này (tối thiểu {TELEMETRY_INTERVAL_H}h/lần)")
+
+    # 1b) Contribution manifest — LUÔN tôn trọng gate (không force theo dispatch)
+    #     để test AI nhiều lần không đăng lặp manifest, giữ đúng mục tiêu chống spam.
+    if _due(state, "last_manifest", MANIFEST_INTERVAL_H, now):
+        broadcast_manifest(private_key, did)
+        save_state({"last_manifest": now})
 
     # 2) Câu hỏi nhập tay khi Run workflow (test AI mà không lo firehose)
     if ASK:
@@ -642,7 +721,7 @@ def main():
         print(f"[ask] {ask}")
         post_message(private_key, did, build_reply("you", ask))
 
-    # 3) Tương tác 2 chiều: đọc room & trả lời tin gọi đích danh
+    # 3) Tương tác 2 chiều: đọc room & trả lời tin gọi đích danh (LUÔN chạy)
     auto_respond(private_key, did)
 
 
