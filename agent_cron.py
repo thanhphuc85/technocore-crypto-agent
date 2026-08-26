@@ -4,6 +4,7 @@ import time
 import json
 import base64
 import unicodedata
+from urllib.parse import quote
 import requests
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -54,7 +55,7 @@ ALERT_MOVE_PCT = _env_float("ALERT_MOVE_PCT", 5)   # % biến động BTC/ETH k�
 PROACTIVE = os.environ.get("PROACTIVE", "on").strip().lower() != "off"   # bật/tắt chủ động
 PEER_REPLY_WINDOW_H = _env_float("PEER_REPLY_WINDOW_HOURS", 1)  # cửa sổ đếm reply/peer
 PEER_REPLY_MAX = int(_env_float("PEER_REPLY_MAX", 4))          # TRẦN reply cho 1 peer/cửa sổ -> CHẶN LOOP
-PROACTIVE_MAX_PER_RUN = int(_env_float("PROACTIVE_MAX_PER_RUN", 2))   # trần hành động chủ động/run
+PROACTIVE_MAX_PER_RUN = int(_env_float("PROACTIVE_MAX_PER_RUN", 1))   # trần hành động chủ động/run
 PROACTIVE_COOLDOWN_H = _env_float("PROACTIVE_COOLDOWN_HOURS", 6)      # nghỉ giữa 2 lần chủ động giúp cùng 1 peer
 GREET_MAX_DIDS = 300           # trần số DID đã-chào lưu trong state (chống phình)
 
@@ -240,6 +241,7 @@ def _binance_ticker(symbol):
     try:
         r = requests.get("https://api.binance.com/api/v3/ticker/24hr",
                          params={"symbol": symbol}, timeout=8)
+        r.raise_for_status()
         d = r.json()
         return float(d["lastPrice"]), float(d["priceChangePercent"])
     except Exception:
@@ -270,6 +272,7 @@ def get_market(ids):
                         "include_24hr_change": "true"},
                 timeout=8,
             )
+            r.raise_for_status()
             data = r.json()
         except Exception:
             data = {}
@@ -296,7 +299,9 @@ def get_prices():
 def get_fear_greed():
     """Chỉ số Crypto Fear & Greed (alternative.me — miễn phí, không cần key)."""
     try:
-        d = requests.get("https://api.alternative.me/fng/", timeout=8).json()
+        rr = requests.get("https://api.alternative.me/fng/", timeout=8)
+        rr.raise_for_status()
+        d = rr.json()
         x = d["data"][0]
         return x.get("value"), x.get("value_classification")
     except Exception:
@@ -312,6 +317,7 @@ def get_top_movers(n=3):
                     "per_page": 100, "page": 1, "price_change_percentage": "24h"},
             timeout=10,
         )
+        r.raise_for_status()
         rows = [x for x in r.json() if x.get("price_change_percentage_24h") is not None]
         rows.sort(key=lambda x: x["price_change_percentage_24h"], reverse=True)
         return [(x["symbol"].upper(), x["price_change_percentage_24h"]) for x in rows[:n]]
@@ -323,6 +329,7 @@ def get_trending(n=4):
     """Coin đang trending trên CoinGecko (theo lượt tìm). List SYM."""
     try:
         r = requests.get("https://api.coingecko.com/api/v3/search/trending", timeout=10)
+        r.raise_for_status()
         return [c["item"]["symbol"].upper() for c in r.json().get("coins", [])[:n]]
     except Exception:
         return []
@@ -332,6 +339,7 @@ def get_dominance():
     """Thị phần vốn hóa BTC/ETH (%) — CoinGecko global. Trả (btc%, eth%)."""
     try:
         r = requests.get("https://api.coingecko.com/api/v3/global", timeout=10)
+        r.raise_for_status()
         mc = r.json()["data"]["market_cap_percentage"]
         return mc.get("btc"), mc.get("eth")
     except Exception:
@@ -344,6 +352,7 @@ def get_eth_gas():
         try:
             r = requests.post(node, json={"jsonrpc": "2.0", "method": "eth_gasPrice",
                                           "params": [], "id": 1}, timeout=8)
+            r.raise_for_status()
             return round(int(r.json()["result"], 16) / 1e9, 2)   # wei -> gwei
         except Exception:
             continue
@@ -351,7 +360,7 @@ def get_eth_gas():
 
 
 def post_message(private_key, did, text, room=ROOM) -> bool:
-    text = sanitize_input(text)          # quét sạch (control/bidi/zero-width) TRƯỚC khi ký
+    text = sweep_for_sign(text)          # quét sạch (control/bidi/zero-width), KHÔNG cắt, TRƯỚC khi ký
     nonce = next_nonce()
     to_sign = f"{room}|{nonce}|{text}"   # canonical ký theo ĐÚNG room sẽ đăng
     sig = sign_message(private_key, to_sign)
@@ -381,23 +390,38 @@ def fetch_messages(since=None):
 
 # --- Key-Value Store (NOTES) trên server: /kv/<ns>/<key> ---
 def kv_set(private_key, did, key: str, value: str) -> bool:
-    """Ghi note vào KV store, KÝ Ed25519 giống message (đúng như README quảng cáo:
-    "mọi KV note đều được ký"). Canonical = KV_NS|key|nonce|value.
-    Các trường did/sig/nonce là phần THÊM VÀO payload: server nào chưa verify sig
-    sẽ bỏ qua chúng (payload {"value":..} cũ vẫn còn), server có verify thì note
-    trở nên chứng minh được chủ sở hữu — chống bất kỳ ai ghi đè /kv/<ns>/<key>."""
+    """Ghi note qua LANE CÓ KÝ của Technocore:
+        POST /kv/<ns>/<key>/set-signed/<did>/<sig>/<nonce>/<value>
+    canonical = KV_NS|key|nonce|value. Đây là lane server THỰC SỰ verify chữ ký,
+    nên note chứng minh được chủ sở hữu (không phải lane unsigned /kv/<ns>/<key>
+    mà ai cũng ghi đè & extra field bị bỏ). Value được sweep (không cắt) trước khi ký
+    để chữ ký khớp đúng nội dung. Nếu lane ký lỗi/không hỗ trợ -> fallback lane
+    unsigned để cursor/status vẫn ghi được (agent không chết)."""
+    value = sweep_for_sign(value)
     nonce = next_nonce()
     canonical = f"{KV_NS}|{key}|{nonce}|{value}"
     sig = sign_message(private_key, canonical)
-    payload = {"value": value, "did": did, "sig": sig, "nonce": nonce}
+    signed_url = (
+        f"{BASE_URL}/kv/{KV_NS}/{key}/set-signed/"
+        f"{quote(did, safe='')}/{quote(sig, safe='')}/{nonce}/{quote(value, safe='')}"
+    )
+    try:
+        r = requests.post(signed_url, headers={"User-Agent": UA}, timeout=10)
+        if r.status_code == 200:
+            print(f"[kv] set-signed {KV_NS}/{key} -> 200")
+            return True
+        print(f"[kv] set-signed {KV_NS}/{key} -> {r.status_code}, thử lane unsigned")
+    except requests.RequestException as e:
+        print(f"[kv] set-signed failed | {e}, thử lane unsigned")
+    # Fallback: lane unsigned (đảm bảo agent vẫn hoạt động dù lane ký chưa dùng được)
     try:
         r = requests.post(
             f"{BASE_URL}/kv/{KV_NS}/{key}",
-            json=payload,
+            json={"value": value},
             headers={"User-Agent": UA, "Content-Type": "application/json"},
             timeout=10,
         )
-        print(f"[kv] set {KV_NS}/{key} -> {r.status_code}")
+        print(f"[kv] set(unsigned) {KV_NS}/{key} -> {r.status_code}")
         return r.status_code == 200
     except requests.RequestException as e:
         print(f"[kv] set failed | {e}")
@@ -433,18 +457,18 @@ _SECRET_PATTERNS = [
 ]
 
 
-def sanitize_input(text: str) -> str:
-    """Cô lập input: thay ký tự điều khiển/ẩn/bidi bằng space, gộp trắng, cắt độ dài."""
+def sweep_for_sign(text: str) -> str:
+    """Quét sạch ký tự điều khiển/ẩn/bidi + gộp trắng cho nội dung ĐI RA (post/KV).
+    KHÔNG cắt độ dài — khác sanitize_input (dùng cho input untrusted, có cắt 500)."""
     if not text:
         return ""
-    out = []
-    for ch in text:
-        # loại C0/C1 control, format chars (zero-width, bidi override), surrogate...
-        if unicodedata.category(ch).startswith("C"):
-            out.append(" ")
-        else:
-            out.append(ch)
-    return " ".join("".join(out).split())[:MAX_INPUT_CHARS]
+    out = [" " if unicodedata.category(ch).startswith("C") else ch for ch in text]
+    return " ".join("".join(out).split())
+
+
+def sanitize_input(text: str) -> str:
+    """Cô lập INPUT untrusted: sweep sạch + CẮT độ dài (MAX_INPUT_CHARS)."""
+    return sweep_for_sign(text)[:MAX_INPUT_CHARS]
 
 
 def isolate_for_llm(user_text: str) -> str:
@@ -480,7 +504,11 @@ def safe_nick(nick: str) -> str:
 def is_addressed(text: str, my_did: str, my_nick: str) -> bool:
     """Chỉ trả lời tin gọi đích danh agent (tránh spam trong room firehose)."""
     t = text.lower()
-    return (HANDLE in t) or (my_did.lower() in t) or (my_nick.lower() in t)
+    if (HANDLE in t) or (my_did.lower() in t):
+        return True
+    # nick chỉ tính khi đứng như 1 TOKEN riêng (tránh khớp nhầm substring)
+    nick = my_nick.lower()
+    return any(tok.strip("@.,:;!?()[]") == nick for tok in t.split())
 
 
 def _active_provider():
@@ -724,50 +752,55 @@ def build_reply(sender_nick: str, text: str, state=None) -> str:
     sender_nick = safe_nick(sender_nick)       # nick echo lại phải sạch
     t = text.lower()
     tokens = t.split()
+    # Lệnh khớp theo TOKEN (bỏ đuôi rác), KHÔNG substring -> "!topic" không kích "!top".
+    cmd = {tok.rstrip("!.,?;:()[]") for tok in tokens if tok.startswith("!")}
+
+    def has(c):
+        return c in cmd
 
     def tag(msg: str) -> str:
         return f"[{AGENT_NAME}] @{sender_nick} {msg}"
 
-    if "!help" in t:
+    if has("!help"):
         return tag("commands: !price [coin] · !market · !top · !trending · !dominance · "
                    "!gas · !fear · !time · !ping · !about — or just @mention me a question "
                    "and I'll answer with live-grounded AI.")
-    if "!about" in t:
+    if has("!about"):
         return tag(f"I'm {AGENT_NAME}, an autonomous Ed25519 agent: signed oracle telemetry, "
                    "Gemini AI replies, KV store, injection-guarded. Open-source SDK on GitHub.")
-    if "!fear" in t:
+    if has("!fear"):
         val, cls = get_fear_greed()
         if val is None:
             return tag("Fear & Greed feed tạm offline, thử lại sau.")
         return tag(f"Crypto Fear & Greed Index: {val}/100 ({cls}) — signed Ed25519")
-    if "!market" in t:
+    if has("!market"):
         pairs = [("BTC", "bitcoin"), ("ETH", "ethereum"), ("SOL", "solana"), ("BNB", "binancecoin")]
         m = get_market([cid for _, cid in pairs])
         parts = [f"{sym} ${m[cid]['usd']}{_fmt_chg(m[cid].get('chg'))}"
                  for sym, cid in pairs if m.get(cid, {}).get("usd") is not None]
         return tag(" · ".join(parts)) if parts else tag("market feed tạm offline, thử lại sau.")
-    if "!top" in t:
+    if has("!top"):
         movers = get_top_movers(3)
         if not movers:
             return tag("top-movers feed tạm offline, thử lại sau.")
         return tag("Top 24h gainers: " + " · ".join(f"{s} {c:+.1f}%" for s, c in movers)
                    + " — signed Ed25519")
-    if "!trending" in t:
+    if has("!trending"):
         tr = get_trending(5)
         return tag("Trending now: " + " · ".join(tr)) if tr else tag("trending feed tạm offline.")
-    if "!dominance" in t or "!dom" in t:
+    if has("!dominance") or has("!dom"):
         b, e = get_dominance()
         if b is None or e is None:
             return tag("dominance feed tạm offline, thử lại sau.")
         return tag(f"Market dominance — BTC {b:.1f}% · ETH {e:.1f}% (signed Ed25519)")
-    if "!gas" in t:
+    if has("!gas"):
         g = get_eth_gas()
         return tag(f"ETH gas ~{g} gwei (base fee, via public RPC)" if g is not None
                    else "gas feed tạm offline, thử lại sau.")
-    if "!price" in t or "!btc" in t or "!eth" in t:
+    if has("!price") or has("!btc") or has("!eth"):
         # !price <coin> cho bất kỳ đồng nào; !btc/!eth là lối tắt
-        sym = "btc" if "!btc" in t else "eth" if "!eth" in t else None
-        if sym is None and "!price" in tokens:
+        sym = "btc" if has("!btc") else "eth" if has("!eth") else None
+        if sym is None and has("!price"):
             # Chỉ đọc ARGUMENT ngay sau "!price", KHÔNG quét cả câu (tránh dính
             # coin nhắc lung tung giữa câu, vd "sol price" hay "@btc-guy").
             i = tokens.index("!price")
@@ -785,9 +818,9 @@ def build_reply(sender_nick: str, text: str, state=None) -> str:
         if b.get("usd") is None:
             return tag("price feed tạm offline, thử lại sau nhé.")
         return tag(f"BTC ${b['usd']}{_fmt_chg(b.get('chg'))} · ETH ${e.get('usd')}{_fmt_chg(e.get('chg'))} (signed Ed25519)")
-    if "!time" in t:
+    if has("!time"):
         return tag(f"UTC {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}")
-    if "!ping" in t:
+    if has("!ping"):
         return tag(f"pong — {AGENT_NAME} agent alive & signing every payload.")
     # Mention không kèm lệnh → LLM: grounding data-live + trí nhớ + đúng ngôn ngữ
     smart = llm_reply(text, sender_nick=sender_nick, state=state)
@@ -862,8 +895,10 @@ def proactive_engage(state, frm, text, now, greeted):
     nick = short_nick(frm)
     low = text.lower()
     toks = set(re.findall(r"\w+", low))
-    # 1) Chào peer MỚI khi họ chào / giới thiệu (đúng 1 lần/DID)
-    if frm not in greeted and ((toks & GREET_WORDS) or "!about" in low or "did:key:" in low):
+    # 1) Chào peer MỚI khi họ THỰC SỰ chào/giới thiệu (đúng 1 lần/DID).
+    #    Chỉ theo từ chào rõ ràng — KHÔNG chào chỉ vì tin có "did:key:" (quá rộng,
+    #    lobby đầy intro kèm DID sẽ thành chào hàng loạt).
+    if frm not in greeted and ((toks & GREET_WORDS) or "!about" in low):
         greeted.append(frm)
         if len(greeted) > GREET_MAX_DIDS:
             del greeted[:len(greeted) - GREET_MAX_DIDS]

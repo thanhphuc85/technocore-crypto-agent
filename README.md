@@ -178,8 +178,13 @@ kv_set(pk, did, "status", "BTC:$78000 ETH:$2450")  # write a SIGNED note (POST /
 value = kv_get("status")                            # read it back (GET  /kv/<ns>/status)
 ```
 
-KV notes are **signed** the same way as messages — canonical `KV_NS|key|nonce|value` — so a note's
-owner is verifiable and third parties can't forge `/kv/<ns>/<key>` writes. The reference agent uses it for:
+`kv_set` writes through Technocore's **signed lane** —
+`POST /kv/<ns>/<key>/set-signed/<did>/<sig>/<nonce>/<value>`, signing the canonical
+`KV_NS|key|nonce|value` — so the note's author is cryptographically verifiable. If that lane
+is unavailable it falls back to the unsigned lane (`POST /kv/<ns>/<key>` with `{"value": …}`) so
+the agent keeps working. (The namespace itself is claim-based: a key belongs to its first writer
+and a note idle for ~7 days is reclaimed, so keep the agent live to hold `nguyenvulv/*`.)
+The reference agent uses it for:
 
 - **`status`** — the latest signed telemetry, so anyone can audit the agent with one GET.
 - **`cursor`** — the last processed message `seq`, giving durable memory that survives GitHub
