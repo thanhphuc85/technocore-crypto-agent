@@ -72,9 +72,22 @@ LLM_TONES = [
 ]
 LLM_DEFAULT_TONE = ("Tone: helpful, concise, and curious.", 0.7)
 
-SEED_HEX = os.environ.get("AGENT_PRIVATE_KEY")
-if not SEED_HEX or len(SEED_HEX.strip()) != 64:
-    raise ValueError("Thiếu AGENT_PRIVATE_KEY (64 hex characters)")
+SEED_HEX = os.environ.get("AGENT_PRIVATE_KEY", "")
+
+
+def load_private_key() -> Ed25519PrivateKey:
+    """Đọc seed từ env & dựng khóa Ed25519. Gọi khi CHẠY (trong main), KHÔNG
+    raise ở top-level — nhờ vậy có thể `import agent_cron` làm thư viện (dùng
+    các helper sign/post/kv) mà không bắt buộc phải set AGENT_PRIVATE_KEY."""
+    seed_hex = (SEED_HEX or "").strip()
+    try:
+        seed = bytes.fromhex(seed_hex)   # kiểm cả TÍNH HỢP LỆ hex, không chỉ độ dài
+    except ValueError:
+        seed = b""
+    if len(seed) != 32:                  # 32-byte seed = đúng 64 ký tự hex (0-9a-f)
+        raise ValueError("AGENT_PRIVATE_KEY phải là 64 ký tự hex (32-byte Ed25519 seed)")
+    return Ed25519PrivateKey.from_private_bytes(seed)
+
 
 MULTICODEC_ED25519 = b"\xed\x01"
 B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
@@ -193,6 +206,7 @@ def get_fear_greed():
 
 
 def post_message(private_key, did, text) -> bool:
+    text = sanitize_input(text)          # quét sạch (control/bidi/zero-width) TRƯỚC khi ký
     nonce = next_nonce()
     to_sign = f"{ROOM}|{nonce}|{text}"
     sig = sign_message(private_key, to_sign)
@@ -221,11 +235,20 @@ def fetch_messages(since=None):
 
 
 # --- Key-Value Store (NOTES) trên server: /kv/<ns>/<key> ---
-def kv_set(key: str, value: str) -> bool:
+def kv_set(private_key, did, key: str, value: str) -> bool:
+    """Ghi note vào KV store, KÝ Ed25519 giống message (đúng như README quảng cáo:
+    "mọi KV note đều được ký"). Canonical = KV_NS|key|nonce|value.
+    Các trường did/sig/nonce là phần THÊM VÀO payload: server nào chưa verify sig
+    sẽ bỏ qua chúng (payload {"value":..} cũ vẫn còn), server có verify thì note
+    trở nên chứng minh được chủ sở hữu — chống bất kỳ ai ghi đè /kv/<ns>/<key>."""
+    nonce = next_nonce()
+    canonical = f"{KV_NS}|{key}|{nonce}|{value}"
+    sig = sign_message(private_key, canonical)
+    payload = {"value": value, "did": did, "sig": sig, "nonce": nonce}
     try:
         r = requests.post(
             f"{BASE_URL}/kv/{KV_NS}/{key}",
-            json={"value": value},
+            json=payload,
             headers={"User-Agent": UA, "Content-Type": "application/json"},
             timeout=10,
         )
@@ -350,8 +373,9 @@ def _gemini_list_models():
 
 def _gemini_candidates():
     """Danh sách model để thử lần lượt, xếp theo độ ưu tiên."""
-    if GEMINI_MODEL:                     # user ép model cụ thể
-        return [GEMINI_MODEL]
+    if GEMINI_MODEL:                     # user ép model cụ thể -> thử trước, NHƯNG
+        # vẫn xếp GEMINI_PREFERRED phía sau làm fallback nếu model ghim fail.
+        return [GEMINI_MODEL] + [p for p in GEMINI_PREFERRED if p != GEMINI_MODEL]
     try:
         models = _gemini_list_models()
     except Exception as e:
@@ -381,21 +405,35 @@ def _gemini_call(model: str, user_text: str, system: str, temperature: float) ->
 
 
 def _gemini_reply(user_text: str, system: str, temperature: float) -> str:
-    """Thử từng model tới khi gọi được (bỏ qua model 404/không phục vụ)."""
+    """Thử model đã cache trước (nhanh, khỏi list lại); nếu FAIL thì LÙI VỀ full
+    danh sách ưu tiên và thử lần lượt — thay vì bỏ cuộc ngay với model đã ghim."""
     global _gemini_model_cache
-    candidates = [_gemini_model_cache] if _gemini_model_cache else _gemini_candidates()
     last_err = None
-    for model in candidates:
+    tried = set()
+
+    # 1) Model đã cache ở lần gọi trước: thử ngay, không cần gọi list models.
+    if _gemini_model_cache:
+        try:
+            return _gemini_call(_gemini_model_cache, user_text, system, temperature)
+        except Exception as e:
+            last_err = e
+            print(f"[llm:gemini] cached {_gemini_model_cache} -> {str(e)[:80]}, fallback")
+            tried.add(_gemini_model_cache)
+            _gemini_model_cache = None
+
+    # 2) Lùi về danh sách ưu tiên (áp dụng cả khi user ghim GEMINI_MODEL nhưng nó fail).
+    for model in _gemini_candidates():
+        if model in tried:
+            continue
         try:
             text = _gemini_call(model, user_text, system, temperature)
-            if _gemini_model_cache != model:
-                print(f"[llm:gemini] model = {model}")
+            print(f"[llm:gemini] model = {model}")
             _gemini_model_cache = model
             return text
         except Exception as e:
             last_err = e
             print(f"[llm:gemini] {model} -> {str(e)[:80]}")
-            _gemini_model_cache = None
+            tried.add(model)
     raise last_err or RuntimeError("no gemini model available")
 
 
@@ -476,8 +514,13 @@ def build_reply(sender_nick: str, text: str) -> str:
     if "!price" in t or "!btc" in t or "!eth" in t:
         # !price <coin> cho bất kỳ đồng nào; !btc/!eth là lối tắt
         sym = "btc" if "!btc" in t else "eth" if "!eth" in t else None
-        if sym is None:
-            sym = next((tok for tok in tokens if tok in COIN_IDS), None)
+        if sym is None and "!price" in tokens:
+            # Chỉ đọc ARGUMENT ngay sau "!price", KHÔNG quét cả câu (tránh dính
+            # coin nhắc lung tung giữa câu, vd "sol price" hay "@btc-guy").
+            i = tokens.index("!price")
+            arg = tokens[i + 1].strip(".,!?;:") if i + 1 < len(tokens) else ""
+            if arg in COIN_IDS:
+                sym = arg
         if sym:
             cid = COIN_IDS[sym]
             d = get_market([cid]).get(cid, {})
@@ -527,7 +570,7 @@ def broadcast_telemetry(private_key, did):
         text = f"[{AGENT_NAME}] Telemetry | market feed unavailable | {ts}"
     post_message(private_key, did, text)
     # Lưu status vào Key-Value Store để bất kỳ ai cũng audit được (GET /kv/nguyenvulv/status)
-    kv_set("status", text)
+    kv_set(private_key, did, "status", text)
 
 
 def auto_respond(private_key, did):
@@ -552,36 +595,41 @@ def auto_respond(private_key, did):
     if last_seq is None:
         print(f"[respond] lần đầu — đặt cursor tại seq {new_last}, bỏ qua backlog.")
         save_state({"last_seq": new_last})
-        kv_set("cursor", str(new_last))
+        kv_set(private_key, did, "cursor", str(new_last))
         return
 
     replies = 0
-    for m in messages:
-        if replies >= MAX_REPLIES:
-            break
+    # Cursor chỉ tiến tới tin đã THỰC SỰ xét. Khi hết quota reply mà vẫn còn tin
+    # gọi đích danh chưa trả lời, DỪNG lại tại đó -> lần sau chạy tiếp, không bỏ sót.
+    cursor = last_seq
+    for m in sorted(messages, key=lambda x: x.get("seq", 0)):   # xét theo thứ tự seq tăng dần
         seq = m.get("seq", 0)
         if seq <= last_seq:
             continue                      # đã xử lý ở lần trước
         frm = m.get("from", "")
         if frm == did:
-            continue                      # bỏ qua tin của chính mình (kể cả telemetry)
+            cursor = seq                  # tin của chính mình (telemetry): coi như đã xét
+            continue
         text = sanitize_input(m.get("text", ""))   # cô lập input tại ranh giới ingestion
         if not is_addressed(text, did, my_nick):
-            continue                      # chỉ trả lời tin gọi đích danh
+            cursor = seq                  # không gọi đích danh: đã xét, tiến cursor
+            continue
+        if replies >= MAX_REPLIES:
+            break                         # HẾT QUOTA: dừng, KHÔNG tiến cursor qua tin chưa trả lời
         sender = short_nick(frm) if frm.startswith("did:key:") else "friend"
         if post_message(private_key, did, build_reply(sender, text)):
-            replies += 1
+            replies += 1                  # chỉ tính quota khi post thành công
+        cursor = seq                      # đã xét xong tin này (kể cả post lỗi) -> tiến cursor
         time.sleep(0.3)                   # lịch sự, tránh dồn dập
 
-    final_cursor = max(new_last or 0, last_seq)
+    final_cursor = max(cursor or 0, last_seq)
     save_state({"last_seq": final_cursor})
-    kv_set("cursor", str(final_cursor))
-    print(f"[respond] đã trả lời {replies} tin | cursor -> {new_last}")
+    kv_set(private_key, did, "cursor", str(final_cursor))
+    print(f"[respond] đã trả lời {replies} tin | cursor -> {final_cursor}")
 
 
 def main():
-    seed = bytes.fromhex(SEED_HEX.strip())
-    private_key = Ed25519PrivateKey.from_private_bytes(seed)
+    private_key = load_private_key()
     did = did_of(private_key)
     print(f"[agent] DID: {did}")
 
