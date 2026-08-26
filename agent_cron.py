@@ -406,7 +406,8 @@ def kv_set(private_key, did, key: str, value: str) -> bool:
         f"{quote(did, safe='')}/{quote(sig, safe='')}/{nonce}/{quote(value, safe='')}"
     )
     try:
-        r = requests.post(signed_url, headers={"User-Agent": UA}, timeout=10)
+        # Lane ký dùng GET (value nằm trong URL path); server trả 405 nếu POST.
+        r = requests.get(signed_url, headers={"User-Agent": UA}, timeout=10)
         if r.status_code == 200:
             print(f"[kv] set-signed {KV_NS}/{key} -> 200")
             return True
