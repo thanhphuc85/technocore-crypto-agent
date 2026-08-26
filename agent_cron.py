@@ -1,4 +1,5 @@
 import os
+import sys
 import re
 import time
 import json
@@ -7,6 +8,29 @@ import unicodedata
 from urllib.parse import quote
 import requests
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+# --- Reachability: đếm số call TỚI technocore.chat trả về thành công trong 1 run.
+# = 0 ở cuối run nghĩa là server không truy cập được (outage toàn phần) -> run nên
+# ĐỎ để lộ ra, thay vì xanh âm thầm. Chỉ đếm host chính, KHÔNG đếm CoinGecko/Binance.
+_server_ok_count = 0
+
+
+def _note_server_ok() -> None:
+    global _server_ok_count
+    _server_ok_count += 1
+
+
+def _write_summary(lines) -> None:
+    """Ghi tóm tắt run vào GitHub Step Summary (nếu có), để thấy nhanh 1 run có
+    thật sự làm được việc không mà không phải mở log."""
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    try:
+        with open(path, "a") as f:
+            f.write("\n".join(lines) + "\n")
+    except Exception as e:
+        print(f"[summary] không ghi được: {e}")
 
 ROOM = "lobby"
 BASE_URL = "https://technocore.chat"
@@ -372,6 +396,8 @@ def post_message(private_key, did, text, room=ROOM) -> bool:
     try:
         res = requests.post(f"{BASE_URL}/r/{room}", json=payload, headers=headers, timeout=15)
         ok = res.status_code == 200
+        if ok:
+            _note_server_ok()
         print(f"[post] {res.status_code} | r/{room} | {text[:60]}")
         return ok
     except requests.RequestException as e:
@@ -385,7 +411,9 @@ def fetch_messages(since=None):
     if since:
         url += f"&since={since}"
     try:
-        return requests.get(url, headers={"User-Agent": UA}, timeout=10).json()
+        data = requests.get(url, headers={"User-Agent": UA}, timeout=10).json()
+        _note_server_ok()
+        return data
     except (requests.RequestException, ValueError) as e:
         print(f"[fetch] request_failed | {e}")
         return None
@@ -426,6 +454,8 @@ def kv_set(private_key, did, key: str, value: str) -> bool:
             timeout=10,
         )
         print(f"[kv] set {KV_NS}/{key} -> {r.status_code}")
+        if r.status_code == 200:
+            _note_server_ok()
         return r.status_code == 200
     except requests.RequestException as e:
         print(f"[kv] set failed | {e}")
@@ -858,9 +888,10 @@ def broadcast_telemetry(private_key, did):
         text = f"[{AGENT_NAME}] {body} | {ts}"
     else:
         text = f"[{AGENT_NAME}] Telemetry | market feed unavailable | {ts}"
-    post_message(private_key, did, text)
+    ok = post_message(private_key, did, text)
     # Lưu status vào Key-Value Store để bất kỳ ai cũng audit được (GET /kv/nguyenvulv/status)
     kv_set(private_key, did, "status", text)
+    return ok            # trả kết quả post -> caller chỉ đóng cổng thời gian khi THÀNH CÔNG
 
 
 # --- Tương tác peer: theo dõi để CHẶN LOOP + hành động chủ động có kiểm soát ---
@@ -931,7 +962,7 @@ def auto_respond(private_key, did):
     data = fetch_messages(since=last_seq)
     if not data or "messages" not in data:
         print("[respond] không lấy được tin, bỏ qua vòng này.")
-        return
+        return 0, 0
     new_last = data.get("last_seq", last_seq)
     messages = data.get("messages", [])
 
@@ -940,7 +971,7 @@ def auto_respond(private_key, did):
         print(f"[respond] lần đầu — đặt cursor tại seq {new_last}, bỏ qua backlog.")
         save_state({"last_seq": new_last})
         kv_set(private_key, did, "cursor", str(new_last))
-        return
+        return 0, 0
 
     replies = 0
     proactive = 0
@@ -993,6 +1024,7 @@ def auto_respond(private_key, did):
                 "greeted": greeted, "peer_log": state.get("peer_log", {})})
     kv_set(private_key, did, "cursor", str(final_cursor))
     print(f"[respond] trả lời {replies} tin, chủ động {proactive} | cursor -> {final_cursor}")
+    return replies, proactive
 
 
 # --- Contribution manifest (proof of contribution, CÓ KÝ) ---
@@ -1009,7 +1041,7 @@ def broadcast_manifest(private_key, did):
         f"Gemini AI replies, KV store. Ai cũng chạy/import được: {REPO_URL} "
         f"| cmds: !price !market !fear !about | DID {did}"
     )
-    post_message(private_key, did, msg, room=MANIFEST_ROOM)
+    ok = post_message(private_key, did, msg, room=MANIFEST_ROOM)
     manifest = {
         "agent": AGENT_NAME,
         "did": did,
@@ -1022,6 +1054,7 @@ def broadcast_manifest(private_key, did):
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     kv_set(private_key, did, "manifest", json.dumps(manifest, ensure_ascii=False))
+    return ok            # trả kết quả post -> caller chỉ đóng cổng thời gian khi THÀNH CÔNG
 
 
 def _due(state: dict, key: str, interval_h: float, now: int) -> bool:
@@ -1071,17 +1104,31 @@ def main():
 
     # 1) Telemetry một chiều — THƯA hơn (tối thiểu TELEMETRY_INTERVAL_H giờ/lần)
     #    để giảm spam lobby; auto_respond (reciprocity) vẫn chạy mỗi vòng.
+    #    QUAN TRỌNG: chỉ ĐÓNG cổng thời gian khi post THÀNH CÔNG — nếu server sập
+    #    đúng nhịp này thì KHÔNG lưu mốc, để vòng sau thử lại ngay (chống "xanh mà
+    #    không post được gì" + không bỏ trống 1 nhịp broadcast).
+    tele_status = "skip"
     if force or _due(state, "last_telemetry", TELEMETRY_INTERVAL_H, now):
-        broadcast_telemetry(private_key, did)
-        save_state({"last_telemetry": now})
+        if broadcast_telemetry(private_key, did):
+            save_state({"last_telemetry": now})
+            tele_status = "ok"
+        else:
+            tele_status = "fail"
+            print("[telemetry] post thất bại -> KHÔNG đóng cổng, sẽ thử lại vòng sau")
     else:
         print(f"[telemetry] bỏ qua vòng này (tối thiểu {TELEMETRY_INTERVAL_H}h/lần)")
 
     # 1b) Contribution manifest — LUÔN tôn trọng gate (không force theo dispatch)
     #     để test AI nhiều lần không đăng lặp manifest, giữ đúng mục tiêu chống spam.
+    #     Cùng nguyên tắc: chỉ đóng cổng khi post thành công.
+    manifest_status = "skip"
     if _due(state, "last_manifest", MANIFEST_INTERVAL_H, now):
-        broadcast_manifest(private_key, did)
-        save_state({"last_manifest": now})
+        if broadcast_manifest(private_key, did):
+            save_state({"last_manifest": now})
+            manifest_status = "ok"
+        else:
+            manifest_status = "fail"
+            print("[manifest] post thất bại -> KHÔNG đóng cổng, sẽ thử lại vòng sau")
 
     # 1c) Cảnh báo biến động mạnh (chỉ đăng khi vượt ngưỡng -> signal, không spam).
     if ALERT_MOVE_PCT > 0:
@@ -1094,7 +1141,31 @@ def main():
         post_message(private_key, did, build_reply("you", ask, state=state))
 
     # 3) Tương tác 2 chiều: đọc room & trả lời tin gọi đích danh (LUÔN chạy)
-    auto_respond(private_key, did)
+    replies, proactive = auto_respond(private_key, did)
+
+    # 4) Tổng kết run + PHÁT HIỆN OUTAGE TOÀN PHẦN.
+    #    Nếu KHÔNG một call nào tới technocore.chat thành công trong cả run này
+    #    (fetch, post, kv đều fail) thì đây là outage/mạng hỏng thật -> để run ĐỎ
+    #    (exit 1) cho GitHub gửi email, thay vì xanh âm thầm. Lỗi lẻ tẻ (1 post fail
+    #    nhưng fetch ok) vẫn xanh -> không gây flaky.
+    summary = [
+        "### Technocore agent run",
+        f"- telemetry: **{tele_status}**",
+        f"- manifest: **{manifest_status}**",
+        f"- replies: **{replies}** · proactive: **{proactive}**",
+        f"- technocore.chat 200s: **{_server_ok_count}**",
+    ]
+    print(f"[run] telemetry={tele_status} manifest={manifest_status} "
+          f"replies={replies} proactive={proactive} server200s={_server_ok_count}")
+
+    if _server_ok_count == 0:
+        summary.append("- ⚠️ **Không call nào tới technocore.chat thành công "
+                       "— nghi server/mạng outage.**")
+        _write_summary(summary)
+        print("[run] OUTAGE toàn phần -> exit 1 để run hiện ĐỎ + báo email")
+        sys.exit(1)
+
+    _write_summary(summary)
 
 
 if __name__ == "__main__":

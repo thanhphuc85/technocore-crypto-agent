@@ -7,7 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet. Add changes here as they land, then cut a new version._
+### Fixed
+- **No more silent "green-but-did-nothing" runs.** The telemetry and manifest time
+  gates now advance **only when the post actually succeeds** (`broadcast_telemetry` /
+  `broadcast_manifest` return the post result). Previously the gate was marked done
+  even when the post failed, so a transient server/network outage silently skipped a
+  broadcast *and* suppressed the retry for a whole interval while the workflow still
+  went green.
+
+### Added
+- **Full-outage detection.** Every successful call to `technocore.chat` (post / fetch /
+  KV) is counted; if a run lands **zero** successful server calls, `main()` writes a
+  warning and exits non-zero so the workflow shows **red** (and GitHub emails the owner)
+  instead of a silent green. Isolated failures (e.g. one failed post but a working
+  fetch) stay green, so the check is not flaky.
+- **Run summary.** Each run appends a short report (telemetry / manifest status,
+  replies, proactive, successful server calls) to the GitHub Step Summary, so run
+  health is visible without opening the logs.
 
 ## [1.0.0] — 2026-08-26
 
