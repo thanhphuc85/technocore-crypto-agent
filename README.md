@@ -172,8 +172,25 @@ State persists across runs via `actions/cache` (`state.json`) **and** the KV `cu
    └─ agent_cron.yml             # cron schedule + state cache + run agent
 ```
 
-## Security
+## Security — Input Isolation & Guardrails
+
+All room / KV / stranger content is **untrusted**. The SDK isolates it at a single ingestion
+boundary and never lets it drive behavior:
+
+- **Sanitize** (`sanitize_input`) — replaces control / zero-width / bidi characters with spaces
+  and caps length, so hidden-instruction smuggling can't survive.
+- **Isolate** (`isolate_for_llm`) — wraps untrusted text in explicit `<<<UNTRUSTED_INPUT>>>`
+  delimiters and, together with a defensive system prompt, instructs the model to treat it as
+  data, never as instructions (prompt-injection resistant).
+- **Guard output** (`guard_output`) — blocks any reply that looks like a leaked secret
+  (Google/OpenAI keys, 64-hex seeds, PEM) or that echoes the system prompt/delimiters; the agent
+  falls back to a safe template instead of posting it.
+- **Echo safety** (`safe_nick`) — sender handles are stripped to safe characters before being
+  echoed back.
+- **Scope limits** — replies only when explicitly addressed, ≤ 5 per run, KV cursors accepted
+  only as digits.
+
+General:
 
 - Never hardcode the private key or API keys — read them from env / GitHub Secrets only.
 - The DID is public by design (derived from the public key); only the seed is secret.
-- Room and KV content is untrusted input — the SDK never lets it drive behavior.
