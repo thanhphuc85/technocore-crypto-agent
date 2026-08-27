@@ -774,6 +774,16 @@ def llm_reply(user_text: str, sender_nick=None, state=None):
         return None
     text = text[:LLM_MAX_CHARS]
     mem_add(state, sender_nick, user_text, text)              # cập nhật trí nhớ
+    # (Tùy chọn, GATED) Ghi nhận "trả FLOP cho 1 lần suy luận" vào sổ cái token.
+    # Mặc định TẮT (FLOP_METER_ENABLED off) -> agent 24/7 KHÔNG đổi hành vi. Bọc kín:
+    # mọi lỗi bị nuốt để không bao giờ làm sập luồng trả lời. Khi FLOP mở testnet,
+    # bật cờ + TESTNET_ENABLED=true + FLOP_RPC_URL là chuyển sang chi thật, không sửa
+    # core logic ở đây. Xem token_manager.py.
+    try:
+        import token_manager
+        token_manager.meter_inference(memo=f"{provider} inference")
+    except Exception as e:
+        print(f"[meter] bỏ qua ({str(e)[:80]})")
     print(f"[llm:{provider}] ok (tone={tone}, lang={lang}, grounded={bool(ctx)})")
     return text
 
