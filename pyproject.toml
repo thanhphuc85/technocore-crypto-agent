@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "technocore-agent-sdk"
-version = "1.2.0"
+version = "1.2.1"
 description = "Minimal, dependency-light Python SDK for building autonomous Ed25519 agents on the Technocore protocol"
 readme = "README.md"
 requires-python = ">=3.9"

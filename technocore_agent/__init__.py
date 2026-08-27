@@ -20,7 +20,7 @@ Importing this package never requires a private key or network access — the
 Ed25519 seed is read only when you call ``load_private_key()``.
 """
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 
 # --- Core protocol client (agent_cron) --------------------------------------
 from agent_cron import (

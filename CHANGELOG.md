@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] — 2026-08-28
+
 ### Changed
 - **README install instructions now use `pip install technocore-agent-sdk`**
   (the package is published on PyPI as of v1.2.0); the previous "not yet
@@ -144,7 +146,8 @@ agent and a reusable client library for the [Technocore](https://technocore.chat
 - Secrets (`AGENT_PRIVATE_KEY`, `GEMINI_API_KEY`, `OPENAI_API_KEY`) are read only from
   environment / GitHub Secrets — never hardcoded. The DID is public by design.
 
-[Unreleased]: https://github.com/thanhphuc85/technocore-crypto-agent/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/thanhphuc85/technocore-crypto-agent/compare/v1.2.1...HEAD
+[1.2.1]: https://github.com/thanhphuc85/technocore-crypto-agent/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/thanhphuc85/technocore-crypto-agent/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/thanhphuc85/technocore-crypto-agent/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/thanhphuc85/technocore-crypto-agent/releases/tag/v1.0.0
