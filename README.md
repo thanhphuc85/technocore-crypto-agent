@@ -29,7 +29,7 @@ and verified through `did:key`.
 - **🗣 Conversational memory** — remembers the last few turns per user (persisted in state) and answers in the **user's language** (Vietnamese / English auto-detected).
 - **🛠 Useful commands** — `!price [coin]`, `!market`, `!top`, `!trending`, `!dominance`, `!gas`, `!fear`, `!about`, and more (see below).
 - **🚨 Move alerts** — posts a signed alert only when BTC/ETH swings past a configurable threshold (event-driven signal, not spam).
-- **💾 Signed Key-Value Store** — persist auditable, Ed25519-signed notes and durable cursors to `/kv/<ns>`.
+- **💾 Key-Value Store** — persist auditable notes and durable cursors to `/kv/<ns>` (unsigned claim-based lane by default; an optional Ed25519-signed lane exists but Technocore currently rejects it — see below).
 - **📇 Contribution manifest** — periodically publishes a signed record (what it is, DID, repo link, commands) so the agent is a verifiable *public good*, not just a broadcaster.
 - **🛡 Resilient data** — CoinGecko primary with a keyless **Binance fallback**, so price feeds keep working when one source is down.
 - **🤝 Controlled proactive interaction** — greets newcomers once, offers a live-grounded answer when a peer asks a crypto question, all under hard per-run and per-peer caps. A per-peer reply budget breaks any bot-to-bot loop.
@@ -87,7 +87,7 @@ import agent_cron as agent
 pk  = agent.load_private_key()            # reads AGENT_PRIVATE_KEY (raises only here)
 did = agent.did_of(pk)                    # your did:key identity
 agent.post_message(pk, did, "gm, signed by my DID")   # signed post to /r/lobby
-agent.kv_set(pk, did, "note", "hello")    # signed KV note at /kv/<ns>/note
+agent.kv_set(pk, did, "note", "hello")    # KV note at /kv/<ns>/note (unsigned lane by default)
 ```
 
 ---
@@ -183,7 +183,7 @@ Set `KV_NS` in `agent_cron.py` to your own namespace (lowercase, `^[a-z0-9][a-z0
 from agent_cron import load_private_key, did_of, kv_set, kv_get
 
 pk = load_private_key(); did = did_of(pk)
-kv_set(pk, did, "status", "BTC:$78000 ETH:$2450")  # write a SIGNED note (POST /kv/<ns>/status)
+kv_set(pk, did, "status", "BTC:$78000 ETH:$2450")  # write a note (unsigned lane by default; POST /kv/<ns>/status)
 value = kv_get("status")                            # read it back (GET  /kv/<ns>/status)
 ```
 
@@ -318,7 +318,7 @@ State persists across runs via `actions/cache` (`state.json`) **and** the KV `cu
 | `sign_message(private_key, msg)` | Base64url Ed25519 signature |
 | `post_message(private_key, did, text, room=ROOM)` | Sign & POST a message to a room |
 | `fetch_messages(since=None)` | Read recent messages as JSON |
-| `kv_set(private_key, did, key, value)` / `kv_get(key)` | Write a **signed** / read a KV note |
+| `kv_set(private_key, did, key, value)` / `kv_get(key)` | Write (unsigned lane by default; `KV_SIGNED=on` to try the signed lane) / read a KV note |
 | `llm_reply(text)` | AI answer via Gemini/ChatGPT (or `None`) |
 | `build_reply(nick, text)` | Route commands / AI / template |
 
