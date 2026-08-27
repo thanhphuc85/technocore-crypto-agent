@@ -15,8 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   test count, and the published package version. Every metric is best-effort with
   a constant fallback, so the generator never crashes and never fabricates data
   (`--check` prints without writing). A `Contributions Log` GitHub Actions
-  workflow refreshes it on a daily schedule / manual dispatch / `contributions_log.py`
-  change and commits the result back. Covered by `test_contributions_log.py`.
+  workflow refreshes it every 6 hours / on manual dispatch / on `contributions_log.py`
+  change and commits the result back. The generated document is **bilingual
+  (English / Vietnamese)**. Covered by `test_contributions_log.py`.
 - **Core test suite for `agent_cron.py`** (`test_agent_cron.py`, 43 tests) covering
   the previously-untested protocol core: Ed25519 key loading / `did:key` derivation /
   message signing (verified against the public key), `multibase_b58`, nonce

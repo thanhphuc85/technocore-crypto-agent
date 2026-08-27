@@ -184,65 +184,79 @@ def gather(quiet=False) -> dict:
 
 
 def render(d: dict) -> str:
-    return f"""# Technocore &amp; $FLOP Protocol — Contribution Records
+    """Sinh tài liệu SONG NGỮ (EN / VI). Mỗi khối văn xuôi có bản tiếng Anh trước,
+    tiếng Việt ngay sau; ô bảng dùng `<br>` với dòng VI in nghiêng."""
+    return f"""# Technocore &amp; $FLOP Protocol — Contribution Records / Hồ sơ Đóng góp
 
-> **Proof of Work — Flop Labs Submission**
-> A verifiable audit trail of the on-chat, on-protocol, and open-source contributions made by
+> **Proof of Work — Flop Labs Submission** · *Bằng chứng Đóng góp — Hồ sơ nộp Flop Labs*
+>
+> 🇬🇧 A verifiable audit trail of the on-chat, on-protocol, and open-source contributions made by
 > agent **`{AGENT}`** to the [Technocore](https://technocore.chat) ecosystem and the **$FLOP**
 > airdrop protocol. **Every record below is independently checkable** — a live URL, a signed
 > Ed25519 identity, a public GitHub artifact, or a released PyPI package. Nothing here is asserted
 > without a public anchor you can verify yourself.
 >
-> 🔄 **This file is auto-generated** by [`contributions_log.py`](contributions_log.py) from live
-> data. Last refreshed: **`{d['generated_at']}`** — do not edit by hand; run the generator instead.
+> 🇻🇳 *Nhật ký kiểm toán có thể xác minh về các đóng góp trên-chat, trên-giao-thức và mã nguồn mở
+> của agent **`{AGENT}`** cho hệ sinh thái [Technocore](https://technocore.chat) và giao thức
+> airdrop **$FLOP**. **Mọi bản ghi dưới đây đều kiểm chứng được độc lập** — một URL sống, một danh
+> tính Ed25519 đã ký, một tạo tác GitHub công khai, hoặc một gói đã phát hành trên PyPI. Không có
+> điều gì được khẳng định mà thiếu mỏ neo công khai bạn tự kiểm tra được.*
+>
+> 🔄 **Auto-generated** by [`contributions_log.py`](contributions_log.py) from live data — do not
+> edit by hand; run the generator instead. · *Tự sinh từ dữ liệu sống; đừng sửa tay, hãy chạy
+> generator.* Last refreshed / Cập nhật lần cuối: **`{d['generated_at']}`**
 
 ---
 
-## 🪪 Contributor Identity
+## 🪪 Contributor Identity / Danh tính Người đóng góp
 
-| Field | Value |
+| Field / Trường | Value / Giá trị |
 |---|---|
 | **Agent** | `{AGENT}` |
 | **Owner DID** (`did:key`) | `{DID}` |
-| **Signature scheme** | Ed25519 — every message &amp; KV note is signed and verifiable via `did:key` |
-| **Source repository** | <{REPO}> |
-| **Published package** | [`technocore-agent-sdk`](https://pypi.org/project/technocore-agent-sdk/) `v{d['version']}` |
-| **Primary room** | `lobby` · <https://technocore.chat/r/lobby> |
-| **KV namespace** | `{KV_NS}` · <https://technocore.chat/kv/{KV_NS}/> |
-| **Active period** | {d['start_date']} → present (running 24/7 on GitHub Actions) |
+| **Signature scheme** / *Sơ đồ chữ ký* | Ed25519 — every message &amp; KV note is signed &amp; verifiable via `did:key`<br>*mọi tin nhắn &amp; KV note đều được ký và xác minh qua `did:key`* |
+| **Source repository** / *Kho mã nguồn* | <{REPO}> |
+| **Published package** / *Gói đã phát hành* | [`technocore-agent-sdk`](https://pypi.org/project/technocore-agent-sdk/) `v{d['version']}` |
+| **Primary room** / *Phòng chính* | `lobby` · <https://technocore.chat/r/lobby> |
+| **KV namespace** / *Không gian KV* | `{KV_NS}` · <https://technocore.chat/kv/{KV_NS}/> |
+| **Active period** / *Thời gian hoạt động* | {d['start_date']} → present / *đến nay* (running 24/7 on GitHub Actions) |
 
 ---
 
-## 🧾 Verified Contribution Audit Trail ({TOTAL_RECORDS} Records)
+## 🧾 Verified Contribution Audit Trail / Nhật ký Kiểm toán Đóng góp ({TOTAL_RECORDS} Records)
 
-Each row is a category of sustained work with a **public evidence anchor** in the final column.
-Status legend: ✅ **Verified** — anchor is live right now · ⭐ **Verified &amp; Endorsed** — flagship deliverable.
+🇬🇧 Each row is a category of sustained work with a **public evidence anchor** in the final column.
+🇻🇳 *Mỗi dòng là một hạng mục công việc bền bỉ, kèm **mỏ neo bằng chứng công khai** ở cột cuối.*
 
-| # | Category | Room / Namespace / Module | Reference / Count | Summary &amp; Description | Status |
+Status legend / *Chú giải*: ✅ **Verified** — anchor is live now / *mỏ neo đang sống* ·
+⭐ **Verified &amp; Endorsed** — flagship / *trọng điểm*.
+
+| # | Category / Danh mục | Room / Namespace / Module | Reference / Count | Summary &amp; Description / Mô tả | Status |
 |:--:|---|---|---|---|:--:|
-| 01 | **Core Ecosystem Artifact — Open-Source SDK** | `github` · PyPI | v{d['version']} · {d['merged_prs']} PRs merged | Dependency-light single-file Ed25519 agent SDK. Both a live reference agent and an importable library. Published to PyPI as `technocore-agent-sdk`. | ⭐ |
-| 02 | **Signed On-Chat Identity** | `lobby` / owner DID | 1 `did:key` | Ed25519 `did:key` identity; every posted message and KV note is signed and independently verifiable — no auth server, plain HTTP. | ⭐ |
-| 03 | **Durable Key-Value Notes** | `/kv/{KV_NS}/` | 3 keys | Public, world-auditable notes persisted to the KV store: `manifest`, `status`, `cursor`. Readable by anyone at the URLs below. | ✅ |
-| 04 | **Signed Contribution Manifest** | `/kv/{KV_NS}/manifest` + `lobby` | `ts {d['manifest_ts']}` | Machine-readable public-good record (agent, DID, repo, description, command set, `reusable: true`) — proves the agent is a verifiable contributor, not just a broadcaster. | ✅ |
-| 05 | **Oracle Telemetry Beacon** | `lobby` + `/kv/{KV_NS}/status` | latest `{d['status_ts']}` | Signed, event-varied market pulse (BTC / ETH with 24h change + Fear &amp; Greed). Rate-limited signal, not spam. | ✅ |
-| 06 | **Interactive Command Surface** | `lobby` | {d['commands']} commands | `!price !market !top !trending !dominance !gas !fear !about !time !ping !help` + live-grounded, injection-guarded AI replies in the user's language. | ✅ |
-| 07 | **Read Cursor &amp; Idempotency** | `/kv/{KV_NS}/cursor` | `seq {d['cursor']}` | Durable processing cursor proving continuous, no-double-reply room scanning across scheduled runs. | ✅ |
-| 08 | **$FLOP Token Ledger** | `token_manager.py` | sim → testnet (1 flag) | Auditable FLOP ledger with 3:1 mainnet-unlock accounting; a single `TESTNET_ENABLED` switch flips simulation → real testnet transfer. | ⭐ |
-| 09 | **$FLOP Spend Pacer** | `flop_pacer.py` | daily-budget · min-spend | Rate-paced spend engine (daily budget, per-run cap, minimum spend) so token usage is deliberate and bounded. | ✅ |
-| 10 | **$FLOP Faucet Scaffold** | `flop_faucet.py` | flag-gated | Testnet faucet claim with cooldown + refill-below threshold; wired behind `FLOP_FAUCET_ENABLED`, ready for the day FLOP opens the faucet. | ✅ |
-| 11 | **$FLOP `submit_tx` Seam** | `flop_tx.py` | relay · evm | On-chain submit adapter injected into `spend()`; sends only through an explicit endpoint and **never fabricates a tx hash**. | ✅ |
-| 12 | **Injection-Guarded Safety Layer** | codebase | sweep · isolate · guard | All room / KV / stranger input treated as untrusted: control/bidi/zero-width sweep, LLM delimiter isolation, and secret-leak output guard. | ✅ |
-| 13 | **Automated Agent (24/7)** | GitHub Actions | `agent_cron.yml` | Scheduled signed runs keeping the beacon, telemetry, and manifest live — the reference agent runs autonomously. | ✅ |
-| 14 | **CI + Release Pipeline** | GitHub Actions | `ci.yml` · `release.yml` | 4-version Python matrix (3.9–3.12) + PyPI Trusted Publishing on tag ({d['latest_tag']}). All runs green. | ✅ |
-| 15 | **Test Suite &amp; Quality** | repo | {d['tests']} tests | `pytest` suite (crypto, safety layer, network, FLOP ledger) with coverage tooling wired into CI. | ✅ |
+| 01 | **Open-Source SDK**<br>*SDK mã nguồn mở* | `github` · PyPI | v{d['version']} · {d['merged_prs']} PRs | Dependency-light single-file Ed25519 agent SDK — a live reference agent and an importable library, on PyPI.<br>*SDK agent Ed25519 một-file, nhẹ phụ thuộc — vừa là agent tham chiếu sống, vừa là thư viện import được, trên PyPI.* | ⭐ |
+| 02 | **Signed On-Chat Identity**<br>*Danh tính trên-chat đã ký* | `lobby` / owner DID | 1 `did:key` | Ed25519 `did:key`; every message and KV note is signed and verifiable — no auth server, plain HTTP.<br>*Mọi tin nhắn và KV note đều được ký và xác minh — không server xác thực, chỉ HTTP thuần.* | ⭐ |
+| 03 | **Durable KV Notes**<br>*KV note bền vững* | `/kv/{KV_NS}/` | 3 keys | Public, world-auditable notes: `manifest`, `status`, `cursor`, readable by anyone.<br>*Note công khai ai cũng audit được: `manifest`, `status`, `cursor`.* | ✅ |
+| 04 | **Signed Manifest**<br>*Manifest đã ký* | `/kv/{KV_NS}/manifest` + `lobby` | `ts {d['manifest_ts']}` | Machine-readable public-good record (agent, DID, repo, commands, `reusable: true`).<br>*Bản ghi công-ích máy-đọc-được (agent, DID, repo, lệnh, `reusable: true`).* | ✅ |
+| 05 | **Oracle Telemetry Beacon**<br>*Đèn hiệu telemetry* | `lobby` + `/kv/{KV_NS}/status` | latest `{d['status_ts']}` | Signed, event-varied market pulse (BTC/ETH 24h + Fear &amp; Greed). Signal, not spam.<br>*Nhịp thị trường đã ký, đa dạng (BTC/ETH 24h + Fear &amp; Greed). Tín hiệu, không spam.* | ✅ |
+| 06 | **Command Surface**<br>*Bề mặt lệnh* | `lobby` | {d['commands']} commands | `!price !market !top !trending !dominance !gas !fear !about !time !ping !help` + injection-guarded AI replies.<br>*+ trả lời AI có chắn injection, theo ngôn ngữ người dùng.* | ✅ |
+| 07 | **Read Cursor / Idempotency**<br>*Con trỏ đọc / bất biến* | `/kv/{KV_NS}/cursor` | `seq {d['cursor']}` | Durable cursor proving continuous, no-double-reply room scanning.<br>*Con trỏ bền chứng minh quét phòng liên tục, không trả lời hai lần.* | ✅ |
+| 08 | **$FLOP Token Ledger**<br>*Sổ cái token $FLOP* | `token_manager.py` | sim → testnet (1 flag) | Auditable FLOP ledger, 3:1 mainnet-unlock; one `TESTNET_ENABLED` switch flips sim → real testnet.<br>*Sổ cái FLOP audit được, mở-khóa 3:1; một công tắc `TESTNET_ENABLED` chuyển mô-phỏng → testnet thật.* | ⭐ |
+| 09 | **$FLOP Spend Pacer**<br>*Bộ điều nhịp chi* | `flop_pacer.py` | daily-budget · min-spend | Rate-paced spend engine (daily budget, per-run cap, min spend) — bounded token use.<br>*Bộ chi có điều nhịp (ngân sách ngày, trần mỗi lần, chi tối thiểu) — dùng token có giới hạn.* | ✅ |
+| 10 | **$FLOP Faucet Scaffold**<br>*Khung faucet* | `flop_faucet.py` | flag-gated | Testnet faucet claim (cooldown + refill-below), behind `FLOP_FAUCET_ENABLED`.<br>*Nhận faucet testnet (cooldown + ngưỡng nạp), sau cờ `FLOP_FAUCET_ENABLED`.* | ✅ |
+| 11 | **$FLOP `submit_tx` Seam**<br>*Đường nối `submit_tx`* | `flop_tx.py` | relay · evm | On-chain submit adapter into `spend()`; sends only via an explicit endpoint, never fabricates a tx hash.<br>*Adapter gửi on-chain vào `spend()`; chỉ gửi qua endpoint tường minh, không bao giờ bịa tx hash.* | ✅ |
+| 12 | **Injection-Guarded Safety**<br>*An toàn chắn injection* | codebase | sweep · isolate · guard | Untrusted input isolation: control/bidi/zero-width sweep, LLM delimiter, secret-leak guard.<br>*Cô lập input không tin cậy: quét control/bidi/zero-width, delimiter cho LLM, chắn rò rỉ secret.* | ✅ |
+| 13 | **Automated Agent (24/7)**<br>*Agent tự động 24/7* | GitHub Actions | `agent_cron.yml` | Scheduled signed runs keeping beacon, telemetry, manifest live.<br>*Chạy đã-ký theo lịch, giữ đèn hiệu, telemetry, manifest luôn sống.* | ✅ |
+| 14 | **CI + Release Pipeline**<br>*Pipeline CI + phát hành* | GitHub Actions | `ci.yml` · `release.yml` | 4-version matrix (3.9–3.12) + PyPI Trusted Publishing on tag ({d['latest_tag']}). All green.<br>*Ma trận 4 phiên bản + phát hành PyPI theo tag. Tất cả xanh.* | ✅ |
+| 15 | **Test Suite &amp; Quality**<br>*Bộ test &amp; chất lượng* | repo | {d['tests']} tests | `pytest` suite (crypto, safety, network, FLOP ledger) + coverage in CI.<br>*Bộ `pytest` (crypto, an toàn, mạng, sổ cái FLOP) + coverage trong CI.* | ✅ |
 
 ---
 
-## 🔍 Independent Verification
+## 🔍 Independent Verification / Xác minh Độc lập
 
-Anyone can confirm every record above without trusting this document. All anchors are public.
+🇬🇧 Anyone can confirm every record above without trusting this document. All anchors are public.
+🇻🇳 *Bất kỳ ai cũng xác nhận được mọi bản ghi trên mà không cần tin tài liệu này. Mọi mỏ neo đều công khai.*
 
-**Live KV notes (read the raw proof right now):**
+**Live KV notes / *KV note sống* (read the raw proof / *đọc bằng chứng thô*):**
 
 ```bash
 curl -s https://technocore.chat/kv/{KV_NS}/manifest
@@ -250,45 +264,47 @@ curl -s https://technocore.chat/kv/{KV_NS}/status
 curl -s https://technocore.chat/kv/{KV_NS}/cursor
 ```
 
-**On-chat activity (signed under the DID):**
+**On-chat activity / *Hoạt động trên-chat* (signed under the DID / *đã ký dưới DID*):**
 
 ```bash
-# The agent's identity — every message it signs verifies against this did:key
 # {DID}
 curl -s "https://technocore.chat/r/lobby?format=json&limit=200"
 ```
 
-**Open-source &amp; release proof:**
+**Open-source &amp; release proof / *Bằng chứng mã nguồn &amp; phát hành*:**
 
 ```bash
-pip install technocore-agent-sdk            # published package (v{d['version']})
+pip install technocore-agent-sdk            # v{d['version']}
 python -c "import technocore_agent; print(technocore_agent.__version__)"
 ```
 
-- Repository — <{REPO}>
-- Releases — <{REPO}/releases>
-- CI &amp; automation status — see the badges on the repository README
+- Repository / *Kho mã* — <{REPO}>
+- Releases / *Bản phát hành* — <{REPO}/releases>
 
 ---
 
-## 📌 Verification Notes (integrity statement)
+## 📌 Verification Notes / Ghi chú Toàn vẹn (integrity statement)
 
-- **No fabricated sequence numbers.** The `lobby` room is high-throughput and public; individual
-  historical message sequences scroll out of the recent window quickly. Rather than invent seq
-  ids, each on-chat record is anchored to a **durable, timestamped KV note** (`manifest`,
-  `status`, `cursor`) that is live and independently readable. The read cursor (`seq {d['cursor']}`)
-  is the agent's own real, persisted value.
-- **Every status is backed by a live anchor** — a URL, a signed identity, a merged PR, a tag, or
-  a published package — checkable at the time of reading.
-- **Auto-generated, not hand-curated.** This document is rebuilt by `contributions_log.py` from
-  the sources above; the counts and timestamps reflect real state at generation time.
-- **Reusable public good.** The manifest advertises `reusable: true`; the SDK is MIT-licensed and
-  importable by anyone, so the contribution compounds beyond this agent.
+- 🇬🇧 **No fabricated sequence numbers.** The `lobby` room is high-throughput and public; historical
+  sequences scroll out of the recent window quickly. Each on-chat record is anchored to a
+  **durable, timestamped KV note** (`manifest`, `status`, `cursor`) instead. The read cursor
+  (`seq {d['cursor']}`) is the agent's own real, persisted value.
+  <br>🇻🇳 *Không bịa số sequence. Phòng `lobby` lưu lượng cao và công khai; sequence lịch sử trôi
+  khỏi cửa sổ gần rất nhanh. Mỗi bản ghi trên-chat được neo vào **KV note bền, có timestamp** thay
+  vì bịa số. Con trỏ đọc (`seq {d['cursor']}`) là giá trị thật, đã lưu của chính agent.*
+- 🇬🇧 **Every status is backed by a live anchor** — a URL, a signed identity, a merged PR, a tag,
+  or a published package. · 🇻🇳 *Mọi trạng thái đều tựa vào một mỏ neo sống — URL, danh tính đã ký,
+  PR đã merge, tag, hoặc gói đã phát hành.*
+- 🇬🇧 **Auto-generated, not hand-curated** — rebuilt by `contributions_log.py`. · 🇻🇳 *Tự sinh, không
+  soạn tay — dựng lại bởi `contributions_log.py`.*
+- 🇬🇧 **Reusable public good** — manifest says `reusable: true`; the SDK is MIT-licensed and
+  importable by anyone. · 🇻🇳 *Công-ích tái dùng — manifest ghi `reusable: true`; SDK giấy phép MIT,
+  ai cũng import được.*
 
 ---
 
-<sub>Auto-generated for Flop Labs Proof-of-Work review · agent `{AGENT}` ·
-`{DID}` · reflects verifiable public state as of {d['generated_at']}.</sub>
+<sub>Auto-generated for Flop Labs Proof-of-Work review · *Tự sinh cho phần duyệt Bằng chứng Đóng góp
+của Flop Labs* · agent `{AGENT}` · `{DID}` · as of / *tính đến* {d['generated_at']}.</sub>
 """
 
 

@@ -88,9 +88,11 @@ def test_render_is_valid_doc():
              tag_list=["v1.2.1"])
     doc = cl.render(d)
     assert cl.DID in doc
-    assert "Verified Contribution Audit Trail (15 Records)" in doc
+    assert "Verified Contribution Audit Trail" in doc
+    assert f"({cl.TOTAL_RECORDS} Records)" in doc
     assert doc.count("\n| 0") + doc.count("\n| 1") >= cl.TOTAL_RECORDS   # đủ dòng bảng
     assert "auto-generated" in doc.lower()
+    assert "🇻🇳" in doc and "🇬🇧" in doc                                  # song ngữ VI/EN
 
 
 def test_check_mode_does_not_write(monkeypatch, tmp_path, capsys):
