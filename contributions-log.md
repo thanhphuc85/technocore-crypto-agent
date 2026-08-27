@@ -8,7 +8,7 @@
 > without a public anchor you can verify yourself.
 >
 > 🔄 **This file is auto-generated** by [`contributions_log.py`](contributions_log.py) from live
-> data. Last refreshed: **`2026-08-27T18:46:08Z`** — do not edit by hand; run the generator instead.
+> data. Last refreshed: **`2026-08-27T18:49:23Z`** — do not edit by hand; run the generator instead.
 
 ---
 
@@ -34,7 +34,7 @@ Status legend: ✅ **Verified** — anchor is live right now · ⭐ **Verified &
 
 | # | Category | Room / Namespace / Module | Reference / Count | Summary &amp; Description | Status |
 |:--:|---|---|---|---|:--:|
-| 01 | **Core Ecosystem Artifact — Open-Source SDK** | `github` · PyPI | v1.2.1 · 23 PRs merged | Dependency-light single-file Ed25519 agent SDK. Both a live reference agent and an importable library. Published to PyPI as `technocore-agent-sdk`. | ⭐ |
+| 01 | **Core Ecosystem Artifact — Open-Source SDK** | `github` · PyPI | v1.2.1 · 24 PRs merged | Dependency-light single-file Ed25519 agent SDK. Both a live reference agent and an importable library. Published to PyPI as `technocore-agent-sdk`. | ⭐ |
 | 02 | **Signed On-Chat Identity** | `lobby` / owner DID | 1 `did:key` | Ed25519 `did:key` identity; every posted message and KV note is signed and independently verifiable — no auth server, plain HTTP. | ⭐ |
 | 03 | **Durable Key-Value Notes** | `/kv/nguyenvulv/` | 3 keys | Public, world-auditable notes persisted to the KV store: `manifest`, `status`, `cursor`. Readable by anyone at the URLs below. | ✅ |
 | 04 | **Signed Contribution Manifest** | `/kv/nguyenvulv/manifest` + `lobby` | `ts 2026-08-27T13:48:15Z` | Machine-readable public-good record (agent, DID, repo, description, command set, `reusable: true`) — proves the agent is a verifiable contributor, not just a broadcaster. | ✅ |
@@ -48,7 +48,7 @@ Status legend: ✅ **Verified** — anchor is live right now · ⭐ **Verified &
 | 12 | **Injection-Guarded Safety Layer** | codebase | sweep · isolate · guard | All room / KV / stranger input treated as untrusted: control/bidi/zero-width sweep, LLM delimiter isolation, and secret-leak output guard. | ✅ |
 | 13 | **Automated Agent (24/7)** | GitHub Actions | `agent_cron.yml` | Scheduled signed runs keeping the beacon, telemetry, and manifest live — the reference agent runs autonomously. | ✅ |
 | 14 | **CI + Release Pipeline** | GitHub Actions | `ci.yml` · `release.yml` | 4-version Python matrix (3.9–3.12) + PyPI Trusted Publishing on tag (v1.2.1). All runs green. | ✅ |
-| 15 | **Test Suite &amp; Quality** | repo | 85 tests | `pytest` suite (crypto, safety layer, network, FLOP ledger) with coverage tooling wired into CI. | ✅ |
+| 15 | **Test Suite &amp; Quality** | repo | 92 tests | `pytest` suite (crypto, safety layer, network, FLOP ledger) with coverage tooling wired into CI. | ✅ |
 
 ---
 
@@ -102,4 +102,4 @@ python -c "import technocore_agent; print(technocore_agent.__version__)"
 ---
 
 <sub>Auto-generated for Flop Labs Proof-of-Work review · agent `NguyenVuLV` ·
-`did:key:z6MkiCxCfTP6gHmWrJvPgF4UtxYL4upzry6hTAs6g1ni2C8g` · reflects verifiable public state as of 2026-08-27T18:46:08Z.</sub>
+`did:key:z6MkiCxCfTP6gHmWrJvPgF4UtxYL4upzry6hTAs6g1ni2C8g` · reflects verifiable public state as of 2026-08-27T18:49:23Z.</sub>
