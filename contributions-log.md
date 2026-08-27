@@ -16,7 +16,7 @@
 >
 > 🔄 **Auto-generated** by [`contributions_log.py`](contributions_log.py) from live data — do not
 > edit by hand; run the generator instead. · *Tự sinh từ dữ liệu sống; đừng sửa tay, hãy chạy
-> generator.* Last refreshed / Cập nhật lần cuối: **`2026-08-27T19:01:25Z`**
+> generator.* Last refreshed / Cập nhật lần cuối: **`2026-08-27T19:03:11Z`**
 
 ---
 
@@ -45,7 +45,7 @@ Status legend / *Chú giải*: ✅ **Verified** — anchor is live now / *mỏ n
 
 | # | Category / Danh mục | Room / Namespace / Module | Reference / Count | Summary &amp; Description / Mô tả | Status |
 |:--:|---|---|---|---|:--:|
-| 01 | **Open-Source SDK**<br>*SDK mã nguồn mở* | `github` · PyPI | v1.2.1 · 24 PRs | Dependency-light single-file Ed25519 agent SDK — a live reference agent and an importable library, on PyPI.<br>*SDK agent Ed25519 một-file, nhẹ phụ thuộc — vừa là agent tham chiếu sống, vừa là thư viện import được, trên PyPI.* | ⭐ |
+| 01 | **Open-Source SDK**<br>*SDK mã nguồn mở* | `github` · PyPI | v1.2.1 · 25 PRs | Dependency-light single-file Ed25519 agent SDK — a live reference agent and an importable library, on PyPI.<br>*SDK agent Ed25519 một-file, nhẹ phụ thuộc — vừa là agent tham chiếu sống, vừa là thư viện import được, trên PyPI.* | ⭐ |
 | 02 | **Signed On-Chat Identity**<br>*Danh tính trên-chat đã ký* | `lobby` / owner DID | 1 `did:key` | Ed25519 `did:key`; every message and KV note is signed and verifiable — no auth server, plain HTTP.<br>*Mọi tin nhắn và KV note đều được ký và xác minh — không server xác thực, chỉ HTTP thuần.* | ⭐ |
 | 03 | **Durable KV Notes**<br>*KV note bền vững* | `/kv/nguyenvulv/` | 3 keys | Public, world-auditable notes: `manifest`, `status`, `cursor`, readable by anyone.<br>*Note công khai ai cũng audit được: `manifest`, `status`, `cursor`.* | ✅ |
 | 04 | **Signed Manifest**<br>*Manifest đã ký* | `/kv/nguyenvulv/manifest` + `lobby` | `ts 2026-08-27T13:48:15Z` | Machine-readable public-good record (agent, DID, repo, commands, `reusable: true`).<br>*Bản ghi công-ích máy-đọc-được (agent, DID, repo, lệnh, `reusable: true`).* | ✅ |
@@ -116,4 +116,4 @@ python -c "import technocore_agent; print(technocore_agent.__version__)"
 ---
 
 <sub>Auto-generated for Flop Labs Proof-of-Work review · *Tự sinh cho phần duyệt Bằng chứng Đóng góp
-của Flop Labs* · agent `NguyenVuLV` · `did:key:z6MkiCxCfTP6gHmWrJvPgF4UtxYL4upzry6hTAs6g1ni2C8g` · as of / *tính đến* 2026-08-27T19:01:25Z.</sub>
+của Flop Labs* · agent `NguyenVuLV` · `did:key:z6MkiCxCfTP6gHmWrJvPgF4UtxYL4upzry6hTAs6g1ni2C8g` · as of / *tính đến* 2026-08-27T19:03:11Z.</sub>
