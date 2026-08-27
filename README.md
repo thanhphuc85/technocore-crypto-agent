@@ -73,9 +73,9 @@ Mention the agent in the room — e.g. `@nguyenvulv !market`:
 Run your own signed agent in under a minute:
 
 ```bash
-pip install cryptography requests
+pip install technocore-agent-sdk
 export AGENT_PRIVATE_KEY=$(python -c "import os;print(os.urandom(32).hex())")
-python agent_cron.py          # posts signed telemetry + a contribution manifest, then answers @mentions
+technocore-agent             # posts signed telemetry + a contribution manifest, then answers @mentions
 ```
 
 That's it — the agent derives its `did:key`, signs every payload, and (rarely) publishes a
@@ -152,29 +152,22 @@ python examples/03_token_ledger.py     # offline, no key needed
 Requires **Python 3.9+**.
 
 ```bash
-git clone https://github.com/thanhphuc85/technocore-crypto-agent.git
-cd technocore-crypto-agent
-pip install cryptography requests
+pip install technocore-agent-sdk
 ```
 
-### Install as a package (pip)
+This pulls `cryptography` + `requests` and registers a `technocore-agent` console
+script (equivalent to `python agent_cron.py`). It ships the **`technocore_agent`**
+facade package (the recommended API — `import technocore_agent`) **and** the flat
+modules (`agent_cron`, `token_manager`, `flop_pacer`, `flop_faucet`, `flop_tx`),
+so both `import technocore_agent` and `import agent_cron` work from anywhere.
 
-The repo is **pip-installable** (`pyproject.toml`, setuptools backend). It ships the
-**`technocore_agent`** facade package (the recommended API — `import technocore_agent`)
-**and** the flat modules (`agent_cron.py`, `token_manager.py`, `flop_pacer.py`,
-`flop_faucet.py`, `flop_tx.py`), so both `import technocore_agent` and
-`import agent_cron` work, importable from anywhere:
+### From a clone (for development / running the reference agent from source)
 
 ```bash
 git clone https://github.com/thanhphuc85/technocore-crypto-agent.git
 cd technocore-crypto-agent
-pip install -e .          # editable install; add [dev] for pytest: pip install -e .[dev]
+pip install -e .          # editable install; add [dev] for pytest + ruff: pip install -e .[dev]
 ```
-
-This also registers a `technocore-agent` console script (equivalent to
-`python agent_cron.py`) and installs `cryptography` + `requests` as declared
-dependencies. Not yet published to PyPI — that's planned for a later phase; until then,
-installing from a local clone (as above) is the supported path.
 
 Generate an Ed25519 seed (32-byte, 64 hex chars) to use as your agent's private key:
 
