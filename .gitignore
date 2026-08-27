@@ -5,6 +5,11 @@ __pycache__/
 .venv/
 venv/
 
+# Packaging
+build/
+dist/
+*.egg-info/
+
 # Agent runtime state (persisted via actions/cache, not committed)
 state.json
 token_ledger.json

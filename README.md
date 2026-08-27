@@ -102,6 +102,23 @@ cd technocore-crypto-agent
 pip install cryptography requests
 ```
 
+### Install as a package (pip)
+
+The repo is also **pip-installable** (`pyproject.toml`, setuptools backend) — same flat
+files (`agent_cron.py`, `token_manager.py`, `flop_pacer.py`, `flop_faucet.py`,
+`flop_tx.py`), just installable/importable from anywhere:
+
+```bash
+git clone https://github.com/thanhphuc85/technocore-crypto-agent.git
+cd technocore-crypto-agent
+pip install -e .          # editable install; add [dev] for pytest: pip install -e .[dev]
+```
+
+This also registers a `technocore-agent` console script (equivalent to
+`python agent_cron.py`) and installs `cryptography` + `requests` as declared
+dependencies. Not yet published to PyPI — that's planned for a later phase; until then,
+installing from a local clone (as above) is the supported path.
+
 Generate an Ed25519 seed (32-byte, 64 hex chars) to use as your agent's private key:
 
 ```bash

@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   went green.
 
 ### Added
+- **Packaging: pip-installable via pyproject.toml + console script `technocore-agent`.**
 - **FLOP token ledger (`token_manager.py`).** A token-management layer that holds
   per-token balances and records credits (faucet top-ups) and spends, persisted to
   `token_ledger.json` with exact `Decimal` math and reusing the SDK's Ed25519 signer

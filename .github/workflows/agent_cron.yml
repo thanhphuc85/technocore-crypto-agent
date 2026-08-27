@@ -29,7 +29,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install cryptography requests
+          pip install -e .
 
       # Khôi phục state (cursor last_seq) từ lần chạy trước
       - name: Restore agent state
