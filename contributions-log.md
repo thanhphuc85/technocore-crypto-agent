@@ -14,9 +14,14 @@
 > tính Ed25519 đã ký, một tạo tác GitHub công khai, hoặc một gói đã phát hành trên PyPI. Không có
 > điều gì được khẳng định mà thiếu mỏ neo công khai bạn tự kiểm tra được.*
 >
+> 📊 **17 Records** across two tables — the **$FLOP airdrop protocol** (6) is
+> highlighted first, then the broader **ecosystem &amp; infrastructure** (11).
+> · *17 bản ghi trong hai bảng — **giao thức airdrop $FLOP** (6) nổi lên
+> trước, rồi tới **hạ tầng &amp; hệ sinh thái** (11).*
+>
 > 🔄 **Auto-generated** by [`contributions_log.py`](contributions_log.py) from live data — do not
 > edit by hand; run the generator instead. · *Tự sinh từ dữ liệu sống; đừng sửa tay, hãy chạy
-> generator.* Last refreshed / Cập nhật lần cuối: **`2026-08-27T19:01:25Z`**
+> generator.* Last refreshed / Cập nhật lần cuối: **`2026-08-27T19:06:58Z`**
 
 ---
 
@@ -35,31 +40,59 @@
 
 ---
 
-## 🧾 Verified Contribution Audit Trail / Nhật ký Kiểm toán Đóng góp (15 Records)
+## 🪙 $FLOP Airdrop Protocol — Contributions / Đóng góp cho Giao thức Airdrop (6 Records)
 
-🇬🇧 Each row is a category of sustained work with a **public evidence anchor** in the final column.
-🇻🇳 *Mỗi dòng là một hạng mục công việc bền bỉ, kèm **mỏ neo bằng chứng công khai** ở cột cuối.*
+🇬🇧 **Highlighted for Flop Labs review.** This is the $FLOP-specific engineering: the token ledger,
+the 3:1 mainnet-unlock accounting, spend pacing, faucet, and the on-chain submit seam. Everything
+runs and is **fully tested in simulation today**, and flips to **real testnet with a single flag**
+the moment FLOP publishes its endpoints — the code never fabricates a balance or a tx hash.
+🇻🇳 *Làm nổi để Flop Labs duyệt. Đây là phần kỹ thuật riêng cho $FLOP: sổ cái token, kế toán mở-khóa
+mainnet 3:1, điều nhịp chi, faucet, và đường nối gửi on-chain. Tất cả chạy và **được test đầy đủ ở
+chế độ mô-phỏng ngay bây giờ**, và chuyển sang **testnet thật chỉ bằng một cờ** ngay khi FLOP công bố
+endpoint — code không bao giờ bịa số dư hay tx hash.*
+
+Readiness / *Mức sẵn sàng*: 🟢 **Live (simulation)** — running &amp; tested now / *đang chạy &amp; đã test* ·
+🟡 **Testnet-ready** — wired, awaiting FLOP endpoint / *đã nối, chờ endpoint FLOP*.
+
+| # | $FLOP Capability / Năng lực | Module · Flag | Reference | Description / Mô tả | Readiness |
+|:--:|---|---|---|---|:--:|
+| 01 | **Token Ledger**<br>*Sổ cái token* | `token_manager.py` · `TESTNET_ENABLED` | signed spend payload | Auditable credit/spend/balance ledger; a single flag flips mock → real testnet transfer.<br>*Sổ cái ghi có/chi/số-dư audit được; một cờ chuyển mock → chuyển khoản testnet thật.* | 🟢 / 🟡 |
+| 02 | **3:1 Mainnet-Unlock Accounting**<br>*Kế toán mở-khóa 3:1* | `token_manager.py` · `FLOP_UNLOCK_RATIO` | ratio `3` (default) | Tracks real testnet FLOP spent per 1 FLOP mainnet-unlocked, with `unlock_status()`.<br>*Theo dõi FLOP testnet đã chi cho mỗi 1 FLOP mở-khóa mainnet, kèm `unlock_status()`.* | 🟢 |
+| 03 | **Spend Pacer**<br>*Bộ điều nhịp chi* | `flop_pacer.py` · `FLOP_DAILY_BUDGET` | daily-budget · min-spend | Rate-paced engine (daily budget, per-run cap, minimum spend) so token use is deliberate.<br>*Bộ điều nhịp (ngân sách ngày, trần mỗi lần, chi tối thiểu) để dùng token có chủ đích.* | 🟢 |
+| 04 | **Faucet Scaffold**<br>*Khung faucet* | `flop_faucet.py` · `FLOP_FAUCET_ENABLED` | cooldown · refill-below | Testnet faucet claim with cooldown &amp; refill-below threshold, injected `claim_fn`.<br>*Nhận faucet testnet với cooldown &amp; ngưỡng nạp, tiêm `claim_fn`.* | 🟡 |
+| 05 | **`submit_tx` On-Chain Seam**<br>*Đường nối gửi on-chain* | `flop_tx.py` · `FLOP_SUBMIT_URL` | relay · evm | Submit adapter into `spend()`; sends only via an explicit endpoint, never fabricates a tx hash.<br>*Adapter gửi vào `spend()`; chỉ gửi qua endpoint tường minh, không bao giờ bịa tx hash.* | 🟡 |
+| 06 | **One-Flag Testnet Switch**<br>*Công tắc testnet một-cờ* | design · `TESTNET_ENABLED` | 1 switch | The whole FLOP path is dry-run by default; a single env flag arms real transfers — no code change.<br>*Toàn bộ đường FLOP mặc định chạy khô; một cờ env kích hoạt chuyển khoản thật — không sửa code.* | 🟢 / 🟡 |
+
+> 🇬🇧 **Verifiable today:** the ledger, 3:1 accounting, and pacer are exercised by the test suite
+> right now. **Pending FLOP:** faucet claims and on-chain `submit_tx` need FLOP's published testnet
+> RPC / faucet URLs — the seams are built and tested against fakes, ready to arm.
+> 🇻🇳 *Kiểm chứng được hôm nay: sổ cái, kế toán 3:1 và pacer đã được bộ test chạy. Chờ FLOP: nhận
+> faucet và `submit_tx` on-chain cần URL RPC/faucet testnet FLOP công bố — các đường nối đã dựng và
+> test với bản giả, sẵn sàng kích hoạt.*
+
+---
+
+## 🧾 Ecosystem &amp; Infrastructure Audit Trail / Nhật ký Hạ tầng &amp; Hệ sinh thái (11 Records)
+
+🇬🇧 The broader open-source, on-chat, and automation contributions underpinning the $FLOP work above.
+🇻🇳 *Các đóng góp mã nguồn mở, trên-chat và tự-động-hóa rộng hơn, làm nền cho phần $FLOP ở trên.*
 
 Status legend / *Chú giải*: ✅ **Verified** — anchor is live now / *mỏ neo đang sống* ·
 ⭐ **Verified &amp; Endorsed** — flagship / *trọng điểm*.
 
 | # | Category / Danh mục | Room / Namespace / Module | Reference / Count | Summary &amp; Description / Mô tả | Status |
 |:--:|---|---|---|---|:--:|
-| 01 | **Open-Source SDK**<br>*SDK mã nguồn mở* | `github` · PyPI | v1.2.1 · 24 PRs | Dependency-light single-file Ed25519 agent SDK — a live reference agent and an importable library, on PyPI.<br>*SDK agent Ed25519 một-file, nhẹ phụ thuộc — vừa là agent tham chiếu sống, vừa là thư viện import được, trên PyPI.* | ⭐ |
+| 01 | **Open-Source SDK**<br>*SDK mã nguồn mở* | `github` · PyPI | v1.2.1 · 25 PRs | Dependency-light single-file Ed25519 agent SDK — a live reference agent and an importable library, on PyPI.<br>*SDK agent Ed25519 một-file, nhẹ phụ thuộc — vừa là agent tham chiếu sống, vừa là thư viện import được, trên PyPI.* | ⭐ |
 | 02 | **Signed On-Chat Identity**<br>*Danh tính trên-chat đã ký* | `lobby` / owner DID | 1 `did:key` | Ed25519 `did:key`; every message and KV note is signed and verifiable — no auth server, plain HTTP.<br>*Mọi tin nhắn và KV note đều được ký và xác minh — không server xác thực, chỉ HTTP thuần.* | ⭐ |
 | 03 | **Durable KV Notes**<br>*KV note bền vững* | `/kv/nguyenvulv/` | 3 keys | Public, world-auditable notes: `manifest`, `status`, `cursor`, readable by anyone.<br>*Note công khai ai cũng audit được: `manifest`, `status`, `cursor`.* | ✅ |
 | 04 | **Signed Manifest**<br>*Manifest đã ký* | `/kv/nguyenvulv/manifest` + `lobby` | `ts 2026-08-27T13:48:15Z` | Machine-readable public-good record (agent, DID, repo, commands, `reusable: true`).<br>*Bản ghi công-ích máy-đọc-được (agent, DID, repo, lệnh, `reusable: true`).* | ✅ |
 | 05 | **Oracle Telemetry Beacon**<br>*Đèn hiệu telemetry* | `lobby` + `/kv/nguyenvulv/status` | latest `2026-08-27T13:48:13Z` | Signed, event-varied market pulse (BTC/ETH 24h + Fear &amp; Greed). Signal, not spam.<br>*Nhịp thị trường đã ký, đa dạng (BTC/ETH 24h + Fear &amp; Greed). Tín hiệu, không spam.* | ✅ |
 | 06 | **Command Surface**<br>*Bề mặt lệnh* | `lobby` | 11 commands | `!price !market !top !trending !dominance !gas !fear !about !time !ping !help` + injection-guarded AI replies.<br>*+ trả lời AI có chắn injection, theo ngôn ngữ người dùng.* | ✅ |
 | 07 | **Read Cursor / Idempotency**<br>*Con trỏ đọc / bất biến* | `/kv/nguyenvulv/cursor` | `seq 4724837` | Durable cursor proving continuous, no-double-reply room scanning.<br>*Con trỏ bền chứng minh quét phòng liên tục, không trả lời hai lần.* | ✅ |
-| 08 | **$FLOP Token Ledger**<br>*Sổ cái token $FLOP* | `token_manager.py` | sim → testnet (1 flag) | Auditable FLOP ledger, 3:1 mainnet-unlock; one `TESTNET_ENABLED` switch flips sim → real testnet.<br>*Sổ cái FLOP audit được, mở-khóa 3:1; một công tắc `TESTNET_ENABLED` chuyển mô-phỏng → testnet thật.* | ⭐ |
-| 09 | **$FLOP Spend Pacer**<br>*Bộ điều nhịp chi* | `flop_pacer.py` | daily-budget · min-spend | Rate-paced spend engine (daily budget, per-run cap, min spend) — bounded token use.<br>*Bộ chi có điều nhịp (ngân sách ngày, trần mỗi lần, chi tối thiểu) — dùng token có giới hạn.* | ✅ |
-| 10 | **$FLOP Faucet Scaffold**<br>*Khung faucet* | `flop_faucet.py` | flag-gated | Testnet faucet claim (cooldown + refill-below), behind `FLOP_FAUCET_ENABLED`.<br>*Nhận faucet testnet (cooldown + ngưỡng nạp), sau cờ `FLOP_FAUCET_ENABLED`.* | ✅ |
-| 11 | **$FLOP `submit_tx` Seam**<br>*Đường nối `submit_tx`* | `flop_tx.py` | relay · evm | On-chain submit adapter into `spend()`; sends only via an explicit endpoint, never fabricates a tx hash.<br>*Adapter gửi on-chain vào `spend()`; chỉ gửi qua endpoint tường minh, không bao giờ bịa tx hash.* | ✅ |
-| 12 | **Injection-Guarded Safety**<br>*An toàn chắn injection* | codebase | sweep · isolate · guard | Untrusted input isolation: control/bidi/zero-width sweep, LLM delimiter, secret-leak guard.<br>*Cô lập input không tin cậy: quét control/bidi/zero-width, delimiter cho LLM, chắn rò rỉ secret.* | ✅ |
-| 13 | **Automated Agent (24/7)**<br>*Agent tự động 24/7* | GitHub Actions | `agent_cron.yml` | Scheduled signed runs keeping beacon, telemetry, manifest live.<br>*Chạy đã-ký theo lịch, giữ đèn hiệu, telemetry, manifest luôn sống.* | ✅ |
-| 14 | **CI + Release Pipeline**<br>*Pipeline CI + phát hành* | GitHub Actions | `ci.yml` · `release.yml` | 4-version matrix (3.9–3.12) + PyPI Trusted Publishing on tag (v1.2.1). All green.<br>*Ma trận 4 phiên bản + phát hành PyPI theo tag. Tất cả xanh.* | ✅ |
-| 15 | **Test Suite &amp; Quality**<br>*Bộ test &amp; chất lượng* | repo | 92 tests | `pytest` suite (crypto, safety, network, FLOP ledger) + coverage in CI.<br>*Bộ `pytest` (crypto, an toàn, mạng, sổ cái FLOP) + coverage trong CI.* | ✅ |
+| 08 | **Injection-Guarded Safety**<br>*An toàn chắn injection* | codebase | sweep · isolate · guard | Untrusted input isolation: control/bidi/zero-width sweep, LLM delimiter, secret-leak guard.<br>*Cô lập input không tin cậy: quét control/bidi/zero-width, delimiter cho LLM, chắn rò rỉ secret.* | ✅ |
+| 09 | **Automated Agent (24/7)**<br>*Agent tự động 24/7* | GitHub Actions | `agent_cron.yml` | Scheduled signed runs keeping beacon, telemetry, manifest live.<br>*Chạy đã-ký theo lịch, giữ đèn hiệu, telemetry, manifest luôn sống.* | ✅ |
+| 10 | **CI + Release Pipeline**<br>*Pipeline CI + phát hành* | GitHub Actions | `ci.yml` · `release.yml` | 4-version matrix (3.9–3.12) + PyPI Trusted Publishing on tag (v1.2.1). All green.<br>*Ma trận 4 phiên bản + phát hành PyPI theo tag. Tất cả xanh.* | ✅ |
+| 11 | **Test Suite &amp; Quality**<br>*Bộ test &amp; chất lượng* | repo | 92 tests | `pytest` suite (crypto, safety, network, FLOP ledger) + coverage in CI.<br>*Bộ `pytest` (crypto, an toàn, mạng, sổ cái FLOP) + coverage trong CI.* | ✅ |
 
 ---
 
@@ -116,4 +149,4 @@ python -c "import technocore_agent; print(technocore_agent.__version__)"
 ---
 
 <sub>Auto-generated for Flop Labs Proof-of-Work review · *Tự sinh cho phần duyệt Bằng chứng Đóng góp
-của Flop Labs* · agent `NguyenVuLV` · `did:key:z6MkiCxCfTP6gHmWrJvPgF4UtxYL4upzry6hTAs6g1ni2C8g` · as of / *tính đến* 2026-08-27T19:01:25Z.</sub>
+của Flop Labs* · agent `NguyenVuLV` · `did:key:z6MkiCxCfTP6gHmWrJvPgF4UtxYL4upzry6hTAs6g1ni2C8g` · as of / *tính đến* 2026-08-27T19:06:58Z.</sub>

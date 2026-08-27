@@ -88,9 +88,12 @@ def test_render_is_valid_doc():
              tag_list=["v1.2.1"])
     doc = cl.render(d)
     assert cl.DID in doc
-    assert "Verified Contribution Audit Trail" in doc
-    assert f"({cl.TOTAL_RECORDS} Records)" in doc
-    assert doc.count("\n| 0") + doc.count("\n| 1") >= cl.TOTAL_RECORDS   # đủ dòng bảng
+    assert "$FLOP Airdrop Protocol" in doc                               # bảng $FLOP tách riêng
+    assert "Ecosystem &amp; Infrastructure" in doc                       # bảng hạ tầng
+    assert f"({cl.FLOP_RECORDS} Records)" in doc
+    assert f"({cl.ECOSYSTEM_RECORDS} Records)" in doc
+    assert f"**{cl.TOTAL_RECORDS} Records**" in doc                      # tổng ở phần intro
+    assert doc.count("\n| 0") + doc.count("\n| 1") >= cl.TOTAL_RECORDS   # đủ dòng cả hai bảng
     assert "auto-generated" in doc.lower()
     assert "🇻🇳" in doc and "🇬🇧" in doc                                  # song ngữ VI/EN
 
