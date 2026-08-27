@@ -209,9 +209,12 @@ def render(d: dict) -> str:
 > · *{TOTAL_RECORDS} bản ghi trong hai bảng — **giao thức airdrop $FLOP** ({FLOP_RECORDS}) nổi lên
 > trước, rồi tới **hạ tầng &amp; hệ sinh thái** ({ECOSYSTEM_RECORDS}).*
 >
-> 🔄 **Auto-generated** by [`contributions_log.py`](contributions_log.py) from live data — do not
-> edit by hand; run the generator instead. · *Tự sinh từ dữ liệu sống; đừng sửa tay, hãy chạy
-> generator.* Last refreshed / Cập nhật lần cuối: **`{d['generated_at']}`**
+> 🔄 **Auto-generated &amp; bot-maintained.** This file is written by
+> [`contributions_log.py`](contributions_log.py) and refreshed on `main` every 6 hours by the
+> *Contributions Log* workflow — **never commit edits to it** (CI rejects a PR that does); change
+> the generator instead. · *Tự sinh &amp; do bot quản lý. File này do `contributions_log.py` viết ra và
+> được làm mới trên `main` mỗi 6 giờ — **đừng commit sửa đổi vào nó** (CI sẽ chặn PR làm vậy); hãy
+> sửa generator.* Last refreshed / Cập nhật lần cuối: **`{d['generated_at']}`**
 
 ---
 
@@ -350,7 +353,12 @@ def main(argv=None):
     data = gather(quiet=quiet or check)
     doc = render(data)
     if check:
-        sys.stdout.write(doc)
+        # Ghi UTF-8 bytes thẳng để không vỡ trên console không-UTF-8 (vd cp1252/Windows).
+        out = getattr(sys.stdout, "buffer", None)
+        if out is not None:
+            out.write(doc.encode("utf-8"))
+        else:
+            sys.stdout.write(doc)
         return 0
     with open(OUT_FILE, "w", encoding="utf-8", newline="\n") as f:
         f.write(doc)

@@ -6,6 +6,23 @@ on:
   pull_request:
 
 jobs:
+  guard-generated-file:
+    # contributions-log.md is generated & bot-maintained on main; a PR must not edit it.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Reject hand-edits to contributions-log.md
+        run: |
+          base="origin/${{ github.base_ref }}"
+          if git diff --name-only "$base"...HEAD | grep -qx 'contributions-log.md'; then
+            echo "::error file=contributions-log.md::This file is auto-generated and bot-maintained on main by the Contributions Log workflow. Don't commit changes to it in a PR — edit contributions_log.py instead; the bot regenerates the file after merge."
+            exit 1
+          fi
+          echo "OK: PR does not modify the generated contributions-log.md."
+
   test:
     runs-on: ubuntu-latest
     strategy:
