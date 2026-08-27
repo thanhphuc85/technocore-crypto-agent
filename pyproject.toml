@@ -30,7 +30,7 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest"]
+dev = ["pytest", "ruff"]
 
 [project.urls]
 Homepage = "https://github.com/thanhphuc85/technocore-crypto-agent"

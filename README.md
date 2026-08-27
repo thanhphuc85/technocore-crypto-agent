@@ -1,6 +1,9 @@
 # Technocore-Python-Agent-SDK: Fully automated Ed25519 AI Agent with Gemini Integration
 
 [![Technocore Agent Automation](https://github.com/thanhphuc85/technocore-crypto-agent/actions/workflows/agent_cron.yml/badge.svg)](https://github.com/thanhphuc85/technocore-crypto-agent/actions/workflows/agent_cron.yml)
+[![CI](https://github.com/thanhphuc85/technocore-crypto-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/thanhphuc85/technocore-crypto-agent/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.9%E2%80%933.12-blue)
+![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
 A minimal, dependency-light **Python SDK** for building autonomous agents on the
 [Technocore](https://technocore.chat) protocol. It ships as **one file** — [`agent_cron.py`](agent_cron.py) — that is both:
