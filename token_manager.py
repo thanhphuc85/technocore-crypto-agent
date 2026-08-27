@@ -71,6 +71,17 @@ def rpc_url() -> str:
     return os.environ.get("FLOP_RPC_URL", "").strip()
 
 
+def submit_url() -> str:
+    """Endpoint relayer (nếu tách khỏi RPC). Relay adapter ưu tiên biến này."""
+    return os.environ.get("FLOP_SUBMIT_URL", "").strip()
+
+
+def endpoint_url() -> str:
+    """Cổng để gửi giao dịch: FLOP_SUBMIT_URL (relayer) hoặc FLOP_RPC_URL. Rỗng ->
+    testnet chưa cấu hình endpoint."""
+    return submit_url() or rpc_url()
+
+
 def default_token() -> str:
     """Ký hiệu token mặc định (đổi qua FLOP_TOKEN_SYMBOL nếu cần)."""
     return os.environ.get("FLOP_TOKEN_SYMBOL", "").strip() or DEFAULT_TOKEN
@@ -168,6 +179,40 @@ def credit(amount, token: str = None, memo: str = "faucet credit", path: str = N
             "balance_after": new_bal, "reason": "credited"}
 
 
+# --- Nối submit_tx + nạp khóa agent (lazy, có cache) ------------------------------
+
+def _resolve_submit_tx():
+    """Tự dựng adapter submit_tx từ flop_tx theo env (FLOP_TX_MODE/FLOP_SUBMIT_URL).
+    None nếu chưa cấu hình -> spend() báo skipped_unconfigured. Không làm sập nếu
+    flop_tx thiếu."""
+    try:
+        import flop_tx
+        return flop_tx.build_submit_tx()
+    except Exception as e:
+        print(f"[ledger] không dựng được submit_tx ({e})")
+        return None
+
+
+_key_cache = None
+
+
+def _agent_key():
+    """(private_key, did) của agent từ AGENT_PRIVATE_KEY, cache lại. (None, None) nếu
+    không có khóa/SDK — spend vẫn chạy ở simulation, chỉ là payload không được ký."""
+    global _key_cache
+    if _key_cache is not None:
+        return _key_cache
+    if load_private_key is None or did_of is None:
+        _key_cache = (None, None)
+        return _key_cache
+    try:
+        pk = load_private_key()
+        _key_cache = (pk, did_of(pk))
+    except Exception:
+        _key_cache = (None, None)
+    return _key_cache
+
+
 # --- Ký giao dịch (Ed25519 THẬT — canonical: did|token|amount|nonce|memo) ----------
 
 def sign_transaction(private_key, did: str, token: str, amount: str, memo: str,
@@ -218,18 +263,19 @@ def spend(amount, memo, token: str = None, *, path: str = None,
     # Ký giao dịch (thật) nếu có khóa — bằng chứng ý định ở cả 2 chế độ.
     signed = sign_transaction(private_key, did, token, _fmt(amt), memo)
 
-    # --- TESTNET: chỉ gửi thật qua seam được tiêm ---
+    # --- TESTNET: chỉ gửi thật qua seam được tiêm (hoặc tự dựng từ flop_tx) ---
     if mode == "testnet":
-        url = (rpc or rpc_url())
-        if not url or submit_tx is None:
+        url = (rpc or endpoint_url())                # RPC hoặc relayer (FLOP_SUBMIT_URL)
+        submit = submit_tx or _resolve_submit_tx()   # tự nối adapter khi không tiêm tay
+        if not url or submit is None:
             return {**base, "outcome": "skipped_unconfigured", "signed": signed,
-                    "reason": ("TESTNET_ENABLED=true nhưng FLOP_RPC_URL trống — từ chối "
-                               "gửi tới RPC đoán mò") if not url else
-                              ("TESTNET_ENABLED=true nhưng chưa tiêm submit_tx — từ chối "
-                               "bịa giao dịch")}
+                    "reason": ("TESTNET_ENABLED=true nhưng FLOP_RPC_URL/FLOP_SUBMIT_URL trống "
+                               "— từ chối gửi tới endpoint đoán mò") if not url else
+                              ("TESTNET_ENABLED=true nhưng chưa có submit_tx (đặt FLOP_TX_MODE/"
+                               "FLOP_SUBMIT_URL hoặc tiêm tay) — từ chối bịa giao dịch")}
         try:
-            result = submit_tx({"token": token, "amount": _fmt(amt), "memo": memo,
-                                "rpc_url": url, "signed": signed}) or {}
+            result = submit({"token": token, "amount": _fmt(amt), "memo": memo,
+                             "rpc_url": url, "signed": signed}) or {}
             tx_hash = result.get("tx_hash") or result.get("txHash")
         except Exception as e:
             return {**base, "outcome": "error_submit",
@@ -272,6 +318,11 @@ def meter_inference(amount: str = None, memo: str = "Gemini Inference",
     if not _env_flag("FLOP_METER_ENABLED"):
         return {"outcome": "skipped_off", "reason": "FLOP_METER_ENABLED tắt"}
     amt = amount or os.environ.get("FLOP_INFERENCE_COST", "").strip() or "0.001"
+    # Ở testnet, payload cần chữ ký -> tự nạp khóa agent nếu caller không truyền.
+    if kw.get("private_key") is None and kw.get("did") is None:
+        pk, did = _agent_key()
+        if pk is not None:
+            kw["private_key"], kw["did"] = pk, did
     try:
         return spend(amt, memo, token=token, path=path, **kw)
     except Exception as e:                       # tuyệt đối không làm sập caller

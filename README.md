@@ -138,6 +138,9 @@ python agent_cron.py           # runs telemetry + auto-responder once
 | `REPO_URL` | optional | Repo link embedded in the manifest (default: this repo) |
 | `TESTNET_ENABLED` | optional | FLOP token ledger mode: `false` (default) = simulation · `true` = real testnet transfers |
 | `FLOP_RPC_URL` | optional | Testnet RPC endpoint — required (with a `submit_tx`) before a testnet spend will send |
+| `FLOP_SUBMIT_URL` | optional | Relayer endpoint the default `submit_tx` POSTs the signed tx to (falls back to `FLOP_RPC_URL`) |
+| `FLOP_TX_MODE` | optional | Which `submit_tx` adapter: `relay` (default) · `evm` (stub) · `off` |
+| `FLOP_TX_UA` | optional | User-Agent header the relay adapter sends (default `flop-agent/1.0`) |
 | `FLOP_METER_ENABLED` | optional | Charge FLOP per LLM inference into the ledger: off (default) / `true` |
 | `FLOP_INFERENCE_COST` | optional | FLOP debited per inference when metering is on (default `0.001`) |
 | `TOKEN_LEDGER_FILE` | optional | Ledger store path (default `token_ledger.json`) |
@@ -261,6 +264,25 @@ It is **off by default**, wrapped so it can never break a reply, and — to pers
 ledger across GitHub Actions runs — add `token_ledger.json` to the `actions/cache` step
 and `credit()` it after a faucet claim.
 
+### The `submit_tx` seam ([`flop_tx.py`](flop_tx.py))
+
+In testnet mode `spend()` never guesses — it sends only through a `submit_tx(tx)` adapter.
+[`flop_tx.py`](flop_tx.py) ships the scaffold so you just fill in the endpoint:
+
+- **`relay_submit_tx`** (default) — POSTs the **Ed25519-signed** payload
+  (`{did, token, amount, nonce, memo, sig}`) to `FLOP_SUBMIT_URL`, then reads the tx hash
+  from the response (`tx_hash` / `txHash` / `hash` / JSON-RPC `result`). No extra deps — it
+  reuses the agent's own signature, exactly like posting a signed message to a room. Adjust
+  the body/parse in one place once FLOP's wire-format is known.
+- **`evm_submit_tx`** — a documented **stub** that raises until wired (EVM needs a secp256k1
+  key + `eth-account`, distinct from the agent's Ed25519 key).
+- **`build_submit_tx()`** — picks the adapter from `FLOP_TX_MODE` and returns `None` until an
+  endpoint is set, so `spend()` reports `skipped_unconfigured` rather than sending blind.
+
+`spend()` auto-wires this from env, so going live is: set `FLOP_SUBMIT_URL` (or
+`FLOP_RPC_URL`), flip `TESTNET_ENABLED=true`. To inject your own, pass `submit_tx=` to
+`spend()`. Nothing hits a network until you do.
+
 Try it offline (no key, no network):
 
 ```bash
@@ -306,7 +328,9 @@ State persists across runs via `actions/cache` (`state.json`) **and** the KV `cu
 .
 ├─ agent_cron.py                 # the SDK + reference agent (single file)
 ├─ token_manager.py              # FLOP token ledger (simulation ↔ testnet via TESTNET_ENABLED)
+├─ flop_tx.py                    # submit_tx adapters (relay signed tx / EVM stub)
 ├─ test_token_manager.py         # tests for the ledger (python -m pytest)
+├─ test_flop_tx.py               # tests for the submit_tx scaffold
 └─ .github/workflows/
    └─ agent_cron.yml             # cron schedule + state cache + run agent
 ```
