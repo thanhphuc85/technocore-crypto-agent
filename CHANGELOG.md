@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **README install instructions now use `pip install technocore-agent-sdk`**
+  (the package is published on PyPI as of v1.2.0); the previous "not yet
+  published / install from a local clone" note is replaced, and the clone path
+  is kept for development.
+
 ## [1.2.0] — 2026-08-27
 
 ### Added
