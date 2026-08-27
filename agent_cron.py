@@ -35,10 +35,32 @@ def _write_summary(lines) -> None:
 ROOM = "lobby"
 BASE_URL = "https://technocore.chat"
 
-# --- Agent branding (độc quyền) ---
-AGENT_NAME = "NguyenVuLV"       # tên riêng của agent — hiện trong mọi tin nhắn
-HANDLE = "@nguyenvulv"          # nick để người khác mention agent (viết thường)
-KV_NS = "nguyenvulv"            # namespace Key-Value Store trên /kv/<ns> (server-side)
+# --- Agent branding (ĐỌC TỪ ENV để fork/template tự đổi tên; default = reference agent) ---
+# Đặt AGENT_NAME / HANDLE / KV_NS qua env hoặc GitHub Actions Variables. Bỏ trống -> giữ
+# nguyên danh tính agent tham chiếu, nên bản gốc chạy y hệt như cũ.
+AGENT_NAME = os.environ.get("AGENT_NAME", "").strip() or "NguyenVuLV"
+# HANDLE mặc định = "@" + tên viết thường, bỏ khoảng trắng (khớp "@nguyenvulv" cũ).
+HANDLE = os.environ.get("HANDLE", "").strip() or f"@{AGENT_NAME.lower().replace(' ', '')}"
+
+# KV namespace phải khớp ^[a-z0-9][a-z0-9_-]{0,47}$ (server 400 nếu sai) -> validate,
+# giá trị sai được ép về dạng hợp lệ thay vì để agent ghi KV hỏng mà khó truy nguyên.
+_KV_NS_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
+
+
+def _sanitize_ns(name: str) -> str:
+    """Ép chuỗi bất kỳ về namespace KV hợp lệ (^[a-z0-9][a-z0-9_-]{0,47}$)."""
+    s = re.sub(r"[^a-z0-9_-]", "-", name.strip().lower()).lstrip("-_")
+    return (s or "agent")[:48]
+
+
+_kv_ns_env = os.environ.get("KV_NS", "").strip()
+if _kv_ns_env and _KV_NS_RE.match(_kv_ns_env):
+    KV_NS = _kv_ns_env
+elif _kv_ns_env:
+    KV_NS = _sanitize_ns(_kv_ns_env)
+    print(f"[config] KV_NS={_kv_ns_env!r} không hợp lệ, dùng {KV_NS!r}")
+else:
+    KV_NS = _sanitize_ns(AGENT_NAME)  # default: suy ra từ AGENT_NAME -> "nguyenvulv"
 # Thử lane KÝ khi ghi KV (mặc định TẮT). Theo API technocore.chat, namespace thường
 # là world-writable (KHÔNG có tùy chọn ký); ký KV chỉ dành cho namespace quản trị phòng
 # room-owners/room-allow (canonical "<ns>|d-<room>|<nonce>|<value>"), agent này không dùng.

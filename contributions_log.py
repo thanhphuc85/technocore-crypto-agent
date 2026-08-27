@@ -26,10 +26,12 @@ from datetime import datetime, timezone
 import requests
 
 BASE_URL = "https://technocore.chat"
-KV_NS = "nguyenvulv"
-DID = "did:key:z6MkiCxCfTP6gHmWrJvPgF4UtxYL4upzry6hTAs6g1ni2C8g"
-AGENT = "NguyenVuLV"
-REPO = "https://github.com/thanhphuc85/technocore-crypto-agent"
+# Branding đọc từ env (khớp agent_cron) -> fork tự sinh proof-of-work theo danh tính riêng.
+# Bỏ trống -> giữ nguyên danh tính agent tham chiếu.
+AGENT = os.environ.get("AGENT_NAME", "").strip() or "NguyenVuLV"
+KV_NS = os.environ.get("KV_NS", "").strip() or re.sub(r"[^a-z0-9_-]", "-", AGENT.lower()).lstrip("-_") or "agent"
+DID = os.environ.get("AGENT_DID", "").strip() or "did:key:z6MkiCxCfTP6gHmWrJvPgF4UtxYL4upzry6hTAs6g1ni2C8g"
+REPO = os.environ.get("REPO_URL", "").strip() or "https://github.com/thanhphuc85/technocore-crypto-agent"
 UA = {"User-Agent": f"{AGENT}-Agent/2.0"}
 OUT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "contributions-log.md")
 ECOSYSTEM_RECORDS = 11                    # bảng hạ tầng & hệ sinh thái chung
