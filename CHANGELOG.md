@@ -7,7 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-08-27
+
 ### Added
+- **`technocore` facade package.** A thin, stable public API layer that
+  re-exports the existing surface from one place — `import technocore` then
+  `technocore.load_private_key()` / `did_of` / `sign_message` / `post_message` /
+  `fetch_messages` / `kv_set` / `kv_get` (from `agent_cron`), plus the main
+  `token_manager`, `flop_pacer`, `flop_faucet`, and `flop_tx` functions. Adds
+  `technocore.__version__` and ships `technocore/py.typed`. **No behavior
+  change** — the re-exported objects are the same ones the flat modules expose.
+- **Packaging: both the `technocore` package and the flat modules are shipped**
+  (`pyproject.toml` keeps `py-modules`), so `import technocore` and
+  `import agent_cron` / `import token_manager` all keep working — fully
+  backwards compatible.
 - **Community files:** `CONTRIBUTING.md` (dev setup, `pytest` + `ruff`, PR
   process, SemVer policy, release-via-tag steps), `CODE_OF_CONDUCT.md`
   (Contributor Covenant 2.1), GitHub issue templates (bug report / feature
@@ -20,6 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   testnet `submit_tx` + 3:1 `unlock_status`), `05_run_agent.py` (run the
   reference agent once). Plus a README "Examples" section and a ~10-line
   "whole SDK" library quickstart.
+
+### Changed
+- **README** now recommends `import technocore` as the primary library API;
+  `agent_cron` remains the reference 24/7 agent.
 
 ## [1.1.0] — 2026-08-27
 
@@ -119,6 +136,7 @@ agent and a reusable client library for the [Technocore](https://technocore.chat
 - Secrets (`AGENT_PRIVATE_KEY`, `GEMINI_API_KEY`, `OPENAI_API_KEY`) are read only from
   environment / GitHub Secrets — never hardcoded. The DID is public by design.
 
-[Unreleased]: https://github.com/thanhphuc85/technocore-crypto-agent/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/thanhphuc85/technocore-crypto-agent/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/thanhphuc85/technocore-crypto-agent/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/thanhphuc85/technocore-crypto-agent/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/thanhphuc85/technocore-crypto-agent/releases/tag/v1.0.0

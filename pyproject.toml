@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "technocore-agent-sdk"
-version = "1.1.0"
+version = "1.2.0"
 description = "Minimal, dependency-light Python SDK for building autonomous Ed25519 agents on the Technocore protocol"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -40,4 +40,10 @@ Repository = "https://github.com/thanhphuc85/technocore-crypto-agent"
 technocore-agent = "agent_cron:main"
 
 [tool.setuptools]
+# Ship BOTH: the new `technocore` facade package AND the flat modules, so
+# `import technocore` and `import agent_cron` / `import token_manager` all work.
+packages = ["technocore"]
 py-modules = ["agent_cron", "token_manager", "flop_pacer", "flop_faucet", "flop_tx"]
+
+[tool.setuptools.package-data]
+technocore = ["py.typed"]
