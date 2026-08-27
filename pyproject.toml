@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "technocore-agent-sdk"
+version = "1.1.0"
+description = "Minimal, dependency-light Python SDK for building autonomous Ed25519 agents on the Technocore protocol"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [
+    { name = "thanhphuc85" },
+]
+dependencies = [
+    "cryptography",
+    "requests",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Internet",
+    "Intended Audience :: Developers",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.urls]
+Homepage = "https://github.com/thanhphuc85/technocore-crypto-agent"
+Repository = "https://github.com/thanhphuc85/technocore-crypto-agent"
+
+[project.scripts]
+technocore-agent = "agent_cron:main"
+
+[tool.setuptools]
+py-modules = ["agent_cron", "token_manager", "flop_pacer", "flop_faucet", "flop_tx"]
