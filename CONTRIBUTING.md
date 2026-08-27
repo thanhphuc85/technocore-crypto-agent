@@ -1,0 +1,94 @@
+# Contributing
+
+Thanks for your interest in improving **technocore-agent-sdk**. This is a small,
+dependency-light project — contributions that keep it minimal, auditable, and
+well-tested are very welcome.
+
+By participating you agree to abide by our [Code of Conduct](CODE_OF_CONDUCT.md).
+
+## Development setup
+
+Requires **Python 3.9+**.
+
+```bash
+git clone https://github.com/thanhphuc85/technocore-crypto-agent.git
+cd technocore-crypto-agent
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -e .[dev]
+```
+
+`pip install -e .[dev]` installs the runtime deps (`cryptography`, `requests`)
+plus the dev tools (`pytest`, `ruff`) as an editable install, so imports resolve
+from anywhere and your edits take effect without reinstalling.
+
+## Running tests and lint
+
+```bash
+pytest -q                              # full suite (fast, no network, no key needed)
+ruff check .                           # lint
+ruff check --select=E9,F63,F7,F82 .    # the error-only gate CI enforces
+ruff format --check .                  # formatting check (run `ruff format .` to fix)
+```
+
+CI runs `pytest -q` and the error-only `ruff check` on Python 3.9–3.12 for every
+push to `main` and every pull request. Please make sure both pass locally before
+opening a PR.
+
+New behavior should come with tests. The suite is plain `pytest` — add cases to
+the matching `test_*.py` file (or a new one) and keep them offline: no live
+network calls, no real private key.
+
+## Pull request process
+
+1. **Open an issue first** for anything beyond a small fix, so the approach can be
+   agreed before you invest time.
+2. **Branch from `main`** using a short prefixed name — `feat/…`, `fix/…`,
+   `docs/…`, `chore/…`, `ci/…`.
+3. **Keep the change focused.** One logical change per PR; unrelated cleanups
+   belong in their own PR.
+4. **Update docs and `CHANGELOG.md`.** Add a bullet under `## [Unreleased]` in the
+   appropriate `Added` / `Changed` / `Fixed` / `Security` group.
+5. **Run `pytest -q` and `ruff check .`** and confirm they pass.
+6. **Open the PR against `main`**, fill in the template, and link the issue it
+   closes. Keep the title in the imperative mood (`fix: advance gate only on
+   success`).
+7. A maintainer reviews; address feedback by pushing follow-up commits (no
+   force-push during review unless asked). PRs are squash-merged.
+
+## Versioning (SemVer)
+
+This project follows [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
+Given a version `MAJOR.MINOR.PATCH`:
+
+- **MAJOR** — incompatible API changes to the public helpers in `agent_cron.py`
+  (or the other importable modules).
+- **MINOR** — new, backwards-compatible functionality (new helpers, new commands,
+  new opt-in env flags that default to today's behavior).
+- **PATCH** — backwards-compatible bug fixes only.
+
+Contributors don't bump the version. Describe the impact in your `CHANGELOG.md`
+entry and the maintainer decides the release level.
+
+## Cutting a release (maintainers)
+
+Releases are driven by an annotated tag; the
+[`release.yml`](.github/workflows/release.yml) workflow publishes to PyPI via
+Trusted Publishing on tag push.
+
+1. Ensure `main` is green and every change to ship is under `## [Unreleased]` in
+   `CHANGELOG.md`.
+2. Bump `version` in `pyproject.toml` to the new `X.Y.Z`.
+3. In `CHANGELOG.md`: rename `## [Unreleased]` to `## [X.Y.Z] — YYYY-MM-DD`, add a
+   fresh empty `## [Unreleased]` above it, and update the link refs at the bottom
+   (`[Unreleased]` compare link → `vX.Y.Z...HEAD`, plus a new `[X.Y.Z]` line).
+4. Commit (`release: cut vX.Y.Z`), open a PR, merge once green.
+5. Tag the merge commit and push the tag:
+
+   ```bash
+   git checkout main && git pull
+   git tag -a vX.Y.Z -m "vX.Y.Z"
+   git push origin vX.Y.Z
+   ```
+
+6. The release workflow builds the sdist/wheel and publishes to PyPI. Create a
+   GitHub Release from the tag with the changelog section as the notes.

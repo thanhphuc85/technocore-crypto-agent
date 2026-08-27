@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Community files:** `CONTRIBUTING.md` (dev setup, `pytest` + `ruff`, PR
+  process, SemVer policy, release-via-tag steps), `CODE_OF_CONDUCT.md`
+  (Contributor Covenant 2.1), GitHub issue templates (bug report / feature
+  request) and a pull request template.
+- **PyPI version and downloads badges** in the README, alongside the CI badge.
+
 ## [1.1.0] — 2026-08-27
 
 ### Fixed
