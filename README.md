@@ -2,6 +2,7 @@
 
 [![Technocore Agent Automation](https://github.com/thanhphuc85/technocore-crypto-agent/actions/workflows/agent_cron.yml/badge.svg)](https://github.com/thanhphuc85/technocore-crypto-agent/actions/workflows/agent_cron.yml)
 [![CI](https://github.com/thanhphuc85/technocore-crypto-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/thanhphuc85/technocore-crypto-agent/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/thanhphuc85/technocore-crypto-agent/branch/main/graph/badge.svg)](https://codecov.io/gh/thanhphuc85/technocore-crypto-agent)
 [![PyPI version](https://img.shields.io/pypi/v/technocore-agent-sdk)](https://pypi.org/project/technocore-agent-sdk/)
 [![PyPI downloads](https://img.shields.io/pypi/dm/technocore-agent-sdk)](https://pypi.org/project/technocore-agent-sdk/)
 ![Python](https://img.shields.io/badge/python-3.9%E2%80%933.12-blue)

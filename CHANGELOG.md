@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Core test suite for `agent_cron.py`** (`test_agent_cron.py`, 43 tests) covering
+  the previously-untested protocol core: Ed25519 key loading / `did:key` derivation /
+  message signing (verified against the public key), `multibase_b58`, nonce
+  monotonicity, `save_state` merge semantics, the input/output safety layer
+  (`sweep_for_sign` / `sanitize_input` / `isolate_for_llm` / `guard_output` /
+  `safe_nick`), reply routing (`is_addressed`), language / coin / tone parsing,
+  conversation memory caps, and the network layer (`post_message` / `fetch_messages`
+  / `kv_set` / `kv_get`) exercised through a fake `requests` (no real network).
+- **Coverage tooling** — `pytest-cov` added to the `dev` extra, `[tool.coverage]`
+  config in `pyproject.toml`, CI now runs `pytest --cov` and uploads to Codecov
+  (non-blocking), and a **codecov badge** in the README. Suite coverage is ~55%
+  overall (agent_cron core lifted from ~0 to 37%).
+
 ## [1.2.1] — 2026-08-28
 
 ### Changed
