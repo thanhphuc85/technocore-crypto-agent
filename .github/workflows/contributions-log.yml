@@ -33,19 +33,27 @@ jobs:
       - name: Install (for version + tests metrics)
         run: pip install -e .[dev]
 
-      - name: Regenerate contributions-log.md
+      - name: Regenerate &amp; commit (race-proof)
         env:
           GH_TOKEN: ${{ github.token }}     # cho `gh pr list` đếm PR đã merge
-        run: python contributions_log.py
-
-      - name: Commit if changed
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if git diff --quiet -- contributions-log.md; then
-            echo "No change in contributions-log.md — nothing to commit."
-          else
+          # Regenerate ON TOP OF the freshest main mỗi lần thử, rồi push. Nếu một run
+          # khác chen ngang (push race), reset về main mới và làm lại — không rebase,
+          # không conflict, tối đa 3 lần.
+          for i in 1 2 3; do
+            git fetch --quiet origin main
+            git reset --quiet --hard origin/main
+            python contributions_log.py --quiet
+            if git diff --quiet -- contributions-log.md; then
+              echo "No change — nothing to commit."; exit 0
+            fi
             git add contributions-log.md
             git commit -m "chore: auto-refresh contributions-log.md [skip ci]"
-            git push
-          fi
+            if git push; then
+              echo "Pushed refreshed contributions-log.md."; exit 0
+            fi
+            echo "Push raced (attempt $i) — retrying against latest main."; sleep 3
+          done
+          echo "::error::could not push contributions-log.md after 3 attempts"; exit 1
