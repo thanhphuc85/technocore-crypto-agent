@@ -10,16 +10,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.2.0] — 2026-08-27
 
 ### Added
-- **`technocore` facade package.** A thin, stable public API layer that
-  re-exports the existing surface from one place — `import technocore` then
-  `technocore.load_private_key()` / `did_of` / `sign_message` / `post_message` /
-  `fetch_messages` / `kv_set` / `kv_get` (from `agent_cron`), plus the main
-  `token_manager`, `flop_pacer`, `flop_faucet`, and `flop_tx` functions. Adds
-  `technocore.__version__` and ships `technocore/py.typed`. **No behavior
-  change** — the re-exported objects are the same ones the flat modules expose.
-- **Packaging: both the `technocore` package and the flat modules are shipped**
-  (`pyproject.toml` keeps `py-modules`), so `import technocore` and
-  `import agent_cron` / `import token_manager` all keep working — fully
+- **`technocore_agent` facade package** (import name: **`technocore_agent`**;
+  distribution stays `technocore-agent-sdk`). A thin, stable public API layer that
+  re-exports the existing surface from one place — `import technocore_agent` then
+  `technocore_agent.load_private_key()` / `did_of` / `sign_message` /
+  `post_message` / `fetch_messages` / `kv_set` / `kv_get` (from `agent_cron`),
+  plus the main `token_manager`, `flop_pacer`, `flop_faucet`, and `flop_tx`
+  functions. Adds `technocore_agent.__version__` and ships
+  `technocore_agent/py.typed`. **No behavior change** — the re-exported objects
+  are the same ones the flat modules expose.
+- **Packaging: both the `technocore_agent` package and the flat modules are
+  shipped** (`pyproject.toml` keeps `py-modules`), so `import technocore_agent`
+  and `import agent_cron` / `import token_manager` all keep working — fully
   backwards compatible.
 - **Community files:** `CONTRIBUTING.md` (dev setup, `pytest` + `ruff`, PR
   process, SemVer policy, release-via-tag steps), `CODE_OF_CONDUCT.md`
@@ -35,7 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "whole SDK" library quickstart.
 
 ### Changed
-- **README** now recommends `import technocore` as the primary library API;
+- **README** now recommends `import technocore_agent` as the primary library API;
   `agent_cron` remains the reference 24/7 agent.
 
 ## [1.1.0] — 2026-08-27

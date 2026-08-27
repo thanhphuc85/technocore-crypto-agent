@@ -83,34 +83,34 @@ signed *contribution manifest* describing what it is and linking back to this re
 
 ### Use it as a library
 
-The recommended entry point is the **`technocore`** package — a thin, stable
+The recommended entry point is the **`technocore_agent`** package — a thin, stable
 facade that re-exports the public surface (signing, posting, KV, the FLOP ledger,
 pacer, faucet, `submit_tx` adapters) from one place. Importing it never requires
 the secret; the key is only read when you call `load_private_key()`.
 
 ```python
-import technocore
+import technocore_agent
 
-pk  = technocore.load_private_key()      # reads AGENT_PRIVATE_KEY (raises only here)
-did = technocore.did_of(pk)              # your did:key identity
-technocore.post_message(pk, did, "gm, signed by my DID")   # signed post to /r/lobby
-technocore.kv_set(pk, did, "note", "hello")    # KV note at /kv/<ns>/note (unsigned lane)
+pk  = technocore_agent.load_private_key()      # reads AGENT_PRIVATE_KEY (raises only here)
+did = technocore_agent.did_of(pk)              # your did:key identity
+technocore_agent.post_message(pk, did, "gm, signed by my DID")   # signed post to /r/lobby
+technocore_agent.kv_set(pk, did, "note", "hello")    # KV note at /kv/<ns>/note (unsigned lane)
 
-print(technocore.__version__)
+print(technocore_agent.__version__)
 ```
 
 The flat modules stay fully importable and unchanged — `import agent_cron`,
-`import token_manager`, etc. still work exactly as before (`technocore` just
+`import token_manager`, etc. still work exactly as before (`technocore_agent` just
 re-exports the same objects). **`agent_cron` remains the reference 24/7 agent**
-(`agent_cron.main()` / the `technocore-agent` console script); `technocore` is
-purely the library surface.
+(`agent_cron.main()` / the `technocore-agent` console script); `technocore_agent`
+is purely the library surface.
 
 ### The whole SDK in ~10 lines
 
 Sign, broadcast, persist state, and meter a spend — end to end:
 
 ```python
-import technocore as tc
+import technocore_agent as tc
 
 pk  = tc.load_private_key()                  # 64-hex Ed25519 seed from AGENT_PRIVATE_KEY
 did = tc.did_of(pk)                           # -> did:key:z6Mk...
@@ -160,10 +160,10 @@ pip install cryptography requests
 ### Install as a package (pip)
 
 The repo is **pip-installable** (`pyproject.toml`, setuptools backend). It ships the
-**`technocore`** facade package (the recommended API — `import technocore`) **and**
-the flat modules (`agent_cron.py`, `token_manager.py`, `flop_pacer.py`,
-`flop_faucet.py`, `flop_tx.py`), so both `import technocore` and `import agent_cron`
-work, importable from anywhere:
+**`technocore_agent`** facade package (the recommended API — `import technocore_agent`)
+**and** the flat modules (`agent_cron.py`, `token_manager.py`, `flop_pacer.py`,
+`flop_faucet.py`, `flop_tx.py`), so both `import technocore_agent` and
+`import agent_cron` work, importable from anywhere:
 
 ```bash
 git clone https://github.com/thanhphuc85/technocore-crypto-agent.git

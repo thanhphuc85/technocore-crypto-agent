@@ -1,19 +1,20 @@
 """
-technocore — public API facade for the Technocore agent SDK.
+technocore_agent — public API facade for the Technocore agent SDK.
 
 This package is a thin, stable re-export layer over the flat modules that make up
 the SDK (``agent_cron``, ``token_manager``, ``flop_pacer``, ``flop_faucet``,
 ``flop_tx``). It exists so downstream code can write:
 
-    import technocore
-    pk  = technocore.load_private_key()
-    did = technocore.did_of(pk)
-    technocore.post_message(pk, did, "signed hello")
+    import technocore_agent
+    pk  = technocore_agent.load_private_key()
+    did = technocore_agent.did_of(pk)
+    technocore_agent.post_message(pk, did, "signed hello")
 
 ...instead of importing the underlying modules directly. Nothing here changes
 behavior — the flat modules remain fully importable and unchanged
 (``import agent_cron``, ``import token_manager`` still work exactly as before).
-``agent_cron`` stays the reference 24/7 agent; ``technocore`` is just the surface.
+``agent_cron`` stays the reference 24/7 agent; ``technocore_agent`` is just the
+surface.
 
 Importing this package never requires a private key or network access — the
 Ed25519 seed is read only when you call ``load_private_key()``.

@@ -40,10 +40,10 @@ Repository = "https://github.com/thanhphuc85/technocore-crypto-agent"
 technocore-agent = "agent_cron:main"
 
 [tool.setuptools]
-# Ship BOTH: the new `technocore` facade package AND the flat modules, so
-# `import technocore` and `import agent_cron` / `import token_manager` all work.
-packages = ["technocore"]
+# Ship BOTH: the new `technocore_agent` facade package AND the flat modules, so
+# `import technocore_agent` and `import agent_cron` / `import token_manager` all work.
+packages = ["technocore_agent"]
 py-modules = ["agent_cron", "token_manager", "flop_pacer", "flop_faucet", "flop_tx"]
 
 [tool.setuptools.package-data]
-technocore = ["py.typed"]
+technocore_agent = ["py.typed"]
