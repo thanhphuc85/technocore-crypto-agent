@@ -17,7 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`--check` prints without writing). A `Contributions Log` GitHub Actions
   workflow refreshes it every 6 hours / on manual dispatch / on `contributions_log.py`
   change and commits the result back. The generated document is **bilingual
-  (English / Vietnamese)**. Covered by `test_contributions_log.py`.
+  (English / Vietnamese)** and now leads with a dedicated **$FLOP Airdrop
+  Protocol** table (token ledger, 3:1 unlock accounting, spend pacer, faucet,
+  `submit_tx` seam, one-flag testnet switch) carrying a 🟢 live-simulation /
+  🟡 testnet-ready readiness column, separate from the broader ecosystem &amp;
+  infrastructure table. Covered by `test_contributions_log.py`.
 - **Core test suite for `agent_cron.py`** (`test_agent_cron.py`, 43 tests) covering
   the previously-untested protocol core: Ed25519 key loading / `did:key` derivation /
   message signing (verified against the public key), `multibase_b58`, nonce
