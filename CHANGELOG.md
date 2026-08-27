@@ -28,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Optional inference metering.** `FLOP_METER_ENABLED` (off by default) debits
   `FLOP_INFERENCE_COST` (default `0.001`) from the ledger per LLM reply, wired into
   `llm_reply` and wrapped so it can never break a reply.
+- **`submit_tx` scaffold (`flop_tx.py`).** Pluggable adapters that sign + send a real
+  testnet transfer: `relay_submit_tx` (default — POSTs the Ed25519-signed payload to
+  `FLOP_SUBMIT_URL`, no extra deps) and an `evm_submit_tx` stub. `spend()` auto-wires
+  the adapter from env (`FLOP_TX_MODE` / `FLOP_SUBMIT_URL`), so going live is just
+  setting an endpoint and `TESTNET_ENABLED=true` — no core-logic change. Covered by
+  `test_flop_tx.py` (8 tests).
 - **Full-outage detection.** Every successful call to `technocore.chat` (post / fetch /
   KV) is counted; if a run lands **zero** successful server calls, `main()` writes a
   warning and exits non-zero so the workflow shows **red** (and GitHub emails the owner)

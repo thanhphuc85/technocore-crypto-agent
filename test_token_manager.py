@@ -15,8 +15,9 @@ import token_manager as tm
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
     """Mỗi test khởi đầu ở simulation, không dính env FLOP_/TESTNET_ của máy chạy."""
-    for k in ("TESTNET_ENABLED", "FLOP_RPC_URL", "FLOP_TOKEN_SYMBOL",
-              "TOKEN_LEDGER_FILE", "FLOP_METER_ENABLED", "FLOP_INFERENCE_COST"):
+    for k in ("TESTNET_ENABLED", "FLOP_RPC_URL", "FLOP_SUBMIT_URL", "FLOP_TX_MODE",
+              "FLOP_TOKEN_SYMBOL", "TOKEN_LEDGER_FILE", "FLOP_METER_ENABLED",
+              "FLOP_INFERENCE_COST"):
         monkeypatch.delenv(k, raising=False)
 
 
@@ -100,13 +101,16 @@ def test_testnet_refuses_without_rpc(ledger, monkeypatch):
     assert tm.check_balance(path=ledger) == "100"   # số dư nguyên vẹn
 
 
-def test_testnet_refuses_without_submit_tx(ledger, monkeypatch):
+def test_testnet_refuses_when_tx_mode_off(ledger, monkeypatch):
+    # Có endpoint nhưng FLOP_TX_MODE=off -> KHÔNG tự nối adapter -> vẫn từ chối gửi.
     tm.credit("100", path=ledger)
     monkeypatch.setenv("TESTNET_ENABLED", "true")
     monkeypatch.setenv("FLOP_RPC_URL", "https://rpc.test")
+    monkeypatch.setenv("FLOP_TX_MODE", "off")
     r = tm.spend("1", "x", path=ledger)
     assert r["outcome"] == "skipped_unconfigured"
     assert "submit_tx" in r["reason"]
+    assert tm.check_balance(path=ledger) == "100"
 
 
 def test_testnet_submits_and_debits(ledger, monkeypatch):
