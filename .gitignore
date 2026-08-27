@@ -8,3 +8,5 @@ venv/
 # Agent runtime state (persisted via actions/cache, not committed)
 state.json
 token_ledger.json
+flop_pacer.json
+flop_faucet.json

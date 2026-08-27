@@ -1158,6 +1158,19 @@ def main():
     # 3) Tương tác 2 chiều: đọc room & trả lời tin gọi đích danh (LUÔN chạy)
     replies, proactive = auto_respond(private_key, did)
 
+    # 3b) (Tùy chọn, GATED) Công khai tiến độ MỞ KHÓA MAINNET 3:1 vào KV note `unlock`
+    #     để ai cũng audit được (GET /kv/<ns>/unlock). Mặc định TẮT (FLOP_PUBLISH_UNLOCK)
+    #     -> agent không đổi hành vi. Bọc kín: lỗi bị nuốt, không làm sập run.
+    if os.environ.get("FLOP_PUBLISH_UNLOCK", "").strip().lower() in ("1", "true", "on", "yes"):
+        try:
+            import token_manager
+            import flop_pacer
+            payload = {"unlock": token_manager.unlock_status(),
+                       "pacing": flop_pacer.pacing_status()}
+            kv_set(private_key, did, "unlock", json.dumps(payload, ensure_ascii=False))
+        except Exception as e:
+            print(f"[unlock] publish bỏ qua ({str(e)[:80]})")
+
     # 4) Tổng kết run + PHÁT HIỆN OUTAGE TOÀN PHẦN.
     #    Nếu KHÔNG một call nào tới technocore.chat thành công trong cả run này
     #    (fetch, post, kv đều fail) thì đây là outage/mạng hỏng thật -> để run ĐỎ
