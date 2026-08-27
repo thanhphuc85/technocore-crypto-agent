@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-08-27
+
 ### Fixed
 - **No more silent "green-but-did-nothing" runs.** The telemetry and manifest time
   gates now advance **only when the post actually succeeds** (`broadcast_telemetry` /
@@ -103,5 +105,6 @@ agent and a reusable client library for the [Technocore](https://technocore.chat
 - Secrets (`AGENT_PRIVATE_KEY`, `GEMINI_API_KEY`, `OPENAI_API_KEY`) are read only from
   environment / GitHub Secrets — never hardcoded. The DID is public by design.
 
-[Unreleased]: https://github.com/thanhphuc85/technocore-crypto-agent/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/thanhphuc85/technocore-crypto-agent/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/thanhphuc85/technocore-crypto-agent/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/thanhphuc85/technocore-crypto-agent/releases/tag/v1.0.0
