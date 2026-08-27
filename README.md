@@ -144,6 +144,17 @@ python agent_cron.py           # runs telemetry + auto-responder once
 | `FLOP_METER_ENABLED` | optional | Charge FLOP per LLM inference into the ledger: off (default) / `true` |
 | `FLOP_INFERENCE_COST` | optional | FLOP debited per inference when metering is on (default `0.001`) |
 | `TOKEN_LEDGER_FILE` | optional | Ledger store path (default `token_ledger.json`) |
+| `FLOP_UNLOCK_RATIO` | optional | Real testnet FLOP spent per 1 FLOP mainnet unlocked (default `3`, i.e. 3:1) |
+| `FLOP_MAINNET_CLAIM_URL` | optional | Mainnet claim endpoint — required (with an injected `claim_fn`) before `claim_mainnet_unlock()` will send |
+| `FLOP_DAILY_BUDGET` | optional | FLOP/day to spend on an even 24h pace (Dynamic Spend Rate). Unset ⇒ pacer off, caller uses a fixed fee |
+| `FLOP_MAX_PER_RUN` | optional | Cap on FLOP the pacer will suggest spending in a single run |
+| `FLOP_MIN_SPEND` | optional | Below this due amount the pacer waits rather than spending dust (default `0.0001`) |
+| `FLOP_PUBLISH_UNLOCK` | optional | Publish `unlock_status()` + pacer status to KV note `/kv/<ns>/unlock` each run: off (default) / `true` |
+| `FLOP_FAUCET_ENABLED` | optional | Enable the auto-cycle faucet scaffold: off (default) / `true` |
+| `FLOP_FAUCET_URL` | optional | Faucet endpoint — required (with an injected `claim_fn`) before a faucet claim will send |
+| `FLOP_FAUCET_AMOUNT` | optional | Expected FLOP per faucet claim (default `100`) |
+| `FLOP_FAUCET_COOLDOWN_HOURS` | optional | Minimum hours between faucet claims (default `24`) |
+| `FLOP_FAUCET_REFILL_BELOW` | optional | Only claim when the testnet balance is below this threshold (unset = no threshold check) |
 
 ---
 
@@ -302,6 +313,94 @@ python -m pytest test_token_manager.py -q
 
 ---
 
+## Mainnet unlock (3:1), spend pacer & faucet scaffold
+
+Some FLOP airdrop guides describe a testnet-to-mainnet bridge: every **N FLOP spent for
+real on testnet unlocks 1 FLOP on mainnet**. `token_manager.py` implements the accounting
+for that, plus two supporting pieces that keep the testnet spend itself honest and
+steady, with claiming kept behind its own gate.
+
+### 3:1 unlock accounting
+
+Every `spend()` call that actually lands on-chain (`spent_onchain`) — never a simulated
+one — accrues toward the unlock. `unlock_status()` reports the running tally:
+
+```python
+import token_manager as tm
+
+tm.unlock_status()
+# {"token": "FLOP", "ratio": "3",
+#  "spent_testnet": "9", "unlocked_mainnet": "3",
+#  "claimed_mainnet": "0", "claimable": "3"}
+```
+
+- **`spent_testnet`** — cumulative FLOP spent via `spend()` in **testnet** mode
+  (`TESTNET_ENABLED=true`, sent through a real `submit_tx`). Simulated spends are
+  **never** counted, so nobody can farm unlock credit with fake/mock spend.
+- **`unlocked_mainnet`** = `spent_testnet / FLOP_UNLOCK_RATIO` (default ratio `3`, i.e.
+  3 testnet FLOP → 1 mainnet FLOP).
+- **`claimable`** = `unlocked_mainnet - claimed_mainnet`, floored at `0`.
+
+Claiming the unlocked amount is a **real financial action**, so it goes through its own
+gated seam, `claim_mainnet_unlock()` — it refuses (`skipped_unconfigured`) unless both
+`FLOP_MAINNET_CLAIM_URL` and an injected `claim_fn` are supplied, and it never fabricates
+a claim tx. Once FLOP publishes the real claim endpoint, wiring it up is: implement
+`claim_fn`, set `FLOP_MAINNET_CLAIM_URL`. The accounting above doesn't change.
+
+### Spend pacer (`flop_pacer.py`) — Dynamic Spend Rate
+
+Dumping an entire faucet balance in one run looks like spam/bot behavior to most
+protocols. `flop_pacer.next_spend_amount()` instead computes how much FLOP is **due
+right now** to stay on a linear pace across the day, given `FLOP_DAILY_BUDGET`:
+
+```python
+import flop_pacer as fp
+
+fp.next_spend_amount()   # "0" if on pace / not due yet, else the amount due (capped)
+fp.record_spend("0.5")   # tell the pacer this much was just spent
+```
+
+- Unset `FLOP_DAILY_BUDGET` ⇒ the pacer is off (`None`) and callers fall back to a fixed
+  fee — this is exactly how `meter_inference()` uses it (see `token_manager.py`).
+- `FLOP_MAX_PER_RUN` caps how much a single run will spend even if more is "due".
+- `FLOP_MIN_SPEND` avoids dust-spending: if the due amount is below this, the pacer
+  returns `"0"` and lets the amount accumulate instead.
+
+### Auto-cycle faucet scaffold (`flop_faucet.py`) — gated
+
+`run_faucet_cycle()` checks a cooldown and an optional refill threshold, then calls an
+injected `claim_fn` to pull FLOP from a testnet faucet and credits it into the ledger.
+Like everything else touching a real endpoint in this repo, it's **off and unconfigured
+by default** — `FLOP_FAUCET_ENABLED` must be explicitly turned on, and it refuses
+(`skipped_unconfigured`) without both `FLOP_FAUCET_URL` and a `claim_fn`, never guessing
+an endpoint. Once FLOP publishes their faucet spec, wiring it up is: implement
+`claim_fn` against their scheme, set `FLOP_FAUCET_URL`, flip `FLOP_FAUCET_ENABLED=true`.
+
+The faucet (refills the wallet) and the pacer (spends it out evenly) are meant to run
+together: that combination maximizes **legitimate** testnet spend — the numerator of the
+3:1 unlock formula — without dumping or spam.
+
+### Publishing unlock progress (gated, `agent_cron.py`)
+
+Set `FLOP_PUBLISH_UNLOCK=true` and each agent run writes `unlock_status()` plus
+`flop_pacer.pacing_status()` to the KV note `/kv/<ns>/unlock`, so anyone can audit unlock
+progress with one GET:
+
+```bash
+curl https://technocore.chat/kv/nguyenvulv/unlock
+```
+
+Off by default; the write is wrapped so a failure here can never break a run.
+
+Try the whole flow offline (no key, no network — uses a fake `submit_tx`):
+
+```bash
+python token_manager.py
+python -m pytest test_flop_unlock.py test_flop_pacer.py test_flop_faucet.py -q
+```
+
+---
+
 ## Running 24/7 on GitHub Actions
 
 The included workflow [`.github/workflows/agent_cron.yml`](.github/workflows/agent_cron.yml) runs the
@@ -333,10 +432,15 @@ State persists across runs via `actions/cache` (`state.json`) **and** the KV `cu
 ```
 .
 ├─ agent_cron.py                 # the SDK + reference agent (single file)
-├─ token_manager.py              # FLOP token ledger (simulation ↔ testnet via TESTNET_ENABLED)
+├─ token_manager.py              # FLOP token ledger + 3:1 mainnet-unlock accounting (gated claim)
 ├─ flop_tx.py                    # submit_tx adapters (relay signed tx / EVM stub)
+├─ flop_pacer.py                 # Dynamic Spend Rate — paces testnet spend evenly across the day
+├─ flop_faucet.py                # auto-cycle faucet scaffold (gated — off/unconfigured by default)
 ├─ test_token_manager.py         # tests for the ledger (python -m pytest)
 ├─ test_flop_tx.py               # tests for the submit_tx scaffold
+├─ test_flop_unlock.py           # tests for the 3:1 unlock accounting + gated claim
+├─ test_flop_pacer.py            # tests for the spend pacer
+├─ test_flop_faucet.py           # tests for the faucet scaffold
 └─ .github/workflows/
    └─ agent_cron.yml             # cron schedule + state cache + run agent
 ```

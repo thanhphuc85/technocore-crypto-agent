@@ -82,6 +82,15 @@ def endpoint_url() -> str:
     return submit_url() or rpc_url()
 
 
+def unlock_ratio() -> Decimal:
+    """Tỉ lệ mở khóa mainnet: mỗi `ratio` FLOP chi THẬT trên testnet mở khóa 1 FLOP
+    mainnet (mainnet = tổng_testnet_đã_chi / ratio). Mặc định 3 (FLOP_UNLOCK_RATIO);
+    giá trị sai/không dương -> 3."""
+    raw = os.environ.get("FLOP_UNLOCK_RATIO", "").strip()
+    d = _parse_amount(raw) if raw else None
+    return d if (d is not None and d > 0) else Decimal(3)
+
+
 def default_token() -> str:
     """Ký hiệu token mặc định (đổi qua FLOP_TOKEN_SYMBOL nếu cần)."""
     return os.environ.get("FLOP_TOKEN_SYMBOL", "").strip() or DEFAULT_TOKEN
@@ -177,6 +186,88 @@ def credit(amount, token: str = None, memo: str = "faucet credit", path: str = N
     _save_ledger(state, path)
     return {"ok": True, "token": token, "amount": _fmt(amt), "mode": mode,
             "balance_after": new_bal, "reason": "credited"}
+
+
+# --- Kế toán MỞ KHÓA MAINNET (3:1) ------------------------------------------------
+# Mỗi `unlock_ratio` FLOP chi THẬT trên testnet (spent_onchain) mở khóa 1 FLOP mainnet.
+# Chi MÔ PHỎNG (spent_simulated) KHÔNG tính -> chống "farm" mở khóa bằng tiền giả.
+# Đây chỉ là HẠCH TOÁN quyền; claim FLOP thật là hành động tài chính, đi qua seam
+# gated claim_mainnet_unlock() (từ chối cho tới khi có cơ chế + endpoint thật).
+
+def _unlock_state(state: dict) -> dict:
+    u = state.setdefault("unlock", {})
+    u.setdefault("spent_testnet", {})
+    u.setdefault("claimed_mainnet", {})
+    return u
+
+
+def _accrue_unlock(state: dict, token: str, amount: Decimal) -> None:
+    """Cộng dồn chi testnet THẬT vào quyền mở khóa. Gọi CHỈ khi spent_onchain."""
+    u = _unlock_state(state)
+    prev = _parse_amount(u["spent_testnet"].get(token, "0")) or Decimal(0)
+    u["spent_testnet"][token] = _fmt(prev + amount)
+
+
+def unlock_status(token: str = None, path: str = None) -> dict:
+    """Tiến độ mở khóa mainnet cho token:
+       spent_testnet    — tổng FLOP đã chi THẬT trên testnet
+       unlocked_mainnet — = spent_testnet / ratio (quyền đã kiếm được)
+       claimed_mainnet  — đã claim
+       claimable        — còn claim được = max(unlocked - claimed, 0)."""
+    token = (token or default_token())
+    u = _unlock_state(load_ledger(path))
+    ratio = unlock_ratio()
+    spent = _parse_amount(u["spent_testnet"].get(token, "0")) or Decimal(0)
+    claimed = _parse_amount(u["claimed_mainnet"].get(token, "0")) or Decimal(0)
+    unlocked = spent / ratio
+    claimable = unlocked - claimed
+    return {
+        "token": token, "ratio": _fmt(ratio),
+        "spent_testnet": _fmt(spent), "unlocked_mainnet": _fmt(unlocked),
+        "claimed_mainnet": _fmt(claimed),
+        "claimable": _fmt(claimable if claimable > 0 else Decimal(0)),
+    }
+
+
+def claim_mainnet_unlock(amount=None, token: str = None, *, path: str = None,
+                         claim_fn=None, claim_url: str = None,
+                         private_key=None, did: str = None, log=print) -> dict:
+    """CLAIM phần FLOP mainnet đã mở khóa. Đây là HÀNH ĐỘNG TÀI CHÍNH THẬT -> chỉ đi
+    qua seam được tiêm `claim_fn` + endpoint tường minh (FLOP_MAINNET_CLAIM_URL).
+    Thiếu một trong hai -> skipped_unconfigured (KHÔNG bao giờ bịa claim). Không có gì
+    để claim -> skipped_nothing. Thành công -> tăng claimed_mainnet. `amount` None =
+    claim toàn bộ phần claimable."""
+    token = (token or default_token())
+    st = unlock_status(token, path=path)
+    claimable = _parse_amount(st["claimable"]) or Decimal(0)
+    want = _parse_amount(amount) if amount is not None else claimable
+    if want is None or want <= 0:
+        return {**st, "outcome": "skipped_nothing", "reason": "không có phần mở khóa để claim"}
+    if want > claimable:
+        want = claimable
+
+    url = (claim_url or os.environ.get("FLOP_MAINNET_CLAIM_URL", "").strip())
+    if not url or claim_fn is None:
+        return {**st, "outcome": "skipped_unconfigured",
+                "reason": ("FLOP_MAINNET_CLAIM_URL trống — từ chối claim tới endpoint đoán mò"
+                           if not url else
+                           "chưa tiêm claim_fn — từ chối bịa giao dịch claim mainnet")}
+
+    signed = sign_transaction(private_key, did, token, _fmt(want), "mainnet-unlock-claim")
+    try:
+        result = claim_fn({"token": token, "amount": _fmt(want), "claim_url": url, "signed": signed}) or {}
+        tx_hash = result.get("tx_hash") or result.get("txHash")
+    except Exception as e:
+        return {**st, "outcome": "error_claim", "reason": f"claim mainnet thất bại: {e}"}
+
+    state = load_ledger(path)
+    u = _unlock_state(state)
+    prev = _parse_amount(u["claimed_mainnet"].get(token, "0")) or Decimal(0)
+    u["claimed_mainnet"][token] = _fmt(prev + want)
+    _save_ledger(state, path)
+    log(f"[unlock] claimed {_fmt(want)} {token} mainnet (tx {(tx_hash or '')[:12]}…)")
+    return {**unlock_status(token, path=path), "outcome": "claimed_mainnet",
+            "amount": _fmt(want), "tx_hash": tx_hash, "reason": "đã claim phần mở khóa mainnet"}
 
 
 # --- Nối submit_tx + nạp khóa agent (lazy, có cache) ------------------------------
@@ -287,6 +378,7 @@ def spend(amount, memo, token: str = None, *, path: str = None,
             "mode": mode, "balance_after": new_bal, "tx_hash": tx_hash,
             "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         })
+        _accrue_unlock(state, token, amt)     # chi testnet THẬT -> tăng quyền mở khóa 3:1
         _save_ledger(state, path)
         short = (tx_hash or "")[:12]
         log(f"[ledger] spent {_fmt(amt)} {token} for {memo} (tx {short}…)")
@@ -317,6 +409,24 @@ def meter_inference(amount: str = None, memo: str = "Gemini Inference",
     để không bao giờ làm sập luồng trả lời của agent."""
     if not _env_flag("FLOP_METER_ENABLED"):
         return {"outcome": "skipped_off", "reason": "FLOP_METER_ENABLED tắt"}
+    token = (token or default_token())
+
+    # Dynamic Spend Rate: nếu có FLOP_DAILY_BUDGET, để pacer quyết lượng chi (rải đều,
+    # chống dump). Trả None -> pacer tắt -> dùng phí cố định. "0" -> chưa tới nhịp.
+    if amount is None:
+        try:
+            import flop_pacer
+            paced = flop_pacer.next_spend_amount(token=token, path=path)
+        except Exception as e:
+            print(f"[meter] pacer lỗi ({e}), dùng phí cố định")
+            paced = None
+        if paced is not None:
+            p = _parse_amount(paced)
+            if p is None or p <= 0:
+                return {"outcome": "skipped_paced",
+                        "reason": "chưa tới nhịp chi theo lịch rải đều (giữ để không dump)"}
+            amount = paced
+
     amt = amount or os.environ.get("FLOP_INFERENCE_COST", "").strip() or "0.001"
     # Ở testnet, payload cần chữ ký -> tự nạp khóa agent nếu caller không truyền.
     if kw.get("private_key") is None and kw.get("did") is None:
@@ -324,9 +434,17 @@ def meter_inference(amount: str = None, memo: str = "Gemini Inference",
         if pk is not None:
             kw["private_key"], kw["did"] = pk, did
     try:
-        return spend(amt, memo, token=token, path=path, **kw)
+        result = spend(amt, memo, token=token, path=path, **kw)
     except Exception as e:                       # tuyệt đối không làm sập caller
         return {"outcome": "error_meter", "reason": str(e)}
+    # Chi OK -> báo pacer trừ vào ngân sách ngày (không làm sập nếu pacer lỗi).
+    if result.get("outcome") in ("spent_simulated", "spent_onchain"):
+        try:
+            import flop_pacer
+            flop_pacer.record_spend(result.get("amount", amt), token=token, path=path)
+        except Exception:
+            pass
+    return result
 
 
 # --- Demo offline (không key, không mạng) -----------------------------------------
@@ -351,8 +469,29 @@ def _demo() -> None:
     s = spend("0.001", "Gemini Inference", path=path, private_key=pk, did=did)
     print(f"spend : {s['outcome']} · số dư còn {s.get('balance_after')} "
           f"· {'đã ký Ed25519' if s.get('signed') else 'không ký (chưa có khóa)'}")
-    print("\nPhạm vi trung thực: ở simulation KHÔNG có gì lên chain. Chỉ khi "
-          "TESTNET_ENABLED=true + FLOP_RPC_URL + submit_tx được tiêm thì spend mới gửi thật.")
+
+    # Mở khóa mainnet 3:1 — simulation KHÔNG tích lũy (chống farm bằng tiền giả);
+    # chỉ chi testnet THẬT mới cộng. Minh họa bằng 1 submit_tx GIẢ (không mạng).
+    us = unlock_status(path=path)
+    print(f"unlock: sau chi mô phỏng -> spent_testnet={us['spent_testnet']} "
+          f"(đúng: mô phỏng không tính) · ratio 1/{us['ratio']}")
+    prev = os.environ.get("TESTNET_ENABLED")
+    os.environ["TESTNET_ENABLED"] = "true"
+    fake_submit = lambda tx: {"tx_hash": "0xDEMOtxhash0001"}
+    for _ in range(3):     # chi 3 x 3 = 9 FLOP testnet "thật" -> mở khóa 9/3 = 3
+        spend("3", "demo testnet spend", path=path, submit_tx=fake_submit,
+              rpc="https://rpc.demo.invalid", private_key=pk, did=did, log=lambda m: None)
+    if prev is None:
+        del os.environ["TESTNET_ENABLED"]
+    else:
+        os.environ["TESTNET_ENABLED"] = prev
+    us = unlock_status(path=path)
+    print(f"unlock: sau chi 9 FLOP testnet thật -> spent={us['spent_testnet']} "
+          f"· unlocked_mainnet={us['unlocked_mainnet']} · claimable={us['claimable']}")
+
+    print("\nPhạm vi trung thực: simulation KHÔNG lên chain và KHÔNG tích lũy mở khóa. "
+          "Chỉ TESTNET_ENABLED=true + FLOP_RPC_URL + submit_tx thật mới chi thật & tích lũy. "
+          "Claim FLOP mainnet là hành động tài chính -> qua seam gated claim_mainnet_unlock().")
 
 
 if __name__ == "__main__":

@@ -42,6 +42,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Run summary.** Each run appends a short report (telemetry / manifest status,
   replies, proactive, successful server calls) to the GitHub Step Summary, so run
   health is visible without opening the logs.
+- **3:1 mainnet-unlock accounting (`token_manager.py`).** `unlock_status()` tracks
+  cumulative **real** testnet spend (`spent_onchain` only — simulated spends never
+  accrue, so unlock credit can't be farmed with fake spend) and reports
+  `unlocked_mainnet = spent_testnet / FLOP_UNLOCK_RATIO` (default ratio `3`) plus the
+  remaining `claimable` amount. Claiming is a real financial action, so it goes through
+  its own gated seam, `claim_mainnet_unlock()`, which refuses (`skipped_unconfigured`)
+  without both `FLOP_MAINNET_CLAIM_URL` and an injected `claim_fn`, and never fabricates
+  a claim tx. Covered by `test_flop_unlock.py` (8 tests).
+- **Spend pacer / Dynamic Spend Rate (`flop_pacer.py`).** `next_spend_amount()` computes
+  how much FLOP is due right now to stay on a linear pace across `FLOP_DAILY_BUDGET`,
+  so testnet spend accrues steadily instead of being dumped in one run (which looks like
+  spam/bot activity). Capped per run by `FLOP_MAX_PER_RUN`, avoids dust-spending below
+  `FLOP_MIN_SPEND`, and is off (`None`) when no daily budget is set, so callers fall back
+  to a fixed fee unchanged. Wired into `meter_inference()`. Covered by
+  `test_flop_pacer.py` (6 tests).
+- **Auto-cycle faucet scaffold (`flop_faucet.py`), gated.** `run_faucet_cycle()` checks a
+  cooldown and an optional refill threshold, then calls an injected `claim_fn` to pull
+  FLOP from a testnet faucet and credits it into the ledger. Off by default
+  (`FLOP_FAUCET_ENABLED`) and refuses (`skipped_unconfigured`) without both
+  `FLOP_FAUCET_URL` and a `claim_fn` — never guesses an endpoint. Meant to pair with the
+  spend pacer: faucet refills, pacer spends out evenly, maximizing legitimate testnet
+  spend (the numerator of the 3:1 unlock) without dumping. Covered by
+  `test_flop_faucet.py` (5 tests).
+- **Gated unlock-progress publishing (`agent_cron.py`).** `FLOP_PUBLISH_UNLOCK` (off by
+  default) publishes `unlock_status()` + pacer status to the KV note `/kv/<ns>/unlock`
+  each run, so unlock progress is auditable with one GET. Wrapped so a failure here can
+  never break a run.
 
 ## [1.0.0] — 2026-08-26
 
