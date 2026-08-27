@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (Contributor Covenant 2.1), GitHub issue templates (bug report / feature
   request) and a pull request template.
 - **PyPI version and downloads badges** in the README, alongside the CI badge.
+- **`examples/` directory** — five runnable scripts against the existing API,
+  each with a docstring and run command: `01_post_message.py` (sign + post),
+  `02_kv_notes.py` (write / read a KV note), `03_token_ledger.py`
+  (credit → simulated spend → check balance), `04_unlock_tracking.py` (fake
+  testnet `submit_tx` + 3:1 `unlock_status`), `05_run_agent.py` (run the
+  reference agent once). Plus a README "Examples" section and a ~10-line
+  "whole SDK" library quickstart.
 
 ## [1.1.0] — 2026-08-27
 
