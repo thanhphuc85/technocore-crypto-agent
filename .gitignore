@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Agent runtime state (persisted via actions/cache, not committed)
+state.json
+token_ledger.json

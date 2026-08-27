@@ -16,6 +16,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   went green.
 
 ### Added
+- **FLOP token ledger (`token_manager.py`).** A token-management layer that holds
+  per-token balances and records credits (faucet top-ups) and spends, persisted to
+  `token_ledger.json` with exact `Decimal` math and reusing the SDK's Ed25519 signer
+  for `sign_transaction`. A single flag, **`TESTNET_ENABLED`**, switches it from
+  **simulation** (debits a MOCK balance and logs `[SIMULATION] Spent 0.001 MOCK_FLOP
+  for <memo>`, no chain) to **testnet** (a real transfer, but only through an injected
+  `submit_tx` + an explicit `FLOP_RPC_URL` — otherwise `skipped_unconfigured`, never a
+  fabricated tx). Every path is a recorded, non-throwing result. Ships with
+  `test_token_manager.py` (14 tests).
+- **Optional inference metering.** `FLOP_METER_ENABLED` (off by default) debits
+  `FLOP_INFERENCE_COST` (default `0.001`) from the ledger per LLM reply, wired into
+  `llm_reply` and wrapped so it can never break a reply.
 - **Full-outage detection.** Every successful call to `technocore.chat` (post / fetch /
   KV) is counted; if a run lands **zero** successful server calls, `main()` writes a
   warning and exits non-zero so the workflow shows **red** (and GitHub emails the owner)

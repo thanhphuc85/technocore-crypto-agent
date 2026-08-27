@@ -136,6 +136,11 @@ python agent_cron.py           # runs telemetry + auto-responder once
 | `PEER_REPLY_WINDOW_HOURS` | optional | Window for `PEER_REPLY_MAX` (default `1`) |
 | `KV_SIGNED` | optional | Try the signed KV lane before the unsigned one: `on` / off (default off) |
 | `REPO_URL` | optional | Repo link embedded in the manifest (default: this repo) |
+| `TESTNET_ENABLED` | optional | FLOP token ledger mode: `false` (default) = simulation · `true` = real testnet transfers |
+| `FLOP_RPC_URL` | optional | Testnet RPC endpoint — required (with a `submit_tx`) before a testnet spend will send |
+| `FLOP_METER_ENABLED` | optional | Charge FLOP per LLM inference into the ledger: off (default) / `true` |
+| `FLOP_INFERENCE_COST` | optional | FLOP debited per inference when metering is on (default `0.001`) |
+| `TOKEN_LEDGER_FILE` | optional | Ledger store path (default `token_ledger.json`) |
 
 ---
 
@@ -219,6 +224,56 @@ caps output, and treats the input as **untrusted** under a defensive system prom
 
 ---
 
+## FLOP token ledger — testnet-ready via one flag
+
+[`token_manager.py`](token_manager.py) is the **token-management layer**: it holds
+per-token FLOP balances and records credits (faucet top-ups) and spends (e.g. paying
+FLOP for an inference call), persisted to `token_ledger.json`. Balance math uses
+Python `Decimal`, so a `0.001` spend is exact — no float drift. It reuses the SDK's
+real Ed25519 signer for `sign_transaction`.
+
+A **single flag**, `TESTNET_ENABLED`, selects the behavior — so the framework is
+production-ready *before* FLOP opens its faucet (build the pipe now, open the valve
+later):
+
+| `TESTNET_ENABLED` | `spend()` behavior |
+|---|---|
+| unset / `false` (default) | **simulation** — debit a MOCK balance and log `[SIMULATION] Spent 0.001 MOCK_FLOP for <memo>`. Nothing touches a chain. |
+| `true` | **testnet** — submit a REAL transfer, but ONLY through an injected `submit_tx` + an explicit `FLOP_RPC_URL`. Absent either ⇒ `skipped_unconfigured` (it never fabricates a tx hash). |
+
+Every path is a recorded, non-throwing result (`spent_simulated`, `spent_onchain`,
+`skipped_insufficient`, `skipped_unconfigured`, `error_submit`) — the same fail-loud-
+not-silent ethos as the rest of the agent. When FLOP publishes the testnet RPC, wiring
+is: implement `submit_tx` against their chain, set `FLOP_RPC_URL`, flip
+`TESTNET_ENABLED=true`. The accounting logic is unchanged.
+
+```python
+import token_manager as tm
+
+tm.credit("100", token="FLOP")                 # record a faucet top-up
+tm.check_balance("FLOP")                        # "100"
+tm.spend("0.001", "Gemini Inference")           # simulation: logs the [SIMULATION] line
+```
+
+The agent can also **meter its own LLM calls**: set `FLOP_METER_ENABLED=true` and each
+Gemini/ChatGPT reply debits `FLOP_INFERENCE_COST` (default `0.001`) from the ledger.
+It is **off by default**, wrapped so it can never break a reply, and — to persist the
+ledger across GitHub Actions runs — add `token_ledger.json` to the `actions/cache` step
+and `credit()` it after a faucet claim.
+
+Try it offline (no key, no network):
+
+```bash
+python token_manager.py          # prints the credit → [SIMULATION] spend → balance
+python -m pytest test_token_manager.py -q
+```
+
+> ⚠️ **Airdrop-scam note:** never paste a real seed phrase or private key into any
+> third-party "connect wallet / boost your airdrop" site. Only the official FLOP faucet
+> and RPC, once published, should ever be wired into `submit_tx` / `FLOP_RPC_URL`.
+
+---
+
 ## Running 24/7 on GitHub Actions
 
 The included workflow [`.github/workflows/agent_cron.yml`](.github/workflows/agent_cron.yml) runs the
@@ -250,6 +305,8 @@ State persists across runs via `actions/cache` (`state.json`) **and** the KV `cu
 ```
 .
 ├─ agent_cron.py                 # the SDK + reference agent (single file)
+├─ token_manager.py              # FLOP token ledger (simulation ↔ testnet via TESTNET_ENABLED)
+├─ test_token_manager.py         # tests for the ledger (python -m pytest)
 └─ .github/workflows/
    └─ agent_cron.yml             # cron schedule + state cache + run agent
 ```
