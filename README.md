@@ -29,7 +29,7 @@ and verified through `did:key`.
 - **🗣 Conversational memory** — remembers the last few turns per user (persisted in state) and answers in the **user's language** (Vietnamese / English auto-detected).
 - **🛠 Useful commands** — `!price [coin]`, `!market`, `!top`, `!trending`, `!dominance`, `!gas`, `!fear`, `!about`, and more (see below).
 - **🚨 Move alerts** — posts a signed alert only when BTC/ETH swings past a configurable threshold (event-driven signal, not spam).
-- **💾 Key-Value Store** — persist auditable notes and durable cursors to `/kv/<ns>` (unsigned claim-based lane by default; an optional Ed25519-signed lane exists but Technocore currently rejects it — see below).
+- **💾 Key-Value Store** — persist auditable notes and durable cursors to `/kv/<ns>`. Ordinary namespaces are **unsigned / world-writable** (Technocore only signs the room-ownership namespaces `room-owners`/`room-allow`, which this agent doesn't use) — see below.
 - **📇 Contribution manifest** — periodically publishes a signed record (what it is, DID, repo link, commands) so the agent is a verifiable *public good*, not just a broadcaster.
 - **🛡 Resilient data** — CoinGecko primary with a keyless **Binance fallback**, so price feeds keep working when one source is down.
 - **🤝 Controlled proactive interaction** — greets newcomers once, offers a live-grounded answer when a peer asks a crypto question, all under hard per-run and per-peer caps. A per-peer reply budget breaks any bot-to-bot loop.
@@ -134,7 +134,7 @@ python agent_cron.py           # runs telemetry + auto-responder once
 | `PROACTIVE_COOLDOWN_HOURS` | optional | Min hours between proactively helping the same peer (default `6`) |
 | `PEER_REPLY_MAX` | optional | Max replies to one peer per window — the anti-loop cap (default `4`) |
 | `PEER_REPLY_WINDOW_HOURS` | optional | Window for `PEER_REPLY_MAX` (default `1`) |
-| `KV_SIGNED` | optional | Try the signed KV lane before the unsigned one: `on` / off (default off) |
+| `KV_SIGNED` | optional | Experimental signed-KV attempt for ordinary keys — doesn't match Technocore's spec (room-ownership only), 400s and falls back. Leave off (default) |
 | `REPO_URL` | optional | Repo link embedded in the manifest (default: this repo) |
 | `TESTNET_ENABLED` | optional | FLOP token ledger mode: `false` (default) = simulation · `true` = real testnet transfers |
 | `FLOP_RPC_URL` | optional | Testnet RPC endpoint — required (with a `submit_tx`) before a testnet spend will send |
@@ -187,19 +187,25 @@ kv_set(pk, did, "status", "BTC:$78000 ETH:$2450")  # write a note (unsigned lane
 value = kv_get("status")                            # read it back (GET  /kv/<ns>/status)
 ```
 
-`kv_set` writes through the **unsigned lane** by default (`POST /kv/<ns>/<key>` with
-`{"value": …}`). The namespace is **claim-based**: a key belongs to its first writer and a note
-idle for ~7 days is reclaimed, so keep the agent live to hold `nguyenvulv/*`.
-Set `KV_SIGNED=on` to try the signed lane first —
-`GET /kv/<ns>/<key>/set-signed/<did>/<sig>/<nonce>/<value>`, signing the canonical
-`KV_NS|key|nonce|value` — for cryptographically verifiable notes, falling back to the unsigned
-lane on any non-200. (Technocore currently returns 400 for this canonical, so leave `KV_SIGNED`
-off until its exact signing spec is confirmed.) The reference agent uses it for:
+`kv_set` writes through the **unsigned lane** (`POST /kv/<ns>/<key>` with `{"value": …}`).
+Per [Technocore's API](https://technocore.chat), ordinary namespaces are **world-writable** —
+there is **no signed-write option for ordinary notes**. Signing applies only to the
+room-ownership namespaces (`room-owners` / `room-allow` for `d-<room>` rooms, canonical
+`<namespace>|d-<room>|<nonce>|<value>`), which this agent does not use. To guard against races
+you can use Technocore's conditional writes (`?if=<last-read>` / `?if_absent=1`, which return
+409 on conflict) rather than a signature.
 
-- **`status`** — the latest signed telemetry, so anyone can audit the agent with one GET.
+`KV_SIGNED=on` is an **experimental** toggle that attempts a `set-signed` write for ordinary
+keys; it does **not** match Technocore's actual signed-write spec (room-ownership only), so the
+server returns 400 and the code falls back to the unsigned lane. Leave it **off** (default).
+
+The reference agent stores three notes. Their **values mirror content that is signed when
+posted to the room**, but the KV writes themselves are unsigned:
+
+- **`status`** — the latest telemetry line (also broadcast as a signed post), auditable with one GET.
 - **`cursor`** — the last processed message `seq`, giving durable memory that survives GitHub
   Actions cache eviction (read on startup when the local cache is missing).
-- **`manifest`** — a signed JSON contribution record (what the agent is, its DID, repo link, commands).
+- **`manifest`** — a JSON contribution record (also broadcast as a signed post): what the agent is, its DID, repo link, commands.
 
 Audit the live agent without any code:
 

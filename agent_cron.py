@@ -39,8 +39,10 @@ BASE_URL = "https://technocore.chat"
 AGENT_NAME = "NguyenVuLV"       # tên riêng của agent — hiện trong mọi tin nhắn
 HANDLE = "@nguyenvulv"          # nick để người khác mention agent (viết thường)
 KV_NS = "nguyenvulv"            # namespace Key-Value Store trên /kv/<ns> (server-side)
-# Thử lane KÝ khi ghi KV (mặc định tắt — server hiện chưa nhận canonical suy đoán,
-# lane unsigned + claim-namespace đã đủ). Bật KV_SIGNED=on khi có spec ký chính xác.
+# Thử lane KÝ khi ghi KV (mặc định TẮT). Theo API technocore.chat, namespace thường
+# là world-writable (KHÔNG có tùy chọn ký); ký KV chỉ dành cho namespace quản trị phòng
+# room-owners/room-allow (canonical "<ns>|d-<room>|<nonce>|<value>"), agent này không dùng.
+# Nên lane dưới đây (ký cho key thường) không khớp spec -> server trả 400 -> tự lùi unsigned.
 KV_SIGNED = os.environ.get("KV_SIGNED", "").strip().lower() == "on"
 
 # --- Auto-responder config ---
@@ -422,11 +424,14 @@ def fetch_messages(since=None):
 # --- Key-Value Store (NOTES) trên server: /kv/<ns>/<key> ---
 def kv_set(private_key, did, key: str, value: str) -> bool:
     """Ghi note vào KV store.
-    MẶC ĐỊNH đi lane unsigned `POST /kv/<ns>/<key>` (server bảo mật KV bằng CLAIM
-    namespace: ai ghi trước sở hữu, note idle 7 ngày bị thu hồi — không verify chữ ký).
-    Đặt KV_SIGNED=on để thử lane ký `GET /kv/<ns>/<key>/set-signed/<did>/<sig>/<nonce>/<value>`
-    (canonical KV_NS|key|nonce|value) — server hiện trả 400 cho định dạng này, nên chỉ
-    bật khi đã có spec ký chính xác của technocore. Value được sweep (không cắt) trước."""
+    MẶC ĐỊNH đi lane unsigned `POST /kv/<ns>/<key>` — theo API technocore.chat, namespace
+    thường là WORLD-WRITABLE (không verify chữ ký, ai cũng ghi được). Muốn chống ghi đè
+    do đua tranh thì dùng conditional write (?if=<đã đọc> / ?if_absent=1 -> 409 nếu lệch),
+    KHÔNG phải chữ ký.
+    KV_SIGNED=on chỉ để THỬ NGHIỆM lane `GET /kv/<ns>/<key>/set-signed/<did>/<sig>/<nonce>/<value>`
+    (canonical KV_NS|key|nonce|value) — KHÔNG khớp spec thật (technocore chỉ ký cho namespace
+    quản trị phòng room-owners/room-allow, canonical "<ns>|d-<room>|<nonce>|<value>"), nên
+    server trả 400 và tự lùi về unsigned. Value được sweep (không cắt) trước."""
     value = sweep_for_sign(value)
     # (1) Lane ký — TÙY CHỌN (mặc định tắt vì server chưa nhận canonical suy đoán).
     if KV_SIGNED:
