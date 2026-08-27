@@ -21,7 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Protocol** table (token ledger, 3:1 unlock accounting, spend pacer, faucet,
   `submit_tx` seam, one-flag testnet switch) carrying a 🟢 live-simulation /
   🟡 testnet-ready readiness column, separate from the broader ecosystem &amp;
-  infrastructure table. Covered by `test_contributions_log.py`.
+  infrastructure table. Covered by `test_contributions_log.py`. The rendered
+  `contributions-log.md` is **bot-owned**: it is maintained only by the workflow
+  on `main` and never hand-committed — a CI guard rejects any PR that edits it
+  (change the generator instead), which also removes the merge-conflict churn
+  that committing a bot-updated file previously caused.
 - **Core test suite for `agent_cron.py`** (`test_agent_cron.py`, 43 tests) covering
   the previously-untested protocol core: Ed25519 key loading / `did:key` derivation /
   message signing (verified against the public key), `multibase_b58`, nonce
