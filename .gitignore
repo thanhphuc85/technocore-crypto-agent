@@ -16,6 +16,11 @@ build/
 dist/
 *.egg-info/
 
+# Secrets — never commit real env files (only .env.example is tracked)
+.env
+.env.*
+!.env.example
+
 # Agent runtime state (persisted via actions/cache, not committed)
 state.json
 token_ledger.json
