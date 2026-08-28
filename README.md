@@ -385,6 +385,9 @@ It is **off by default**, wrapped so it can never break a reply, and — to pers
 ledger across GitHub Actions runs — add `token_ledger.json` to the `actions/cache` step
 and `credit()` it after a faucet claim.
 
+> **How to play the airdrop and when to flip the anti-sybil knobs on:** see
+> [`STRATEGY.md`](STRATEGY.md).
+
 ### The `submit_tx` seam ([`flop_tx.py`](flop_tx.py))
 
 In testnet mode `spend()` never guesses — it sends only through a `submit_tx(tx)` adapter.
