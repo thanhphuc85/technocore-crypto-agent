@@ -262,10 +262,29 @@ def test_fetch_messages_returns_json(monkeypatch):
 
 
 def test_fetch_messages_none_on_error(monkeypatch):
+    monkeypatch.setattr(ac.time, "sleep", lambda *_: None)   # không ngủ thật trong test
+    calls = {"n": 0}
+
     def boom(*a, **k):
+        calls["n"] += 1
         raise ac.requests.RequestException("down")
     monkeypatch.setattr(ac.requests, "get", boom)
     assert ac.fetch_messages(since=5) is None
+    assert calls["n"] == 1 + ac.FETCH_RETRIES               # đã thử LẠI, không bỏ cuộc sau 1 lần
+
+
+def test_fetch_messages_retries_empty_then_succeeds(monkeypatch):
+    # Read-endpoint trả body RỖNG (json() -> ValueError) 1 lần rồi mới trả data -> phải retry.
+    monkeypatch.setattr(ac.time, "sleep", lambda *_: None)
+    seq = iter([_Resp(text=""), _Resp(data={"messages": [{"seq": 9}]})])
+
+    def flaky(*a, **k):
+        r = next(seq)
+        if r._data is None:          # mô phỏng body rỗng: .json() ném ValueError
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+        return r
+    monkeypatch.setattr(ac.requests, "get", flaky)
+    assert ac.fetch_messages(room="kibble") == {"messages": [{"seq": 9}]}
 
 
 def test_kv_set_unsigned_lane_posts_value(pk, monkeypatch):

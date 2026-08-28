@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`fetch_messages()` now retries transient empty/failed reads.** The technocore.chat JSON
+  read endpoint intermittently returns an empty body (`.json()` → `ValueError`); a single miss
+  used to lose the whole run's room read — both `auto_respond` (replies) and the kibble worker
+  went to zero. It now retries up to `FETCH_RETRIES` (2) with a short backoff before returning
+  `None`. Adds test coverage (empty-then-success, all-fail-after-retries).
+- **Agent-state cache no longer fails to save on a workflow re-run.** The cache key was
+  `technocore-state-<run_id>`; "Re-run all jobs" keeps the same `run_id`, so the save collided
+  with the existing (immutable) key → *"Cache save failed"*, dropping `state.json` persistence
+  (which the kibble done-ledger relies on to avoid duplicate deliveries). The key now includes
+  `github.run_attempt`.
+
 ### Added
 - **Kibble useful-work worker (`flop_kibble.py`)** — an opt-in worker for FLOP Labs'
   `/r/kibble` board (protocol `JOB → CLAIM → DELIVER → ATTEST`). Reads recent `JOB` lines,

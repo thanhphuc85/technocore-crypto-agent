@@ -541,17 +541,28 @@ def post_message(private_key, did, text, room=ROOM) -> bool:
         return False
 
 
+# Số lần THỬ LẠI khi fetch rỗng/hỏng (tổng số lần cố = 1 + FETCH_RETRIES). Read-endpoint
+# technocore.chat thỉnh thoảng trả body RỖNG (`.json()` -> ValueError) hoặc lỗi mạng thoáng
+# qua; một cú hụt làm mất cả vòng (auto_respond + kibble). Retry để không phí nguyên run.
+FETCH_RETRIES = 2
+
+
 def fetch_messages(since=None, room=ROOM):
     url = f"{BASE_URL}/r/{room}?format=json&limit={FETCH_LIMIT}"
     if since:
         url += f"&since={since}"
-    try:
-        data = requests.get(url, headers={"User-Agent": UA}, timeout=10).json()
-        _note_server_ok()
-        return data
-    except (requests.RequestException, ValueError) as e:
-        print(f"[fetch] request_failed | {e}")
-        return None
+    last_err = None
+    for attempt in range(1 + FETCH_RETRIES):
+        try:
+            data = requests.get(url, headers={"User-Agent": UA}, timeout=10).json()
+            _note_server_ok()
+            return data
+        except (requests.RequestException, ValueError) as e:
+            last_err = e                       # rỗng/không-JSON hoặc mạng lỗi -> thử lại
+            if attempt < FETCH_RETRIES:
+                time.sleep(1.5 * (attempt + 1))    # backoff nhẹ (1.5s, 3.0s)
+    print(f"[fetch] request_failed sau {1 + FETCH_RETRIES} lần | {last_err}")
+    return None
 
 
 # --- Key-Value Store (NOTES) trên server: /kv/<ns>/<key> ---
