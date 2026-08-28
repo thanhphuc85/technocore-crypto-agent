@@ -120,12 +120,21 @@ PROACTIVE_COOLDOWN_H = _env_float("PROACTIVE_COOLDOWN_HOURS", 6)      # nghỉ g
 GREET_MAX_DIDS = 300           # trần số DID đã-chào lưu trong state (chống phình)
 
 # --- LLM (tùy chọn) — làm câu trả lời tự do "thông minh" hơn ---
-# LLM_PROVIDER: auto | gemini | openai | none. "auto" tự chọn theo key đang có.
+# LLM_PROVIDER: auto | deepseek | gemini | openai | none. "auto" tự chọn theo key đang
+# có, THEO THỨ TỰ ƯU TIÊN: DeepSeek (chính) -> Gemini (phụ) -> OpenAI. Provider chính lỗi
+# lúc chạy -> LÙI sang provider kế tiếp còn key (xem _provider_chain / _provider_reply).
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "auto").lower()
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "").strip()
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
+DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "").strip()  # để trống -> tự dò model hợp lệ
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+# Endpoint DeepSeek (OpenAI-compatible). Đổi được qua env nếu dùng proxy/gateway riêng.
+DEEPSEEK_BASE_URL = os.environ.get(
+    "DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
+# Thứ tự ưu tiên khi tự chọn provider ở chế độ auto (chỉ giữ provider có key).
+LLM_PROVIDER_ORDER = ["deepseek", "gemini", "openai"]
 # Thứ tự ưu tiên khi tự chọn model Gemini (chỉ dùng model thật sự có trên key)
 GEMINI_PREFERRED = [
     "gemini-2.5-flash", "gemini-2.0-flash", "gemini-flash-latest",
@@ -637,7 +646,7 @@ DELIM_CLOSE = "<<<END_UNTRUSTED_INPUT>>>"
 # Mẫu nghi là secret bị model lỡ nhả ra -> chặn không đăng
 _SECRET_PATTERNS = [
     re.compile(r"AIza[0-9A-Za-z_\-]{10,}"),         # Google API key
-    re.compile(r"sk-[A-Za-z0-9]{20,}"),             # OpenAI key
+    re.compile(r"sk-[A-Za-z0-9]{20,}"),             # OpenAI / DeepSeek key (sk-...)
     re.compile(r"\b[0-9a-fA-F]{64}\b"),             # seed/private key hex
     re.compile(r"-----BEGIN"),                       # PEM
 ]
@@ -697,20 +706,65 @@ def is_addressed(text: str, my_did: str, my_nick: str) -> bool:
     return any(tok.strip("@.,:;!?()[]") == nick for tok in t.split())
 
 
-def _active_provider():
-    """Chọn provider LLM theo cấu hình + key có sẵn. None nếu không dùng LLM."""
+def _provider_has_key(provider: str) -> bool:
+    return {
+        "deepseek": bool(DEEPSEEK_API_KEY),
+        "gemini": bool(GEMINI_API_KEY),
+        "openai": bool(OPENAI_API_KEY),
+    }.get(provider, False)
+
+
+def _provider_chain():
+    """Danh sách provider để thử LẦN LƯỢT (chính -> phụ), chỉ giữ provider còn key.
+    - LLM_PROVIDER=none            -> [] (tắt LLM)
+    - LLM_PROVIDER=<provider>      -> chỉ provider đó (không fallback), nếu có key
+    - LLM_PROVIDER=auto (mặc định) -> DeepSeek -> Gemini -> OpenAI, lọc theo key có sẵn.
+    Provider đầu danh sách = 'chính'; các provider sau = fallback khi provider trước lỗi."""
     if LLM_PROVIDER == "none":
-        return None
-    if LLM_PROVIDER == "gemini":
-        return "gemini" if GEMINI_API_KEY else None
-    if LLM_PROVIDER == "openai":
-        return "openai" if OPENAI_API_KEY else None
+        return []
+    if LLM_PROVIDER in LLM_PROVIDER_ORDER:
+        return [LLM_PROVIDER] if _provider_has_key(LLM_PROVIDER) else []
     # auto
-    if GEMINI_API_KEY:
-        return "gemini"
-    if OPENAI_API_KEY:
-        return "openai"
-    return None
+    return [p for p in LLM_PROVIDER_ORDER if _provider_has_key(p)]
+
+
+def _active_provider():
+    """Provider CHÍNH đang dùng (đầu chuỗi ưu tiên). None nếu không dùng LLM.
+    Dùng cho các guard nhanh `if _active_provider()`; đường đăng thực tế đi qua
+    _provider_reply() để có fallback sang provider phụ khi provider chính lỗi."""
+    chain = _provider_chain()
+    return chain[0] if chain else None
+
+
+def _one_reply(provider: str, user_text: str, system: str, temperature: float) -> str:
+    """Gọi ĐÚNG một provider. Ném lỗi lên trên để _provider_reply xử lý fallback."""
+    if provider == "deepseek":
+        return _deepseek_reply(user_text, system, temperature)
+    if provider == "gemini":
+        return _gemini_reply(user_text, system, temperature)
+    if provider == "openai":
+        return _openai_reply(user_text, system, temperature)
+    raise RuntimeError(f"unknown provider {provider}")
+
+
+def _provider_reply(user_text: str, system: str, temperature: float):
+    """Thử provider theo thứ tự ưu tiên (DeepSeek chính -> Gemini phụ -> OpenAI); provider
+    lỗi -> LÙI sang provider kế còn key. Trả (text, provider_đã_dùng). Ném lỗi cuối cùng
+    nếu MỌI provider đều fail; RuntimeError nếu không có provider nào (caller tự chặn trước)."""
+    chain = _provider_chain()
+    if not chain:
+        raise RuntimeError("no llm provider available")
+    last_err = None
+    for provider in chain:
+        try:
+            text = _one_reply(provider, user_text, system, temperature)
+            if provider != chain[0]:
+                print(f"[llm] fallback -> {provider}")
+            return text, provider
+        except Exception as e:
+            last_err = e
+            print(f"[llm:{provider}] failed | {str(e)[:100]}")
+    raise last_err or RuntimeError("no llm provider available")
 
 
 _gemini_model_cache = None
@@ -797,10 +851,24 @@ def _gemini_reply(user_text: str, system: str, temperature: float) -> str:
 
 
 def _openai_reply(user_text: str, system: str, temperature: float) -> str:
-    url = "https://api.openai.com/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
+    return _openai_compatible_reply(
+        "https://api.openai.com/v1/chat/completions",
+        OPENAI_API_KEY, OPENAI_MODEL, user_text, system, temperature)
+
+
+def _deepseek_reply(user_text: str, system: str, temperature: float) -> str:
+    """DeepSeek dùng chung schema OpenAI (chat/completions + Bearer)."""
+    return _openai_compatible_reply(
+        f"{DEEPSEEK_BASE_URL}/chat/completions",
+        DEEPSEEK_API_KEY, DEEPSEEK_MODEL, user_text, system, temperature)
+
+
+def _openai_compatible_reply(url: str, api_key: str, model: str, user_text: str,
+                             system: str, temperature: float) -> str:
+    """Gọi endpoint kiểu OpenAI (dùng cho cả OpenAI lẫn DeepSeek)."""
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     body = {
-        "model": OPENAI_MODEL,
+        "model": model,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user_text},
@@ -894,14 +962,12 @@ def _llm_generate(prompt: str, system: str, temperature: float, memo: str,
     guard_output + đo FLOP như reply. `event_id` chuyển tiếp xuống _meter_flop: đặt cho
     nguồn ORGANIC (lệnh của user), để None cho nguồn TỔNG HỢP (theo lịch/sự kiện thị
     trường). Trả text đã lọc, hoặc None nếu không có provider / rỗng / lỗi."""
-    provider = _active_provider()
-    if not provider:
+    if not _active_provider():
         return None
     try:
-        raw = (_gemini_reply(prompt, system, temperature) if provider == "gemini"
-               else _openai_reply(prompt, system, temperature))
+        raw, provider = _provider_reply(prompt, system, temperature)
     except Exception as e:
-        print(f"[llm:{provider}] generate '{memo}' failed | {e}")
+        print(f"[llm] generate '{memo}' failed | {e}")
         return None
     text = guard_output(" ".join((raw or "").split()).strip())
     if not text:
@@ -917,17 +983,15 @@ def answer_kibble_job(job: dict):
     khi: không có provider, output rỗng/bị guard chặn, hoặc model tự xét 'SKIP' — nghĩa là
     KHÔNG bao giờ đăng deliverable rác (đó chính là điểm để nổi bật trên board toàn filler).
     jobid làm event_id -> mỗi lần chi FLOP gắn vào 1 JOB THẬT (organic, chống burn-loop)."""
-    provider = _active_provider()
-    if not provider:
+    if not _active_provider():
         return None
     jtype = (job.get("type") or "").strip()
     task = f"[task type: {jtype}] {job.get('title', '').strip()}\n\n{job.get('body', '').strip()}".strip()
     prompt = isolate_for_llm(task)
     try:
-        raw = (_gemini_reply(prompt, KIBBLE_SYSTEM, KIBBLE_TEMPERATURE) if provider == "gemini"
-               else _openai_reply(prompt, KIBBLE_SYSTEM, KIBBLE_TEMPERATURE))
+        raw, provider = _provider_reply(prompt, KIBBLE_SYSTEM, KIBBLE_TEMPERATURE)
     except Exception as e:
-        print(f"[kibble:{provider}] answer failed | {e}")
+        print(f"[kibble] answer failed | {e}")
         return None
     text = guard_output(" ".join((raw or "").split()).strip())
     if not text:
@@ -1090,8 +1154,7 @@ def mem_add(state, nick, q, a):
 def llm_reply(user_text: str, sender_nick=None, state=None):
     """Câu trả lời LLM THÔNG MINH: bám data-live (grounding) + nhớ hội thoại của
     user + đáp đúng ngôn ngữ. Trả None nếu không có provider hoặc lỗi."""
-    provider = _active_provider()
-    if not provider:
+    if not _active_provider():
         return None
     tone, system, temperature = pick_tone(user_text)          # giọng theo ngữ cảnh
     lang = detect_lang(user_text)                             # trả lời đúng ngôn ngữ
@@ -1110,10 +1173,9 @@ def llm_reply(user_text: str, sender_nick=None, state=None):
         )
     prompt = (f"{ctx}\n\n" if ctx else "") + hist_txt + isolate_for_llm(user_text)
     try:
-        raw = (_gemini_reply(prompt, system, temperature) if provider == "gemini"
-               else _openai_reply(prompt, system, temperature))
+        raw, provider = _provider_reply(prompt, system, temperature)
     except Exception as e:
-        print(f"[llm:{provider}] failed, fallback template | {e}")
+        print(f"[llm] failed, fallback template | {e}")
         return None
     text = guard_output(" ".join((raw or "").split()).strip())   # lọc output
     if not text:

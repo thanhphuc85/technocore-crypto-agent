@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **DeepSeek is now the primary LLM provider, with Gemini as the fallback.** `LLM_PROVIDER=auto`
+  (default) builds a provider chain **DeepSeek → Gemini → OpenAI**, keeping only providers that
+  have a key; if the primary errors at call time, the agent automatically retries the next one
+  in the chain (`_provider_chain()` / `_provider_reply()`). Pinning `LLM_PROVIDER=deepseek|gemini|openai`
+  selects a single provider with no fallback. New env vars: `DEEPSEEK_API_KEY`, `DEEPSEEK_MODEL`
+  (default `deepseek-chat`), `DEEPSEEK_BASE_URL` (default `https://api.deepseek.com`,
+  OpenAI-compatible). DeepSeek and OpenAI now share one `_openai_compatible_reply()` caller, and
+  the output guard's `sk-…` secret pattern already blocks leaked DeepSeek keys. README + workflow
+  updated; adds tests for chain selection, failover, and the DeepSeek endpoint.
+
 ### Fixed
 - **Kibble answers that legitimately begin with "Skip" are no longer dropped as declines.**
   `answer_kibble_job()` detected a model decline with `text.upper().startswith("SKIP")`, which

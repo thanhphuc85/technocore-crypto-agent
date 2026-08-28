@@ -25,6 +25,10 @@ class _Resp:
     def json(self):
         return self._data
 
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
 
 # 32-byte seed cố định -> khóa/DID/chữ ký ĐỀU tất định (test lặp lại được).
 SEED_HEX = "00" * 31 + "01"
@@ -292,26 +296,26 @@ def _job(jtype="explain", title="T", body="B", jobid="kaaaaaaaaaa"):
 
 
 def test_answer_kibble_job_none_without_provider(monkeypatch):
-    monkeypatch.setattr(ac, "_active_provider", lambda: None)
+    monkeypatch.setattr(ac, "_provider_chain", lambda: [])
     assert ac.answer_kibble_job(_job()) is None
 
 
 def test_answer_kibble_job_returns_answer(monkeypatch):
-    monkeypatch.setattr(ac, "_active_provider", lambda: "gemini")
+    monkeypatch.setattr(ac, "_provider_chain", lambda: ["gemini"])
     monkeypatch.setattr(ac, "_gemini_reply", lambda *a, **k: "Two tidal bulges form; Earth rotates through both.")
     monkeypatch.setattr(ac, "_meter_flop", lambda *a, **k: None)
     assert ac.answer_kibble_job(_job()).startswith("Two tidal bulges")
 
 
 def test_answer_kibble_job_skip_declines(monkeypatch):
-    monkeypatch.setattr(ac, "_active_provider", lambda: "gemini")
+    monkeypatch.setattr(ac, "_provider_chain", lambda: ["gemini"])
     monkeypatch.setattr(ac, "_gemini_reply", lambda *a, **k: "SKIP")
     monkeypatch.setattr(ac, "_meter_flop", lambda *a, **k: None)
     assert ac.answer_kibble_job(_job()) is None
 
 
 def test_answer_kibble_job_empty_declines(monkeypatch):
-    monkeypatch.setattr(ac, "_active_provider", lambda: "gemini")
+    monkeypatch.setattr(ac, "_provider_chain", lambda: ["gemini"])
     monkeypatch.setattr(ac, "_gemini_reply", lambda *a, **k: "")
     monkeypatch.setattr(ac, "_meter_flop", lambda *a, **k: None)
     assert ac.answer_kibble_job(_job()) is None
@@ -321,7 +325,7 @@ def test_answer_kibble_job_long_answer_starting_with_skip_is_kept(monkeypatch):
     # Câu trả lời HỢP LỆ mở đầu bằng 'Skip' KHÔNG được coi là từ chối (bug startswith cũ).
     long = ("Skip lists are a probabilistic data structure that layer multiple linked "
             "lists to give expected O(log n) search, insertion and deletion.")
-    monkeypatch.setattr(ac, "_active_provider", lambda: "gemini")
+    monkeypatch.setattr(ac, "_provider_chain", lambda: ["gemini"])
     monkeypatch.setattr(ac, "_gemini_reply", lambda *a, **k: long)
     monkeypatch.setattr(ac, "_meter_flop", lambda *a, **k: None)
     out = ac.answer_kibble_job(_job(title="Explain skip lists"))
@@ -475,7 +479,7 @@ def _stub_market(monkeypatch, provider="gemini", reply="Risk-on: BTC steady, F&G
     monkeypatch.setattr(ac, "get_top_movers", lambda n=3: [("AAA", 12.3), ("BBB", 8.1)])
     monkeypatch.setattr(ac, "get_dominance", lambda: (52.0, 17.0))
     monkeypatch.setattr(ac, "get_trending", lambda n=5: ["aaa", "bbb"])
-    monkeypatch.setattr(ac, "_active_provider", lambda: provider)
+    monkeypatch.setattr(ac, "_provider_chain", lambda: [] if provider is None else [provider])
     monkeypatch.setattr(ac, "_gemini_reply", lambda p, s, t: reply)
     monkeypatch.setattr(ac, "_openai_reply", lambda p, s, t: reply)
 
@@ -711,3 +715,83 @@ def test_check_price_alert_unchanged_when_explain_off(monkeypatch):
     monkeypatch.setattr(ac, "post_message", lambda pk, did, text, **k: posted.setdefault("t", text))
     ac.check_price_alert("pk", "did", {"last_alert_price": {"bitcoin": 100, "ethereum": 50}})
     assert "should-not-appear" not in posted["t"] and "Move alert" in posted["t"]
+
+
+# --- LLM provider chain: DeepSeek chính -> Gemini phụ -> OpenAI --------------------
+def _keys(monkeypatch, deepseek="", gemini="", openai="", mode="auto"):
+    monkeypatch.setattr(ac, "DEEPSEEK_API_KEY", deepseek)
+    monkeypatch.setattr(ac, "GEMINI_API_KEY", gemini)
+    monkeypatch.setattr(ac, "OPENAI_API_KEY", openai)
+    monkeypatch.setattr(ac, "LLM_PROVIDER", mode)
+
+
+def test_provider_chain_auto_prefers_deepseek_then_gemini(monkeypatch):
+    _keys(monkeypatch, deepseek="dk", gemini="gk", openai="ok")
+    assert ac._provider_chain() == ["deepseek", "gemini", "openai"]
+    assert ac._active_provider() == "deepseek"
+
+
+def test_provider_chain_auto_skips_missing_keys(monkeypatch):
+    _keys(monkeypatch, gemini="gk")            # chỉ có Gemini -> Gemini là chính
+    assert ac._provider_chain() == ["gemini"]
+    assert ac._active_provider() == "gemini"
+
+
+def test_provider_chain_none_disables_llm(monkeypatch):
+    _keys(monkeypatch, deepseek="dk", gemini="gk", mode="none")
+    assert ac._provider_chain() == []
+    assert ac._active_provider() is None
+
+
+def test_provider_chain_pinned_provider_has_no_fallback(monkeypatch):
+    _keys(monkeypatch, deepseek="dk", gemini="gk", mode="gemini")
+    assert ac._provider_chain() == ["gemini"]   # ghim gemini -> không lùi sang deepseek
+
+
+def test_provider_chain_pinned_without_key_is_empty(monkeypatch):
+    _keys(monkeypatch, deepseek="dk", mode="gemini")   # ghim gemini nhưng thiếu key
+    assert ac._provider_chain() == []
+
+
+def test_provider_reply_falls_back_to_gemini_on_deepseek_error(monkeypatch):
+    _keys(monkeypatch, deepseek="dk", gemini="gk")
+    monkeypatch.setattr(ac, "_deepseek_reply",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("503")))
+    monkeypatch.setattr(ac, "_gemini_reply", lambda *a, **k: "from gemini")
+    text, used = ac._provider_reply("q", "sys", 0.5)
+    assert text == "from gemini" and used == "gemini"
+
+
+def test_provider_reply_uses_deepseek_when_healthy(monkeypatch):
+    _keys(monkeypatch, deepseek="dk", gemini="gk")
+    monkeypatch.setattr(ac, "_deepseek_reply", lambda *a, **k: "from deepseek")
+    monkeypatch.setattr(ac, "_gemini_reply",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not run")))
+    text, used = ac._provider_reply("q", "sys", 0.5)
+    assert text == "from deepseek" and used == "deepseek"
+
+
+def test_provider_reply_raises_when_all_fail(monkeypatch):
+    _keys(monkeypatch, deepseek="dk", gemini="gk")
+    monkeypatch.setattr(ac, "_deepseek_reply",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("d")))
+    monkeypatch.setattr(ac, "_gemini_reply",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("g")))
+    with pytest.raises(RuntimeError):
+        ac._provider_reply("q", "sys", 0.5)
+
+
+def test_deepseek_reply_hits_deepseek_endpoint(monkeypatch):
+    seen = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        seen["url"], seen["auth"], seen["model"] = url, headers["Authorization"], json["model"]
+        return _Resp(data={"choices": [{"message": {"content": "ok"}}]})
+
+    monkeypatch.setattr(ac, "DEEPSEEK_API_KEY", "dk")
+    monkeypatch.setattr(ac, "DEEPSEEK_MODEL", "deepseek-chat")
+    monkeypatch.setattr(ac, "DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+    monkeypatch.setattr(ac.requests, "post", fake_post)
+    assert ac._deepseek_reply("hi", "sys", 0.5) == "ok"
+    assert seen["url"] == "https://api.deepseek.com/chat/completions"
+    assert seen["auth"] == "Bearer dk" and seen["model"] == "deepseek-chat"

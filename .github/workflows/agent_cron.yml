@@ -52,11 +52,15 @@ jobs:
           AGENT_NAME: ${{ vars.AGENT_NAME }}
           HANDLE: ${{ vars.HANDLE }}
           KV_NS: ${{ vars.KV_NS }}
-          # LLM tùy chọn — thêm 1 trong 2 secret là bot tự thông minh hơn.
-          # Bỏ trống cả hai -> agent tự fallback về template (vẫn chạy bình thường).
+          # LLM tùy chọn — thêm 1 secret là bot tự thông minh hơn. Bỏ trống tất cả ->
+          # agent tự fallback về template (vẫn chạy bình thường). Ở chế độ auto, thứ tự
+          # ưu tiên là DeepSeek (chính) -> Gemini (phụ) -> OpenAI; provider chính lỗi lúc
+          # chạy sẽ tự lùi sang provider kế tiếp còn key.
           LLM_PROVIDER: ${{ vars.LLM_PROVIDER || 'auto' }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          DEEPSEEK_MODEL: ${{ vars.DEEPSEEK_MODEL || 'deepseek-chat' }}
           # Ghim model đã chạy tốt -> bỏ qua bước tự dò (đổi qua Variable GEMINI_MODEL nếu muốn)
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-flash-lite-latest' }}
           # Kibble useful-work worker — mặc định TẮT. Bỏ trống các Variable dưới -> agent chạy
