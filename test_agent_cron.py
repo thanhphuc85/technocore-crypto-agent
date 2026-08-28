@@ -405,3 +405,110 @@ def test_auto_respond_restores_cursor_from_kv_and_skips_old(pk, respond_env):
     r, p = ac.auto_respond(pk, did)
     assert r == 1 and posts == ["ok"]                  # chỉ trả lời tin mới (51), bỏ tin cũ (40)
     assert ac.load_state()["last_seq"] == 51
+
+
+# --- (A1) Daily AI digest & (A2) command insight ---------------------------------
+def _stub_market(monkeypatch, provider="gemini", reply="Risk-on: BTC steady, F&G 55."):
+    """Cắm data thị trường + LLM giả (không mạng) để test digest/insight."""
+    monkeypatch.setattr(ac, "get_market", lambda ids: {i: {"usd": 100, "chg": 1.2} for i in ids})
+    monkeypatch.setattr(ac, "get_fear_greed", lambda: (55, "Greed"))
+    monkeypatch.setattr(ac, "get_top_movers", lambda n=3: [("AAA", 12.3), ("BBB", 8.1)])
+    monkeypatch.setattr(ac, "get_dominance", lambda: (52.0, 17.0))
+    monkeypatch.setattr(ac, "get_trending", lambda n=5: ["aaa", "bbb"])
+    monkeypatch.setattr(ac, "_active_provider", lambda: provider)
+    monkeypatch.setattr(ac, "_gemini_reply", lambda p, s, t: reply)
+    monkeypatch.setattr(ac, "_openai_reply", lambda p, s, t: reply)
+
+
+def test_build_digest_context_includes_movers_and_dominance(monkeypatch):
+    _stub_market(monkeypatch)
+    ctx = ac.build_digest_context()
+    assert "LIVE MARKET DATA" in ctx and "Top 24h gainers" in ctx and "Dominance" in ctx
+
+
+def test_build_digest_context_empty_when_no_data(monkeypatch):
+    monkeypatch.setattr(ac, "get_market", lambda ids: {})
+    monkeypatch.setattr(ac, "get_fear_greed", lambda: (None, None))
+    monkeypatch.setattr(ac, "get_top_movers", lambda n=3: [])
+    monkeypatch.setattr(ac, "get_dominance", lambda: (None, None))
+    assert ac.build_digest_context() == ""
+
+
+def test_generate_digest_grounded_and_capped(monkeypatch):
+    _stub_market(monkeypatch, reply="X" * 500)
+    monkeypatch.setattr(ac, "DIGEST_MAX_CHARS", 40)
+    out = ac.generate_digest("en")
+    assert out is not None and len(out) == 40
+
+
+def test_generate_digest_none_without_provider(monkeypatch):
+    _stub_market(monkeypatch, provider=None)
+    assert ac.generate_digest() is None
+
+
+def test_generate_digest_none_without_data(monkeypatch):
+    _stub_market(monkeypatch)
+    monkeypatch.setattr(ac, "build_digest_context", lambda: "")
+    assert ac.generate_digest() is None
+
+
+def test_insight_off_returns_empty(monkeypatch):
+    _stub_market(monkeypatch)
+    monkeypatch.setattr(ac, "INSIGHT_ENABLED", False)
+    assert ac._insight("top", "AAA +12%", "en") == ""
+
+
+def test_insight_on_prefixes_dash(monkeypatch):
+    _stub_market(monkeypatch, reply="Momentum favors alts.")
+    monkeypatch.setattr(ac, "INSIGHT_ENABLED", True)
+    out = ac._insight("top", "AAA +12%", "en")
+    assert out.startswith(" — ") and "Momentum" in out
+
+
+def test_insight_empty_on_llm_error(monkeypatch):
+    _stub_market(monkeypatch)
+    monkeypatch.setattr(ac, "INSIGHT_ENABLED", True)
+    monkeypatch.setattr(ac, "_gemini_reply", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert ac._insight("top", "AAA +12%", "en") == ""
+
+
+def test_build_reply_digest_command(monkeypatch):
+    _stub_market(monkeypatch, reply="Steady tape, F&G 55.")
+    assert "📊" in ac.build_reply("bob", "@nguyenvulv !digest")
+
+
+def test_build_reply_top_appends_insight_when_enabled(monkeypatch):
+    _stub_market(monkeypatch, reply="Alts leading.")
+    monkeypatch.setattr(ac, "INSIGHT_ENABLED", True)
+    out = ac.build_reply("bob", "@nguyenvulv !top")
+    assert "Top 24h gainers" in out and "Alts leading." in out
+
+
+def test_build_reply_top_unchanged_when_insight_off(monkeypatch):
+    _stub_market(monkeypatch, reply="should-not-appear")
+    monkeypatch.setattr(ac, "INSIGHT_ENABLED", False)
+    out = ac.build_reply("bob", "@nguyenvulv !top")
+    assert "should-not-appear" not in out and "signed Ed25519" in out
+
+
+def test_llm_generate_meters_flop(monkeypatch):
+    _stub_market(monkeypatch)
+    seen = {}
+    monkeypatch.setattr(ac, "_meter_flop",
+                        lambda memo, event_id=None: seen.update(memo=memo, event_id=event_id))
+    ac._llm_generate("ctx", "sys", 0.5, memo="daily digest", event_id="bob")
+    assert seen.get("memo") == "gemini daily digest" and seen.get("event_id") == "bob"
+
+
+def test_meter_flop_never_raises(monkeypatch):
+    # token_manager thiếu / lỗi -> nuốt sạch, không được ném
+    import builtins
+    real_import = builtins.__import__
+
+    def boom(name, *a, **k):
+        if name == "token_manager":
+            raise ImportError("no module")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", boom)
+    ac._meter_flop("x")   # không raise = pass
