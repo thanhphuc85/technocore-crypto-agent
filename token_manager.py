@@ -32,6 +32,7 @@ Chạy thử offline (không key, không mạng):
 import os
 import json
 import time
+import calendar
 from decimal import Decimal, InvalidOperation
 
 # Tái dùng crypto Ed25519 của SDK (did:key + ký). Import "mềm": nếu vì lý do gì
@@ -399,17 +400,89 @@ def spend(amount, memo, token: str = None, *, path: str = None,
             "signed": signed, "reason": "chi tiêu mô phỏng (không đụng chain)"}
 
 
+# --- Envelope chống sybil + thống kê hoạt động (đọc từ chính sổ cái) ---------------
+
+def _parse_ts(s) -> int:
+    """ISO UTC '%Y-%m-%dT%H:%M:%SZ' -> epoch giây. None nếu không parse được (không raise)."""
+    try:
+        return calendar.timegm(time.strptime(str(s), "%Y-%m-%dT%H:%M:%SZ"))
+    except (ValueError, TypeError):
+        return None
+
+
+def max_spends_per_hour():
+    """Trần số lần CHI mỗi giờ trượt (envelope chống sybil, độc lập với pacer). Đếm từ
+    entries của sổ cái nên đúng cả khi pacer tắt. Rỗng/không hợp lệ/không dương -> None."""
+    raw = os.environ.get("FLOP_MAX_SPENDS_PER_HOUR", "").strip()
+    if not raw:
+        return None
+    try:
+        v = int(raw)
+    except ValueError:
+        return None
+    return v if v > 0 else None
+
+
+def _recent_spend_count(token: str, now: int, window: int = 3600, path: str = None) -> int:
+    """Số entry kind='spend' của `token` trong `window` giây gần đây (mặc định 1 giờ)."""
+    cutoff = now - window
+    n = 0
+    for e in load_ledger(path).get("entries", []):
+        if e.get("kind") != "spend" or e.get("token") != token:
+            continue
+        ts = _parse_ts(e.get("ts"))
+        if ts is not None and ts >= cutoff:
+            n += 1
+    return n
+
+
+def spend_stats(token: str = None, now: int = None, path: str = None) -> dict:
+    """Ảnh chụp hoạt động chi (để audit/telemetry chống sybil): tổng số lần chi và số
+    lần chi trong 24h gần đây. Auditor đối chiếu chuỗi này với số lượt trả lời thật
+    theo thời gian -> farm sẽ lộ (chi tách rời hoạt động). Thuần, đọc từ sổ cái."""
+    token = (token or default_token())
+    now = int(now if now is not None else time.time())
+    entries = load_ledger(path).get("entries", [])
+    total = sum(1 for e in entries if e.get("kind") == "spend" and e.get("token") == token)
+    last_24h = _recent_spend_count(token, now, 86400, path)
+    return {"token": token, "spend_count_total": total, "spend_count_24h": last_24h}
+
+
 # --- Tiện ích: đo phí 1 lần suy luận LLM (ví dụ dùng trong agent, GATED) -----------
 
 def meter_inference(amount: str = None, memo: str = "Gemini Inference",
-                    token: str = None, path: str = None, **kw) -> dict:
+                    token: str = None, path: str = None, event_id: str = None,
+                    now: int = None, **kw) -> dict:
     """Ghi nhận 'trả token cho 1 lần suy luận LLM'. Chỉ chạy khi FLOP_METER_ENABLED
     bật (mặc định TẮT -> agent 24/7 không đổi hành vi). Số tiền lấy từ
     FLOP_INFERENCE_COST (mặc định 0.001). Bọc kín: mọi lỗi -> {'outcome':'skipped_off'}
-    để không bao giờ làm sập luồng trả lời của agent."""
+    để không bao giờ làm sập luồng trả lời của agent.
+
+    Bất biến CHỐNG SYBIL (tùy chọn): khi FLOP_ORGANIC_ONLY bật, chỉ chi khi có
+    `event_id` — dấu vết một sự kiện THẬT (tin nhắn user @mention) đã kích hoạt lần
+    suy luận này. Thiếu event_id -> skipped_synthetic. Đây là bảo hiểm để KHÔNG ai
+    (kể cả cấu hình sai) nối được một vòng lặp tự-gọi đốt token không gắn hoạt động
+    thật — thứ mà sybil filter lọc thẳng.
+
+    Envelope CHỐNG SYBIL (tùy chọn): FLOP_MAX_SPENDS_PER_HOUR đặt trần số lần chi mỗi
+    giờ trượt (đếm từ sổ cái) — dù cấu hình sai cũng không spike lên tần suất bot.
+    Chạm trần -> skipped_rate_cap (không chi)."""
     if not _env_flag("FLOP_METER_ENABLED"):
         return {"outcome": "skipped_off", "reason": "FLOP_METER_ENABLED tắt"}
+    if _env_flag("FLOP_ORGANIC_ONLY") and not (event_id and str(event_id).strip()):
+        return {"outcome": "skipped_synthetic",
+                "reason": ("FLOP_ORGANIC_ONLY: từ chối chi cho inference không gắn sự kiện "
+                           "thật (thiếu event_id) — chống burn-loop tổng hợp")}
     token = (token or default_token())
+
+    # Envelope tần suất: chặn trước khi chi nếu đã chạm trần lần chi/giờ.
+    cap = max_spends_per_hour()
+    if cap is not None:
+        nowv = int(now if now is not None else time.time())
+        recent = _recent_spend_count(token, nowv, 3600, path)
+        if recent >= cap:
+            return {"outcome": "skipped_rate_cap",
+                    "reason": f"đã chi {recent}/{cap} lần trong giờ qua — chạm trần tần suất"}
 
     # Dynamic Spend Rate: nếu có FLOP_DAILY_BUDGET, để pacer quyết lượng chi (rải đều,
     # chống dump). Trả None -> pacer tắt -> dùng phí cố định. "0" -> chưa tới nhịp.

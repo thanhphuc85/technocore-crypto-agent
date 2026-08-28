@@ -240,18 +240,24 @@ python agent_cron.py           # runs telemetry + auto-responder once
 | `FLOP_TX_UA` | optional | User-Agent header the relay adapter sends (default `flop-agent/1.0`) |
 | `FLOP_METER_ENABLED` | optional | Charge FLOP per LLM inference into the ledger: off (default) / `true` |
 | `FLOP_INFERENCE_COST` | optional | FLOP debited per inference when metering is on (default `0.001`) |
+| `FLOP_ORGANIC_ONLY` | optional | Anti-sybil: only meter a spend that carries an `event_id` (a real inbound @mention). Missing ⇒ `skipped_synthetic`, blocking self-triggered burn loops. off (default) / `true` |
+| `FLOP_MAX_SPENDS_PER_HOUR` | optional | Anti-sybil envelope: cap on metered spends per rolling hour (counted from the ledger, so it holds even with the pacer off). At the cap ⇒ `skipped_rate_cap`. Unset ⇒ no limit |
 | `TOKEN_LEDGER_FILE` | optional | Ledger store path (default `token_ledger.json`) |
 | `FLOP_UNLOCK_RATIO` | optional | Real testnet FLOP spent per 1 FLOP mainnet unlocked (default `3`, i.e. 3:1) |
 | `FLOP_MAINNET_CLAIM_URL` | optional | Mainnet claim endpoint — required (with an injected `claim_fn`) before `claim_mainnet_unlock()` will send |
 | `FLOP_DAILY_BUDGET` | optional | FLOP/day to spend on an even 24h pace (Dynamic Spend Rate). Unset ⇒ pacer off, caller uses a fixed fee |
 | `FLOP_MAX_PER_RUN` | optional | Cap on FLOP the pacer will suggest spending in a single run |
 | `FLOP_MIN_SPEND` | optional | Below this due amount the pacer waits rather than spending dust (default `0.0001`) |
+| `FLOP_PACE_JITTER_PCT` | optional | Anti-sybil: randomise each due amount by ±X% so the spend rate never tracks a deterministic linear target (a bot tell). Unset/`0` ⇒ off; clamped to `[0,100]` |
 | `FLOP_PUBLISH_UNLOCK` | optional | Publish `unlock_status()` + pacer status to KV note `/kv/<ns>/unlock` each run: off (default) / `true` |
 | `FLOP_FAUCET_ENABLED` | optional | Enable the auto-cycle faucet scaffold: off (default) / `true` |
 | `FLOP_FAUCET_URL` | optional | Faucet endpoint — required (with an injected `claim_fn`) before a faucet claim will send |
 | `FLOP_FAUCET_AMOUNT` | optional | Expected FLOP per faucet claim (default `100`) |
 | `FLOP_FAUCET_COOLDOWN_HOURS` | optional | Minimum hours between faucet claims (default `24`) |
 | `FLOP_FAUCET_REFILL_BELOW` | optional | Only claim when the testnet balance is below this threshold (unset = no threshold check) |
+| `FLOP_FAUCET_DEMAND_ONLY` | optional | Anti-sybil: claim on demand, not on a calendar — requires `FLOP_FAUCET_REFILL_BELOW`, else `skipped_demand`. Avoids faucet→dump round-trips. off (default) / `true` |
+| `FLOP_FAUCET_JITTER_MIN` | optional | Anti-sybil: add `0..N` random minutes to the cooldown (stable within one cycle, seeded on the prior claim) so claims don't land exactly on the cooldown boundary. Unset/`0` ⇒ off |
+| `FLOP_FAUCET_MAX_PER_DAY` | optional | Anti-sybil envelope: cap on faucet claims per UTC day. At the cap ⇒ `skipped_daily_cap`. Unset ⇒ no limit |
 
 ---
 

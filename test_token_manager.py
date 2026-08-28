@@ -17,7 +17,7 @@ def _clean_env(monkeypatch):
     """Mỗi test khởi đầu ở simulation, không dính env FLOP_/TESTNET_ của máy chạy."""
     for k in ("TESTNET_ENABLED", "FLOP_RPC_URL", "FLOP_SUBMIT_URL", "FLOP_TX_MODE",
               "FLOP_TOKEN_SYMBOL", "TOKEN_LEDGER_FILE", "FLOP_METER_ENABLED",
-              "FLOP_INFERENCE_COST"):
+              "FLOP_INFERENCE_COST", "FLOP_ORGANIC_ONLY", "FLOP_MAX_SPENDS_PER_HOUR"):
         monkeypatch.delenv(k, raising=False)
 
 
@@ -163,3 +163,79 @@ def test_meter_inference_on(ledger, monkeypatch):
     r = tm.meter_inference(path=ledger)
     assert r["outcome"] == "spent_simulated"
     assert r["amount"] == "0.001"                    # mặc định FLOP_INFERENCE_COST
+
+
+# --- Bất biến organic-only (FLOP_ORGANIC_ONLY) chống burn-loop tổng hợp -----------
+
+def test_meter_organic_only_blocks_without_event(ledger, monkeypatch):
+    tm.credit("1", path=ledger)
+    monkeypatch.setenv("FLOP_METER_ENABLED", "true")
+    monkeypatch.setenv("FLOP_ORGANIC_ONLY", "true")
+    r = tm.meter_inference(path=ledger)              # không event_id -> từ chối
+    assert r["outcome"] == "skipped_synthetic"
+    assert tm.check_balance(path=ledger) == "1"      # không hề chi
+
+
+def test_meter_organic_only_blank_event_blocked(ledger, monkeypatch):
+    tm.credit("1", path=ledger)
+    monkeypatch.setenv("FLOP_METER_ENABLED", "true")
+    monkeypatch.setenv("FLOP_ORGANIC_ONLY", "true")
+    assert tm.meter_inference(path=ledger, event_id="   ")["outcome"] == "skipped_synthetic"
+
+
+def test_meter_organic_only_allows_with_event(ledger, monkeypatch):
+    tm.credit("1", path=ledger)
+    monkeypatch.setenv("FLOP_METER_ENABLED", "true")
+    monkeypatch.setenv("FLOP_ORGANIC_ONLY", "true")
+    r = tm.meter_inference(path=ledger, event_id="alice")
+    assert r["outcome"] == "spent_simulated"
+
+
+def test_meter_event_id_not_required_when_flag_off(ledger, monkeypatch):
+    tm.credit("1", path=ledger)
+    monkeypatch.setenv("FLOP_METER_ENABLED", "true")
+    # ORGANIC_ONLY tắt -> event_id không bắt buộc (hành vi cũ giữ nguyên).
+    assert tm.meter_inference(path=ledger)["outcome"] == "spent_simulated"
+
+
+# --- Envelope tần suất (FLOP_MAX_SPENDS_PER_HOUR) ---------------------------------
+
+def test_rate_cap_blocks_after_limit(ledger, monkeypatch):
+    tm.credit("1", path=ledger)
+    monkeypatch.setenv("FLOP_METER_ENABLED", "true")
+    monkeypatch.setenv("FLOP_MAX_SPENDS_PER_HOUR", "2")
+    # 2 lần chi đầu OK; lần 3 trong cùng giờ -> chặn trước khi chi.
+    assert tm.meter_inference(path=ledger)["outcome"] == "spent_simulated"
+    assert tm.meter_inference(path=ledger)["outcome"] == "spent_simulated"
+    r = tm.meter_inference(path=ledger)
+    assert r["outcome"] == "skipped_rate_cap"
+    assert tm.check_balance(path=ledger) == "0.998"  # đúng 2 lần *0.001, lần 3 không trừ
+
+
+# --- spend_stats (audit chống sybil) ---------------------------------------------
+
+def test_spend_stats_counts_spends_only(ledger, monkeypatch):
+    tm.credit("1", path=ledger)                      # credit KHÔNG tính là spend
+    monkeypatch.setenv("FLOP_METER_ENABLED", "true")
+    tm.meter_inference(path=ledger)
+    tm.meter_inference(path=ledger)
+    st = tm.spend_stats(path=ledger)
+    assert st["spend_count_total"] == 2
+    assert st["spend_count_24h"] == 2
+
+
+def test_spend_stats_24h_window(ledger):
+    import time as _t
+    now = 1_700_000_000
+    old_ts = _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime(now - 200_000))  # ~55h trước
+    new_ts = _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime(now - 100))      # trong 24h
+    state = {"balances": {"FLOP": "0"}, "entries": [
+        {"kind": "spend", "token": "FLOP", "amount": "0.001", "ts": old_ts},
+        {"kind": "spend", "token": "FLOP", "amount": "0.001", "ts": new_ts},
+        {"kind": "credit", "token": "FLOP", "amount": "1", "ts": new_ts},
+    ]}
+    with open(ledger, "w") as f:
+        json.dump(state, f)
+    st = tm.spend_stats(now=now, path=ledger)
+    assert st["spend_count_total"] == 2              # cả 2 spend, bỏ credit
+    assert st["spend_count_24h"] == 1                # chỉ entry trong 24h

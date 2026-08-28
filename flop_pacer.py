@@ -16,11 +16,15 @@ Env:
   FLOP_MAX_PER_RUN    trần chi mỗi lần chạy (tùy chọn).
   FLOP_MIN_SPEND      dưới mức này thì đợi tích thêm, tránh chi "bụi" (mặc định 0.0001).
   FLOP_PACER_FILE     nơi lưu nhịp chi trong ngày (mặc định flop_pacer.json).
+  FLOP_PACE_JITTER_PCT  (chống sybil) nhiễu ngẫu nhiên ±X% quanh lượng đến hạn, để nhịp
+                        chi KHÔNG rơi đúng mục tiêu tuyến tính tất định (dấu hiệu bot).
+                        Rỗng/0 -> tắt (nhịp tuyến tính như cũ). Kẹp về [0,100].
 """
 
 import os
 import json
 import time
+import random
 from decimal import Decimal, InvalidOperation
 
 
@@ -54,6 +58,27 @@ def max_per_run():
 def min_spend() -> Decimal:
     d = _dec(os.environ.get("FLOP_MIN_SPEND", ""))
     return d if (d is not None and d > 0) else Decimal("0.0001")
+
+
+def jitter_pct() -> Decimal:
+    """Biên nhiễu ±X% cho nhịp chi (chống "chi đúng mục tiêu = bot"). Rỗng/không
+    dương -> 0 (tắt). Kẹp trần 100 để jitter không lật dấu lượng chi."""
+    d = _dec(os.environ.get("FLOP_PACE_JITTER_PCT", ""))
+    if d is None or d <= 0:
+        return Decimal(0)
+    return d if d <= 100 else Decimal(100)
+
+
+def _apply_jitter(due: Decimal, rng=None) -> Decimal:
+    """Nhân `due` với hệ số ngẫu nhiên trong [1-pct%, 1+pct%]. `rng()` trả float ∈ [0,1)
+    (tiêm được để test tất định; mặc định random.random). Không bao giờ trả số âm."""
+    pct = jitter_pct()
+    if pct <= 0 or due <= 0:
+        return due
+    r = Decimal(str((rng or random.random)()))       # [0,1)
+    factor = Decimal(1) + (r * 2 - 1) * pct / Decimal(100)
+    out = due * factor
+    return out if out > 0 else Decimal(0)
 
 
 def pacer_path(path: str = None) -> str:
@@ -104,11 +129,12 @@ def _rec_for(state: dict, token: str, now: int) -> dict:
 
 # --- API --------------------------------------------------------------------------
 
-def next_spend_amount(token: str = None, now: int = None, path: str = None):
+def next_spend_amount(token: str = None, now: int = None, path: str = None, rng=None):
     """Số FLOP NÊN chi lần chạy này để bám lịch rải đều. Trả:
        None  -> pacer tắt (FLOP_DAILY_BUDGET chưa đặt) -> caller dùng phí cố định;
        "0"   -> chưa tới nhịp (đã bám kịp mục tiêu, hoặc phần đến hạn < FLOP_MIN_SPEND);
-       "x.y" -> lượng nên chi để đuổi kịp mục tiêu tuyến tính, đã kẹp trần/lần."""
+       "x.y" -> lượng nên chi để đuổi kịp mục tiêu tuyến tính, đã kẹp trần/lần.
+    `rng` (tùy chọn) là nguồn ngẫu nhiên cho jitter, tiêm được để test tất định."""
     budget = daily_budget()
     if budget is None:
         return None
@@ -124,6 +150,9 @@ def next_spend_amount(token: str = None, now: int = None, path: str = None):
         return "0"
     cap = max_per_run()
     if cap is not None and due > cap:
+        due = cap
+    due = _apply_jitter(due, rng)                    # chống sybil: phá nhịp tuyến tính robot
+    if cap is not None and due > cap:                # jitter lên có thể vượt trần -> kẹp lại
         due = cap
     if due < min_spend():
         return "0"                                  # đợi tích thêm, tránh chi bụi liên tục
@@ -157,5 +186,7 @@ def pacing_status(token: str = None, now: int = None, path: str = None) -> dict:
         "token": token, "enabled": budget is not None,
         "daily_budget": _fmt(budget) if budget else None,
         "spent_today": _fmt(spent), "target_now": _fmt(target),
-        "next_due": next_spend_amount(token, now, path),
+        # Telemetry: báo lượng đến hạn TRƯỚC jitter (rng=0.5 -> hệ số 1.0) để status
+        # ổn định/đọc được; jitter chỉ áp ở lần chi thật qua next_spend_amount().
+        "next_due": next_spend_amount(token, now, path, rng=lambda: 0.5),
     }

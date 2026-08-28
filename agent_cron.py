@@ -808,7 +808,11 @@ def llm_reply(user_text: str, sender_nick=None, state=None):
     # core logic ở đây. Xem token_manager.py.
     try:
         import token_manager
-        token_manager.meter_inference(memo=f"{provider} inference")
+        # event_id gắn lần chi vào MỘT sự kiện thật (tin @mention của user) — điều kiện
+        # cho bất biến FLOP_ORGANIC_ONLY (chống burn-loop tổng hợp). Ở đây luôn có tin
+        # đến thật nên id không rỗng.
+        token_manager.meter_inference(memo=f"{provider} inference",
+                                      event_id=(sender_nick or "mention"))
     except Exception as e:
         print(f"[meter] bỏ qua ({str(e)[:80]})")
     print(f"[llm:{provider}] ok (tone={tone}, lang={lang}, grounded={bool(ctx)})")
@@ -1187,8 +1191,15 @@ def main():
         try:
             import token_manager
             import flop_pacer
+            # Bằng chứng usage hữu cơ (chống sybil): công khai số lần CHI (tổng + 24h) bên
+            # cạnh số lượt TRẢ LỜI/PROACTIVE của run này. Auditor đối chiếu 2 chuỗi này
+            # theo thời gian -> farm lộ ra (chi tách rời hoạt động thật). Không bịa tỉ lệ
+            # gộp lệch cửa sổ: publish số liệu thô, để bên ngoài tự tương quan.
             payload = {"unlock": token_manager.unlock_status(),
-                       "pacing": flop_pacer.pacing_status()}
+                       "pacing": flop_pacer.pacing_status(),
+                       "activity": {**token_manager.spend_stats(),
+                                    "replies_this_run": replies,
+                                    "proactive_this_run": proactive}}
             kv_set(private_key, did, "unlock", json.dumps(payload, ensure_ascii=False))
         except Exception as e:
             print(f"[unlock] publish bỏ qua ({str(e)[:80]})")
