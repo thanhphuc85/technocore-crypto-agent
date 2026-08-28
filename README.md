@@ -254,6 +254,8 @@ python agent_cron.py           # runs telemetry + auto-responder once
 | `RECAP_LANG` | optional | Recap language: falls back to `DIGEST_LANG` (`en` default) / `vi` |
 | `FLOP_ALERT_EXPLAIN_ENABLED` | optional | **(B1)** Append a one-line grounded AI read to each move alert — one inference per real threshold breach: off (default) / `true` |
 | `TOKEN_LEDGER_FILE` | optional | Ledger store path (default `token_ledger.json`) |
+
+> **Interaction with `FLOP_ORGANIC_ONLY`.** Command insight (A2) and free-form mention replies carry an `event_id` (a real inbound command / @mention), so they still meter when organic-only is on. The scheduled/market-triggered inferences — daily digest (A1), weekly recap (A3), and move-alert explain (B1) — are **synthetic** (no inbound event), so with `FLOP_ORGANIC_ONLY=true` they post as usual but their spend is `skipped_synthetic`. Leave organic-only **off** (default) to meter all of them.
 | `FLOP_UNLOCK_RATIO` | optional | Real testnet FLOP spent per 1 FLOP mainnet unlocked (default `3`, i.e. 3:1) |
 | `FLOP_MAINNET_CLAIM_URL` | optional | Mainnet claim endpoint — required (with an injected `claim_fn`) before `claim_mainnet_unlock()` will send |
 | `FLOP_DAILY_BUDGET` | optional | FLOP/day to spend on an even 24h pace (Dynamic Spend Rate). Unset ⇒ pacer off, caller uses a fixed fee |
