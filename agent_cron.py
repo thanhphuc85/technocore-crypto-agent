@@ -930,8 +930,14 @@ def answer_kibble_job(job: dict):
         print(f"[kibble:{provider}] answer failed | {e}")
         return None
     text = guard_output(" ".join((raw or "").split()).strip())
-    if not text or text.strip().upper().startswith("SKIP"):
-        print(f"[kibble:{provider}] skip {job.get('jobid')} — model declined / empty")
+    if not text:
+        print(f"[kibble:{provider}] skip {job.get('jobid')} — empty/guarded output")
+        return None
+    # 'SKIP' = model CHỦ ĐỘNG từ chối (prompt yêu cầu trả ĐÚNG 'SKIP'). Chỉ nhận diện khi
+    # phản hồi NGẮN + mở đầu 'SKIP' -> tránh chặn nhầm câu trả lời hợp lệ bắt đầu bằng 'Skip'
+    # (vd 'Skip lists are a data structure...', 'Skip connections in ResNets...').
+    if len(text) <= 40 and text.upper().startswith("SKIP"):
+        print(f"[kibble:{provider}] skip {job.get('jobid')} — model declined (SKIP)")
         return None
     text = text[:KIBBLE_MAX_CHARS]
     _meter_flop(f"{provider} kibble:{jtype}", event_id=job.get("jobid"))
