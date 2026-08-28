@@ -60,7 +60,8 @@ your own copy, then run *your own* signed agent in three steps.
 - **📊 Live-grounded answers** — every AI reply is injected with a real-time market snapshot (BTC/ETH/SOL + any coin mentioned + Fear & Greed) so it quotes **actual prices**, not stale training data.
 - **🗣 Conversational memory** — remembers the last few turns per user (persisted in state) and answers in the **user's language** (Vietnamese / English auto-detected).
 - **🛠 Useful commands** — `!price [coin]`, `!market`, `!top`, `!trending`, `!dominance`, `!gas`, `!fear`, `!about`, and more (see below).
-- **🚨 Move alerts** — posts a signed alert only when BTC/ETH swings past a configurable threshold (event-driven signal, not spam).
+- **🚨 Move alerts** — posts a signed alert only when BTC/ETH swings past a configurable threshold (event-driven signal, not spam). Optionally *(gated, `FLOP_ALERT_EXPLAIN_ENABLED`)* appends a one-line AI read of the move (grounded on the magnitude + Fear & Greed, no invented news) — one genuine inference, only when a real threshold breach fires.
+- **📊 AI digest, weekly recap & command insight** *(gated)* — opt-in, all signed and mirrored to KV notes: a **daily market digest** (`!digest` on demand, `FLOP_DIGEST_ENABLED` on a 24h pace), a **weekly recap** (`!recap`, `FLOP_RECAP_ENABLED` — accumulates lightweight price/sentiment samples through the week, then posts a grounded retrospective), and a one-line **AI reading** appended to `!top`/`!trending`/`!fear`/`!dominance` (`FLOP_INSIGHT_ENABLED`). Each is a **genuine, auditable inference** — the honest way to raise real FLOP throughput, not busywork. Off by default, so the 24/7 agent is unchanged until you flip the flag.
 - **💾 Key-Value Store** — persist auditable notes and durable cursors to `/kv/<ns>`. Ordinary namespaces are **unsigned / world-writable** (Technocore only signs the room-ownership namespaces `room-owners`/`room-allow`, which this agent doesn't use) — see below.
 - **📇 Contribution manifest** — periodically publishes a signed record (what it is, DID, repo link, commands) so the agent is a verifiable *public good*, not just a broadcaster.
 - **🛡 Resilient data** — CoinGecko primary with a keyless **Binance fallback**, so price feeds keep working when one source is down.
@@ -81,6 +82,8 @@ Mention the agent in the room — e.g. `@nguyenvulv !market`:
 | `!dominance` | BTC / ETH market-cap dominance |
 | `!gas` | ETH gas price (gwei) via public JSON-RPC |
 | `!fear` | Crypto Fear & Greed Index (alternative.me) |
+| `!digest` | On-demand **AI market digest** — a short, live-grounded read (BTC/ETH/SOL + top movers + F&G) |
+| `!recap` | On-demand **AI weekly recap** — a retrospective from the week's accumulated samples (needs `FLOP_RECAP_ENABLED` running to collect them) |
 | `!about` | What the agent is and does |
 | `!time` · `!ping` · `!help` | UTC time · liveness · command list |
 | *free-form mention* | Live-grounded AI answer (Gemini / ChatGPT), in your language, with memory |
@@ -242,7 +245,17 @@ python agent_cron.py           # runs telemetry + auto-responder once
 | `FLOP_INFERENCE_COST` | optional | FLOP debited per inference when metering is on (default `0.001`) |
 | `FLOP_ORGANIC_ONLY` | optional | Anti-sybil: only meter a spend that carries an `event_id` (a real inbound @mention). Missing ⇒ `skipped_synthetic`, blocking self-triggered burn loops. off (default) / `true` |
 | `FLOP_MAX_SPENDS_PER_HOUR` | optional | Anti-sybil envelope: cap on metered spends per rolling hour (counted from the ledger, so it holds even with the pacer off). At the cap ⇒ `skipped_rate_cap`. Unset ⇒ no limit |
+| `FLOP_DIGEST_ENABLED` | optional | **(A1)** Post a signed, AI-generated daily market digest — a genuine, auditable inference each run it fires: off (default) / `true` |
+| `DIGEST_INTERVAL_HOURS` | optional | Minimum hours between digest posts (default `24`) |
+| `DIGEST_LANG` | optional | Digest language: `en` (default) / `vi` |
+| `FLOP_INSIGHT_ENABLED` | optional | **(A2)** Append a one-line AI reading to `!top`/`!trending`/`!fear`/`!dominance` — one grounded inference per real command call: off (default) / `true` |
+| `FLOP_RECAP_ENABLED` | optional | **(A3)** Accumulate weekly price/sentiment samples and post a signed AI weekly recap: off (default) / `true` |
+| `RECAP_INTERVAL_HOURS` | optional | Minimum hours between recap posts (default `168` = 7 days) |
+| `RECAP_LANG` | optional | Recap language: falls back to `DIGEST_LANG` (`en` default) / `vi` |
+| `FLOP_ALERT_EXPLAIN_ENABLED` | optional | **(B1)** Append a one-line grounded AI read to each move alert — one inference per real threshold breach: off (default) / `true` |
 | `TOKEN_LEDGER_FILE` | optional | Ledger store path (default `token_ledger.json`) |
+
+> **Interaction with `FLOP_ORGANIC_ONLY`.** Command insight (A2) and free-form mention replies carry an `event_id` (a real inbound command / @mention), so they still meter when organic-only is on. The scheduled/market-triggered inferences — daily digest (A1), weekly recap (A3), and move-alert explain (B1) — are **synthetic** (no inbound event), so with `FLOP_ORGANIC_ONLY=true` they post as usual but their spend is `skipped_synthetic`. Leave organic-only **off** (default) to meter all of them.
 | `FLOP_UNLOCK_RATIO` | optional | Real testnet FLOP spent per 1 FLOP mainnet unlocked (default `3`, i.e. 3:1) |
 | `FLOP_MAINNET_CLAIM_URL` | optional | Mainnet claim endpoint — required (with an injected `claim_fn`) before `claim_mainnet_unlock()` will send |
 | `FLOP_DAILY_BUDGET` | optional | FLOP/day to spend on an even 24h pace (Dynamic Spend Rate). Unset ⇒ pacer off, caller uses a fixed fee |

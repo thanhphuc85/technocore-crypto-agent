@@ -124,6 +124,78 @@ GEMINI_PREFERRED = [
 ]
 LLM_MAX_CHARS = 220             # giới hạn độ dài câu trả lời LLM
 
+# --- (A1) Daily AI Market Digest — nội dung CÔNG KHAI hữu ích do AI sinh (grounded).
+#     Mỗi lần đăng = 1 lần suy luận LLM THẬT -> nguồn tiêu FLOP HỢP LỆ, defensible
+#     (không phải burn giả). Mặc định TẮT -> agent 24/7 không đổi hành vi. Xem
+#     broadcast_digest() + generate_digest().
+DIGEST_ENABLED = os.environ.get("FLOP_DIGEST_ENABLED", "").strip().lower() in (
+    "1", "true", "on", "yes")
+DIGEST_INTERVAL_H = _env_float("DIGEST_INTERVAL_HOURS", 24)   # tối thiểu giờ/lần
+DIGEST_LANG = (os.environ.get("DIGEST_LANG", "en").strip().lower() or "en")
+DIGEST_TEMPERATURE = _env_float("DIGEST_TEMPERATURE", 0.6)
+DIGEST_MAX_CHARS = int(_env_float("DIGEST_MAX_CHARS", 280))
+DIGEST_SYSTEM = (
+    f"You are {AGENT_NAME}, an autonomous crypto market analyst posting a short daily "
+    "digest to a public chat. Using ONLY the live figures provided, write a concise, "
+    "useful market read in 2 short sentences (max ~260 characters): the risk tone "
+    "(risk-on / risk-off), one or two concrete numbers, and the Fear & Greed reading "
+    "if given. Never give financial advice. Output only the digest text — no preamble, "
+    "no quotes, no markdown."
+)
+
+# --- (A2) AI reading cho các lệnh sẵn có (!top/!trending/!fear/!dominance): kèm 1 câu
+#     bình luận AI bám số vừa fetch. Mỗi câu = 1 suy luận THẬT gắn với 1 hành động THẬT
+#     của user. Mặc định TẮT -> lệnh giữ nguyên output cũ. Xem _insight().
+INSIGHT_ENABLED = os.environ.get("FLOP_INSIGHT_ENABLED", "").strip().lower() in (
+    "1", "true", "on", "yes")
+INSIGHT_TEMPERATURE = _env_float("INSIGHT_TEMPERATURE", 0.5)
+INSIGHT_MAX_CHARS = int(_env_float("INSIGHT_MAX_CHARS", 160))
+INSIGHT_SYSTEM = (
+    f"You are {AGENT_NAME}, a sharp crypto analyst. Given the live figures for the "
+    "named metric, add ONE very short insight sentence (max ~140 chars): a pattern or "
+    "takeaway grounded in the numbers given. Never give financial advice, never invent "
+    "numbers not provided. Output only the sentence — no prefix, no quotes."
+)
+
+# --- (A3) Weekly recap — bản tổng kết tuần do AI sinh, grounded bằng CHÍNH các mẫu
+#     giá/sentiment agent tích lũy trong tuần (đỉnh/đáy, đổi %, dịch Fear&Greed). 1 lần/
+#     tuần = 1 suy luận THẬT, giá trị thật (retrospective công khai). Mặc định TẮT ->
+#     KHÔNG tích mẫu, KHÔNG đăng gì. Xem record_weekly_sample()/generate_recap().
+RECAP_ENABLED = os.environ.get("FLOP_RECAP_ENABLED", "").strip().lower() in (
+    "1", "true", "on", "yes")
+RECAP_INTERVAL_H = _env_float("RECAP_INTERVAL_HOURS", 168)          # 7 ngày/lần
+RECAP_WINDOW_H = _env_float("RECAP_WINDOW_HOURS", 168)             # cửa sổ mẫu = 7 ngày
+RECAP_SAMPLE_INTERVAL_H = _env_float("RECAP_SAMPLE_INTERVAL_HOURS", 6)  # tối đa 6h/mẫu
+RECAP_MAX_SAMPLES = int(_env_float("RECAP_MAX_SAMPLES", 60))       # trần ring-buffer state
+RECAP_LANG = (os.environ.get("RECAP_LANG", "").strip().lower() or DIGEST_LANG)
+RECAP_TEMPERATURE = _env_float("RECAP_TEMPERATURE", 0.6)
+RECAP_MAX_CHARS = int(_env_float("RECAP_MAX_CHARS", 300))
+RECAP_SYSTEM = (
+    f"You are {AGENT_NAME}, a crypto market analyst posting a weekly recap to a public "
+    "chat. Using ONLY the week's figures provided (start->end, highs/lows, Fear & Greed "
+    "range), write a concise retrospective in 2-3 short sentences (max ~290 characters): "
+    "the week's trend, the standout move, and the sentiment shift. Never give financial "
+    "advice, never invent numbers not provided. Output only the recap text — no preamble, "
+    "no quotes, no markdown."
+)
+
+# --- (B1) Explain-mode cho Move Alerts — khi BTC/ETH vượt ngưỡng cảnh báo (đã event-
+#     driven, không spam), kèm 1 câu AI mô tả BỐI CẢNH move (grounded bằng chính mức biến
+#     động + Fear&Greed). 1 câu = 1 suy luận THẬT. Mặc định TẮT -> alert giữ nguyên.
+ALERT_EXPLAIN_ENABLED = os.environ.get("FLOP_ALERT_EXPLAIN_ENABLED", "").strip().lower() in (
+    "1", "true", "on", "yes")
+ALERT_EXPLAIN_TEMPERATURE = _env_float("ALERT_EXPLAIN_TEMPERATURE", 0.5)
+ALERT_EXPLAIN_MAX_CHARS = int(_env_float("ALERT_EXPLAIN_MAX_CHARS", 160))
+ALERT_EXPLAIN_LANG = (os.environ.get("ALERT_EXPLAIN_LANG", "").strip().lower() or DIGEST_LANG)
+ALERT_EXPLAIN_SYSTEM = (
+    f"You are {AGENT_NAME}, a crypto market analyst. A BTC/ETH price just moved past the "
+    "alert threshold. In ONE short sentence (max ~150 chars), characterize the move using "
+    "ONLY the figures given — its magnitude and direction, and the Fear & Greed reading as "
+    "sentiment context. Do NOT invent news, events, or specific causes you cannot verify; "
+    "speak in market terms (momentum, volatility, sentiment). No financial advice. Output "
+    "only the sentence — no prefix, no quotes."
+)
+
 # --- LLM giọng điệu (persona) theo NGỮ CẢNH ---
 # Lớp AN TOÀN là hằng số, KHÔNG đổi theo tone: untrusted, không lộ key, 1 câu ngắn.
 LLM_SAFETY = (
@@ -747,6 +819,166 @@ def build_market_context(extra_ids=None) -> str:
     return f"LIVE MARKET DATA ({time.strftime('%H:%MZ', time.gmtime())}): " + " · ".join(parts)
 
 
+def _meter_flop(memo: str, event_id: str = None) -> None:
+    """(Tùy chọn, GATED) Ghi nhận 'trả FLOP cho 1 lần suy luận' vào sổ cái token.
+    Mặc định TẮT (FLOP_METER_ENABLED off) -> không đổi hành vi. Bọc kín: mọi lỗi bị
+    nuốt để KHÔNG bao giờ làm sập luồng của agent. `event_id` gắn lần chi vào một sự
+    kiện THẬT (tin @mention / lệnh của user) -> thỏa bất biến FLOP_ORGANIC_ONLY; để None
+    cho nội dung agent TỰ sinh (digest/recap/alert) -> khi organic-only bật, các lần chi
+    tổng hợp này bị skipped_synthetic (đúng ý đồ chống burn-loop). Xem token_manager.py."""
+    try:
+        import token_manager
+        token_manager.meter_inference(memo=memo, event_id=event_id)
+    except Exception as e:
+        print(f"[meter] bỏ qua ({str(e)[:80]})")
+
+
+def _llm_generate(prompt: str, system: str, temperature: float, memo: str,
+                  event_id: str = None):
+    """Gọi LLM cho nội dung do AGENT tự sinh (grounded bằng data LIVE do CHÍNH agent
+    dựng — KHÔNG phải input untrusted của user, nên không cần lớp isolate/untrusted).
+    Dùng cho digest (A1) / insight (A2) / recap (A3) / alert explain (B1). Vẫn đi qua
+    guard_output + đo FLOP như reply. `event_id` chuyển tiếp xuống _meter_flop: đặt cho
+    nguồn ORGANIC (lệnh của user), để None cho nguồn TỔNG HỢP (theo lịch/sự kiện thị
+    trường). Trả text đã lọc, hoặc None nếu không có provider / rỗng / lỗi."""
+    provider = _active_provider()
+    if not provider:
+        return None
+    try:
+        raw = (_gemini_reply(prompt, system, temperature) if provider == "gemini"
+               else _openai_reply(prompt, system, temperature))
+    except Exception as e:
+        print(f"[llm:{provider}] generate '{memo}' failed | {e}")
+        return None
+    text = guard_output(" ".join((raw or "").split()).strip())
+    if not text:
+        return None
+    _meter_flop(f"{provider} {memo}", event_id=event_id)   # 1 suy luận THẬT -> 1 nhịp FLOP
+    print(f"[llm:{provider}] generate ok ({memo})")
+    return text
+
+
+def build_digest_context() -> str:
+    """Snapshot thị trường LIVE, GIÀU hơn build_market_context: thêm top gainers 24h +
+    dominance để bản digest có chất liệu phân tích. Trả '' nếu không lấy được data nào."""
+    parts = []
+    base = build_market_context()                 # BTC/ETH/SOL + Fear&Greed
+    if base:
+        parts.append(base)
+    movers = get_top_movers(3)
+    if movers:
+        parts.append("Top 24h gainers: " + ", ".join(f"{s} {c:+.1f}%" for s, c in movers))
+    b, e = get_dominance()
+    if b is not None and e is not None:
+        parts.append(f"Dominance BTC {b:.1f}% ETH {e:.1f}%")
+    return " | ".join(parts)
+
+
+def generate_digest(lang: str = None):
+    """(A1) Sinh 1 bản phân tích thị trường ngắn, GROUNDED bằng data live. Trả text hoặc
+    None (thiếu provider / thiếu data / lỗi). Mỗi lần sinh = 1 suy luận THẬT (đo qua
+    _llm_generate). Ngôn ngữ mặc định = DIGEST_LANG."""
+    ctx = build_digest_context()
+    if not ctx:
+        print("[digest] không có data thị trường -> bỏ qua")
+        return None
+    lg = (lang or DIGEST_LANG)
+    system = DIGEST_SYSTEM + ("\nReply in Vietnamese." if lg == "vi" else "\nReply in English.")
+    text = _llm_generate(ctx, system, DIGEST_TEMPERATURE, memo="daily digest")
+    return text[:DIGEST_MAX_CHARS] if text else None
+
+
+def _insight(kind: str, facts: str, lang: str = "en", event_id: str = None) -> str:
+    """(A2) 1 câu bình luận AI ngắn bám 'facts' (số agent VỪA fetch cho lệnh). Mỗi câu =
+    1 suy luận THẬT. Mặc định TẮT (FLOP_INSIGHT_ENABLED off) -> trả '' để caller nối
+    chuỗi an toàn (lệnh giữ nguyên output cũ). Không provider / lỗi -> cũng trả ''.
+    `event_id` = người gọi lệnh: đây là nguồn ORGANIC (lệnh THẬT của user) nên vẫn được
+    đo kể cả khi FLOP_ORGANIC_ONLY bật."""
+    if not INSIGHT_ENABLED:
+        return ""
+    system = INSIGHT_SYSTEM + ("\nReply in Vietnamese." if lang == "vi" else "\nReply in English.")
+    text = _llm_generate(f"{kind}: {facts}", system, INSIGHT_TEMPERATURE,
+                         memo=f"{kind} insight", event_id=(event_id or "command"))
+    return f" — {text[:INSIGHT_MAX_CHARS]}" if text else ""
+
+
+def record_weekly_sample(state, now) -> bool:
+    """(A3) Tích 1 mẫu {ts, btc, eth, fg} cho weekly recap — tối đa RECAP_SAMPLE_INTERVAL_H
+    giờ/lần (đỡ gọi API), prune mẫu cũ hơn RECAP_WINDOW_H, giữ tối đa RECAP_MAX_SAMPLES.
+    KHÔNG ghi mẫu rác: thiếu giá BTC -> bỏ qua, thử lại vòng sau. Persist ngay (merge vào
+    state.json). Trả True nếu vừa ghi thêm mẫu."""
+    if not _due(state, "last_weekly_sample", RECAP_SAMPLE_INTERVAL_H, now):
+        return False
+    m = get_market(["bitcoin", "ethereum"])
+    btc = m.get("bitcoin", {}).get("usd")
+    eth = m.get("ethereum", {}).get("usd")
+    if btc is None:
+        return False
+    fg, _ = get_fear_greed()
+    samples = [s for s in (state.get("weekly_samples") or [])
+               if now - s.get("ts", 0) <= RECAP_WINDOW_H * 3600]
+    samples.append({"ts": now, "btc": btc, "eth": eth, "fg": fg})
+    samples = samples[-RECAP_MAX_SAMPLES:]
+    state["weekly_samples"] = samples                 # cập nhật state trong-run cho recap
+    state["last_weekly_sample"] = now
+    save_state({"weekly_samples": samples, "last_weekly_sample": now})
+    return True
+
+
+def build_recap_context(state, now) -> str:
+    """Chất liệu weekly recap tính TỪ mẫu đã tích (không bịa): đổi % đầu->cuối tuần,
+    đỉnh/đáy BTC/ETH, biên Fear&Greed. Trả '' nếu chưa đủ (>=2 mẫu) để tổng kết."""
+    samples = [s for s in (state.get("weekly_samples") or [])
+               if now - s.get("ts", 0) <= RECAP_WINDOW_H * 3600]
+    if len(samples) < 2:
+        return ""
+    first, last = samples[0], samples[-1]
+
+    def pct(a, b):
+        return None if not a else (b - a) / a * 100.0
+
+    days = max((last["ts"] - first["ts"]) / 86400.0, 0.0)
+    parts = [f"Window: last {days:.1f}d, {len(samples)} samples"]
+    for sym, key in (("BTC", "btc"), ("ETH", "eth")):
+        vals = [s[key] for s in samples if s.get(key)]
+        if vals and first.get(key) and last.get(key):
+            parts.append(f"{sym} {first[key]}->{last[key]} ({pct(first[key], last[key]):+.1f}%), "
+                         f"low {min(vals)} high {max(vals)}")
+    fgs = [s["fg"] for s in samples if s.get("fg") is not None]
+    if fgs:
+        parts.append(f"Fear&Greed {fgs[0]}->{fgs[-1]} (range {min(fgs)}-{max(fgs)})")
+    return " | ".join(parts)
+
+
+def generate_recap(state, now, lang: str = None):
+    """(A3) Sinh bản tổng kết tuần grounded từ mẫu đã tích. Trả text hoặc None (chưa đủ
+    mẫu / thiếu provider / lỗi). Mỗi lần = 1 suy luận THẬT (đo qua _llm_generate)."""
+    ctx = build_recap_context(state, now)
+    if not ctx:
+        print("[recap] chưa đủ mẫu trong tuần -> bỏ qua")
+        return None
+    lg = (lang or RECAP_LANG)
+    system = RECAP_SYSTEM + ("\nReply in Vietnamese." if lg == "vi" else "\nReply in English.")
+    text = _llm_generate(ctx, system, RECAP_TEMPERATURE, memo="weekly recap")
+    return text[:RECAP_MAX_CHARS] if text else None
+
+
+def explain_move(moves: str, lang: str = None) -> str:
+    """(B1) 1 câu AI mô tả bối cảnh 1 move alert, grounded bằng chính mức biến động +
+    snapshot Fear&Greed. Mặc định TẮT (FLOP_ALERT_EXPLAIN_ENABLED off) -> trả '' để
+    alert giữ NGUYÊN. Event-driven (chỉ chạy khi vượt ngưỡng) nên không spam. Không
+    provider / lỗi -> cũng trả ''. Mỗi câu = 1 suy luận THẬT (đo qua _llm_generate)."""
+    if not ALERT_EXPLAIN_ENABLED:
+        return ""
+    val, cls = get_fear_greed()
+    facts = moves + (f" | Fear&Greed {val}({cls})" if val is not None else "")
+    lg = (lang or ALERT_EXPLAIN_LANG)
+    system = ALERT_EXPLAIN_SYSTEM + ("\nReply in Vietnamese." if lg == "vi" else "\nReply in English.")
+    text = _llm_generate(f"Sudden move: {facts}", system, ALERT_EXPLAIN_TEMPERATURE,
+                         memo="move alert explain")
+    return f" — {text[:ALERT_EXPLAIN_MAX_CHARS]}" if text else ""
+
+
 # --- Trí nhớ hội thoại theo user (lưu trong state.json, persist qua actions/cache) ---
 def mem_get(state, nick):
     """Vài lượt hội thoại gần nhất với 'nick' (list {q,a}); [] nếu không có state."""
@@ -801,20 +1033,10 @@ def llm_reply(user_text: str, sender_nick=None, state=None):
         return None
     text = text[:LLM_MAX_CHARS]
     mem_add(state, sender_nick, user_text, text)              # cập nhật trí nhớ
-    # (Tùy chọn, GATED) Ghi nhận "trả FLOP cho 1 lần suy luận" vào sổ cái token.
-    # Mặc định TẮT (FLOP_METER_ENABLED off) -> agent 24/7 KHÔNG đổi hành vi. Bọc kín:
-    # mọi lỗi bị nuốt để không bao giờ làm sập luồng trả lời. Khi FLOP mở testnet,
-    # bật cờ + TESTNET_ENABLED=true + FLOP_RPC_URL là chuyển sang chi thật, không sửa
-    # core logic ở đây. Xem token_manager.py.
-    try:
-        import token_manager
-        # event_id gắn lần chi vào MỘT sự kiện thật (tin @mention của user) — điều kiện
-        # cho bất biến FLOP_ORGANIC_ONLY (chống burn-loop tổng hợp). Ở đây luôn có tin
-        # đến thật nên id không rỗng.
-        token_manager.meter_inference(memo=f"{provider} inference",
-                                      event_id=(sender_nick or "mention"))
-    except Exception as e:
-        print(f"[meter] bỏ qua ({str(e)[:80]})")
+    # (GATED) 1 suy luận THẬT -> 1 nhịp FLOP. event_id gắn lần chi vào MỘT sự kiện thật
+    # (tin @mention của user) — điều kiện cho bất biến FLOP_ORGANIC_ONLY (chống burn-loop
+    # tổng hợp). Ở đây luôn có tin đến thật nên id không rỗng.
+    _meter_flop(f"{provider} inference", event_id=(sender_nick or "mention"))
     print(f"[llm:{provider}] ok (tone={tone}, lang={lang}, grounded={bool(ctx)})")
     return text
 
@@ -838,8 +1060,8 @@ def build_reply(sender_nick: str, text: str, state=None) -> str:
 
     if has("!help"):
         return tag("commands: !price [coin] · !market · !top · !trending · !dominance · "
-                   "!gas · !fear · !time · !ping · !about — or just @mention me a question "
-                   "and I'll answer with live-grounded AI.")
+                   "!gas · !fear · !digest · !recap · !time · !ping · !about — or just @mention "
+                   "me a question and I'll answer with live-grounded AI.")
     if has("!about"):
         return tag(f"I'm {AGENT_NAME}, an autonomous Ed25519 agent: signed oracle telemetry, "
                    "Gemini AI replies, KV store, injection-guarded. Open-source SDK on GitHub.")
@@ -847,7 +1069,9 @@ def build_reply(sender_nick: str, text: str, state=None) -> str:
         val, cls = get_fear_greed()
         if val is None:
             return tag("Fear & Greed feed tạm offline, thử lại sau.")
-        return tag(f"Crypto Fear & Greed Index: {val}/100 ({cls}) — signed Ed25519")
+        facts = f"{val}/100 ({cls})"
+        return tag(f"Crypto Fear & Greed Index: {facts} — signed Ed25519"
+                   + _insight("fear & greed index", facts, detect_lang(text), event_id=sender_nick))
     if has("!market"):
         pairs = [("BTC", "bitcoin"), ("ETH", "ethereum"), ("SOL", "solana"), ("BNB", "binancecoin")]
         m = get_market([cid for _, cid in pairs])
@@ -858,16 +1082,22 @@ def build_reply(sender_nick: str, text: str, state=None) -> str:
         movers = get_top_movers(3)
         if not movers:
             return tag("top-movers feed tạm offline, thử lại sau.")
-        return tag("Top 24h gainers: " + " · ".join(f"{s} {c:+.1f}%" for s, c in movers)
-                   + " — signed Ed25519")
+        facts = " · ".join(f"{s} {c:+.1f}%" for s, c in movers)
+        return tag(f"Top 24h gainers: {facts} — signed Ed25519"
+                   + _insight("top 24h gainers", facts, detect_lang(text), event_id=sender_nick))
     if has("!trending"):
         tr = get_trending(5)
-        return tag("Trending now: " + " · ".join(tr)) if tr else tag("trending feed tạm offline.")
+        if not tr:
+            return tag("trending feed tạm offline.")
+        facts = " · ".join(tr)
+        return tag(f"Trending now: {facts}" + _insight("trending coins", facts, detect_lang(text), event_id=sender_nick))
     if has("!dominance") or has("!dom"):
         b, e = get_dominance()
         if b is None or e is None:
             return tag("dominance feed tạm offline, thử lại sau.")
-        return tag(f"Market dominance — BTC {b:.1f}% · ETH {e:.1f}% (signed Ed25519)")
+        facts = f"BTC {b:.1f}% · ETH {e:.1f}%"
+        return tag(f"Market dominance — {facts} (signed Ed25519)"
+                   + _insight("btc/eth market dominance", facts, detect_lang(text), event_id=sender_nick))
     if has("!gas"):
         g = get_eth_gas()
         return tag(f"ETH gas ~{g} gwei (base fee, via public RPC)" if g is not None
@@ -897,6 +1127,16 @@ def build_reply(sender_nick: str, text: str, state=None) -> str:
         return tag(f"UTC {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}")
     if has("!ping"):
         return tag(f"pong — {AGENT_NAME} agent alive & signing every payload.")
+    if has("!digest"):
+        # (A1) Bản phân tích thị trường AI theo YÊU CẦU (grounded). Là hành động THẬT
+        # do user gọi -> luôn phục vụ (không phụ thuộc gate lịch của broadcast).
+        body = generate_digest(detect_lang(text))
+        return tag(f"📊 {body}") if body else tag("digest tạm chưa sẵn sàng, thử lại sau.")
+    if has("!recap"):
+        # (A3) Tổng kết tuần theo YÊU CẦU — cần đã tích đủ mẫu (FLOP_RECAP_ENABLED bật
+        # một thời gian). Chưa đủ -> báo nhẹ nhàng thay vì lỗi.
+        body = generate_recap(state or {}, int(time.time()), detect_lang(text))
+        return tag(f"🗓 {body}") if body else tag("weekly recap chưa đủ dữ liệu, quay lại sau nhé.")
     # Mention không kèm lệnh → LLM: grounding data-live + trí nhớ + đúng ngôn ngữ
     smart = llm_reply(text, sender_nick=sender_nick, state=state)
     if smart:
@@ -1070,7 +1310,39 @@ def auto_respond(private_key, did):
 
 # --- Contribution manifest (proof of contribution, CÓ KÝ) ---
 COMMANDS = ["!price", "!market", "!top", "!trending", "!dominance", "!gas",
-            "!fear", "!about", "!time", "!ping", "!help"]
+            "!fear", "!digest", "!recap", "!about", "!time", "!ping", "!help"]
+
+
+def broadcast_digest(private_key, did) -> bool:
+    """(A1, GATED) Đăng 1 bản phân tích thị trường do AI sinh (grounded), CÓ KÝ Ed25519,
+    + lưu KV note `digest` để ai cũng audit (GET /kv/<ns>/digest). Đây là nội dung CÔNG
+    KHAI hữu ích: mỗi lần đăng = 1 suy luận THẬT -> nguồn tiêu FLOP hợp lệ, defensible
+    (không burn giả). Trả kết quả post; False nếu không sinh được (thiếu provider/data)
+    hoặc post fail -> caller KHÔNG đóng cổng thời gian, sẽ thử lại vòng sau."""
+    body = generate_digest()
+    if not body:
+        print("[digest] không sinh được nội dung -> bỏ qua vòng này")
+        return False
+    ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    text = f"[{AGENT_NAME}] 📊 Daily AI digest — {body} | {ts}"
+    ok = post_message(private_key, did, text)
+    kv_set(private_key, did, "digest", text)
+    return ok
+
+
+def broadcast_recap(private_key, did, state, now) -> bool:
+    """(A3, GATED) Đăng bản tổng kết TUẦN do AI sinh (grounded từ mẫu đã tích), CÓ KÝ,
+    + lưu KV note `recap` để audit (GET /kv/<ns>/recap). Retrospective công khai hữu ích:
+    mỗi lần = 1 suy luận THẬT -> nguồn FLOP hợp lệ. Trả kết quả post; False nếu chưa đủ
+    mẫu / thiếu provider / post fail -> caller KHÔNG đóng cổng, thử lại vòng sau."""
+    body = generate_recap(state, now)
+    if not body:
+        return False
+    ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    text = f"[{AGENT_NAME}] 🗓 Weekly recap — {body} | {ts}"
+    ok = post_message(private_key, did, text)
+    kv_set(private_key, did, "recap", text)
+    return ok
 
 
 def broadcast_manifest(private_key, did):
@@ -1128,7 +1400,11 @@ def check_price_alert(private_key, did, state):
             base[i] = p                       # reset mốc sau khi cảnh báo
     if hits:
         ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        post_message(private_key, did, f"[{AGENT_NAME}] ⚠️ Move alert | {' · '.join(hits)} | {ts}")
+        moves = " · ".join(hits)
+        # (B1, GATED) kèm 1 câu AI giải thích bối cảnh; TẮT -> explain_move trả '' -> alert
+        # y hệt như cũ. Event-driven nên không spam.
+        post_message(private_key, did,
+                     f"[{AGENT_NAME}] ⚠️ Move alert | {moves}{explain_move(moves)} | {ts}")
     state["last_alert_price"] = base
     save_state({"last_alert_price": base})
 
@@ -1175,6 +1451,45 @@ def main():
     if ALERT_MOVE_PCT > 0:
         check_price_alert(private_key, did, state)
 
+    # 1d) (A1, Tùy chọn, GATED) Daily AI market digest — nội dung công khai hữu ích do
+    #     AI sinh, mỗi lần = 1 suy luận THẬT (nguồn FLOP spend hợp lệ, defensible).
+    #     Mặc định TẮT (FLOP_DIGEST_ENABLED off) -> agent 24/7 không đổi hành vi. Tôn
+    #     trọng gate thời gian (KHÔNG force theo dispatch để test không spam digest);
+    #     cùng nguyên tắc manifest: chỉ đóng cổng khi post THÀNH CÔNG.
+    digest_status = "off"
+    if DIGEST_ENABLED:
+        if _due(state, "last_digest", DIGEST_INTERVAL_H, now):
+            if broadcast_digest(private_key, did):
+                save_state({"last_digest": now})
+                digest_status = "ok"
+            else:
+                digest_status = "fail"
+                print("[digest] post/sinh thất bại -> KHÔNG đóng cổng, thử lại vòng sau")
+        else:
+            digest_status = "skip"
+
+    # 1e) (A3, Tùy chọn, GATED) Weekly recap — tích mẫu giá/sentiment đều trong tuần rồi
+    #     mỗi RECAP_INTERVAL_H giờ đăng 1 bản tổng kết AI (grounded từ chính mẫu đó). 1
+    #     lần/tuần = 1 suy luận THẬT, giá trị thật. Mặc định TẮT -> KHÔNG tích, KHÔNG đăng.
+    recap_status = "off"
+    if RECAP_ENABLED:
+        record_weekly_sample(state, now)          # tích chất liệu đều (tối đa 6h/mẫu)
+        if not state.get("last_recap"):
+            # Lần đầu bật: khởi động ĐỒNG HỒ TUẦN từ bây giờ để mẫu kịp tích đủ —
+            # KHÔNG đăng recap "non" khi mới có vài giờ dữ liệu.
+            save_state({"last_recap": now})
+            state["last_recap"] = now
+            recap_status = "seed"
+        elif _due(state, "last_recap", RECAP_INTERVAL_H, now):
+            if broadcast_recap(private_key, did, state, now):
+                save_state({"last_recap": now})
+                recap_status = "ok"
+            else:
+                recap_status = "fail"
+                print("[recap] chưa đủ mẫu / post fail -> KHÔNG đóng cổng, thử lại sau")
+        else:
+            recap_status = "skip"
+
     # 2) Câu hỏi nhập tay khi Run workflow (test AI mà không lo firehose)
     if ASK:
         ask = sanitize_input(ASK)
@@ -1213,11 +1528,14 @@ def main():
         "### Technocore agent run",
         f"- telemetry: **{tele_status}**",
         f"- manifest: **{manifest_status}**",
+        f"- digest: **{digest_status}**",
+        f"- recap: **{recap_status}**",
         f"- replies: **{replies}** · proactive: **{proactive}**",
         f"- technocore.chat 200s: **{_server_ok_count}**",
     ]
     print(f"[run] telemetry={tele_status} manifest={manifest_status} "
-          f"replies={replies} proactive={proactive} server200s={_server_ok_count}")
+          f"digest={digest_status} recap={recap_status} replies={replies} "
+          f"proactive={proactive} server200s={_server_ok_count}")
 
     if _server_ok_count == 0:
         summary.append("- ⚠️ **Không call nào tới technocore.chat thành công "

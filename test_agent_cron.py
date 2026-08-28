@@ -405,3 +405,249 @@ def test_auto_respond_restores_cursor_from_kv_and_skips_old(pk, respond_env):
     r, p = ac.auto_respond(pk, did)
     assert r == 1 and posts == ["ok"]                  # chỉ trả lời tin mới (51), bỏ tin cũ (40)
     assert ac.load_state()["last_seq"] == 51
+
+
+# --- (A1) Daily AI digest & (A2) command insight ---------------------------------
+def _stub_market(monkeypatch, provider="gemini", reply="Risk-on: BTC steady, F&G 55."):
+    """Cắm data thị trường + LLM giả (không mạng) để test digest/insight."""
+    monkeypatch.setattr(ac, "get_market", lambda ids: {i: {"usd": 100, "chg": 1.2} for i in ids})
+    monkeypatch.setattr(ac, "get_fear_greed", lambda: (55, "Greed"))
+    monkeypatch.setattr(ac, "get_top_movers", lambda n=3: [("AAA", 12.3), ("BBB", 8.1)])
+    monkeypatch.setattr(ac, "get_dominance", lambda: (52.0, 17.0))
+    monkeypatch.setattr(ac, "get_trending", lambda n=5: ["aaa", "bbb"])
+    monkeypatch.setattr(ac, "_active_provider", lambda: provider)
+    monkeypatch.setattr(ac, "_gemini_reply", lambda p, s, t: reply)
+    monkeypatch.setattr(ac, "_openai_reply", lambda p, s, t: reply)
+
+
+def test_build_digest_context_includes_movers_and_dominance(monkeypatch):
+    _stub_market(monkeypatch)
+    ctx = ac.build_digest_context()
+    assert "LIVE MARKET DATA" in ctx and "Top 24h gainers" in ctx and "Dominance" in ctx
+
+
+def test_build_digest_context_empty_when_no_data(monkeypatch):
+    monkeypatch.setattr(ac, "get_market", lambda ids: {})
+    monkeypatch.setattr(ac, "get_fear_greed", lambda: (None, None))
+    monkeypatch.setattr(ac, "get_top_movers", lambda n=3: [])
+    monkeypatch.setattr(ac, "get_dominance", lambda: (None, None))
+    assert ac.build_digest_context() == ""
+
+
+def test_generate_digest_grounded_and_capped(monkeypatch):
+    _stub_market(monkeypatch, reply="X" * 500)
+    monkeypatch.setattr(ac, "DIGEST_MAX_CHARS", 40)
+    out = ac.generate_digest("en")
+    assert out is not None and len(out) == 40
+
+
+def test_generate_digest_none_without_provider(monkeypatch):
+    _stub_market(monkeypatch, provider=None)
+    assert ac.generate_digest() is None
+
+
+def test_generate_digest_none_without_data(monkeypatch):
+    _stub_market(monkeypatch)
+    monkeypatch.setattr(ac, "build_digest_context", lambda: "")
+    assert ac.generate_digest() is None
+
+
+def test_insight_off_returns_empty(monkeypatch):
+    _stub_market(monkeypatch)
+    monkeypatch.setattr(ac, "INSIGHT_ENABLED", False)
+    assert ac._insight("top", "AAA +12%", "en") == ""
+
+
+def test_insight_on_prefixes_dash(monkeypatch):
+    _stub_market(monkeypatch, reply="Momentum favors alts.")
+    monkeypatch.setattr(ac, "INSIGHT_ENABLED", True)
+    out = ac._insight("top", "AAA +12%", "en")
+    assert out.startswith(" — ") and "Momentum" in out
+
+
+def test_insight_empty_on_llm_error(monkeypatch):
+    _stub_market(monkeypatch)
+    monkeypatch.setattr(ac, "INSIGHT_ENABLED", True)
+    monkeypatch.setattr(ac, "_gemini_reply", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert ac._insight("top", "AAA +12%", "en") == ""
+
+
+def test_build_reply_digest_command(monkeypatch):
+    _stub_market(monkeypatch, reply="Steady tape, F&G 55.")
+    assert "📊" in ac.build_reply("bob", "@nguyenvulv !digest")
+
+
+def test_build_reply_top_appends_insight_when_enabled(monkeypatch):
+    _stub_market(monkeypatch, reply="Alts leading.")
+    monkeypatch.setattr(ac, "INSIGHT_ENABLED", True)
+    out = ac.build_reply("bob", "@nguyenvulv !top")
+    assert "Top 24h gainers" in out and "Alts leading." in out
+
+
+def test_build_reply_top_unchanged_when_insight_off(monkeypatch):
+    _stub_market(monkeypatch, reply="should-not-appear")
+    monkeypatch.setattr(ac, "INSIGHT_ENABLED", False)
+    out = ac.build_reply("bob", "@nguyenvulv !top")
+    assert "should-not-appear" not in out and "signed Ed25519" in out
+
+
+def test_llm_generate_meters_flop(monkeypatch):
+    _stub_market(monkeypatch)
+    seen = {}
+    monkeypatch.setattr(ac, "_meter_flop",
+                        lambda memo, event_id=None: seen.update(memo=memo, event_id=event_id))
+    ac._llm_generate("ctx", "sys", 0.5, memo="daily digest", event_id="bob")
+    assert seen.get("memo") == "gemini daily digest" and seen.get("event_id") == "bob"
+
+
+def test_meter_flop_never_raises(monkeypatch):
+    # token_manager thiếu / lỗi -> nuốt sạch, không được ném
+    import builtins
+    real_import = builtins.__import__
+
+    def boom(name, *a, **k):
+        if name == "token_manager":
+            raise ImportError("no module")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", boom)
+    ac._meter_flop("x")   # không raise = pass
+
+
+# --- (A3) Weekly recap -----------------------------------------------------------
+def _samples(now, n=4, span_days=6.0):
+    """n mẫu giá/F&G trải đều trong span_days ngày, giá tăng dần để có trend rõ."""
+    out = []
+    for k in range(n):
+        ts = int(now - (span_days * 86400) * (n - 1 - k) / max(n - 1, 1))
+        out.append({"ts": ts, "btc": 100 + 10 * k, "eth": 50 + 5 * k, "fg": 40 + 5 * k})
+    return out
+
+
+def test_build_recap_context_computes_trend(monkeypatch):
+    now = 1_000_000_000
+    state = {"weekly_samples": _samples(now, 4)}
+    ctx = ac.build_recap_context(state, now)
+    assert "BTC 100->130" in ctx and "high 130" in ctx and "Fear&Greed 40->55" in ctx
+
+
+def test_build_recap_context_empty_when_too_few(monkeypatch):
+    now = 1_000_000_000
+    assert ac.build_recap_context({"weekly_samples": [{"ts": now, "btc": 1}]}, now) == ""
+
+
+def test_build_recap_context_prunes_old_samples(monkeypatch):
+    now = 1_000_000_000
+    old = {"ts": now - int(ac.RECAP_WINDOW_H * 3600) - 10, "btc": 1, "eth": 1, "fg": 10}
+    state = {"weekly_samples": [old] + _samples(now, 3)}
+    ctx = ac.build_recap_context(state, now)
+    assert "BTC 100->" in ctx            # mẫu cũ bị loại, không lấy làm 'first'
+
+
+def test_record_weekly_sample_gated_by_interval(monkeypatch):
+    now = 1_000_000_000
+    monkeypatch.setattr(ac, "get_market", lambda ids: {i: {"usd": 100} for i in ids})
+    monkeypatch.setattr(ac, "get_fear_greed", lambda: (50, "Neutral"))
+    monkeypatch.setattr(ac, "save_state", lambda *a, **k: None)
+    state = {"last_weekly_sample": now}          # vừa lấy mẫu -> chưa tới nhịp
+    assert ac.record_weekly_sample(state, now) is False
+
+
+def test_record_weekly_sample_appends_and_persists(monkeypatch):
+    now = 1_000_000_000
+    monkeypatch.setattr(ac, "get_market", lambda ids: {i: {"usd": 100} for i in ids})
+    monkeypatch.setattr(ac, "get_fear_greed", lambda: (50, "Neutral"))
+    saved = {}
+    monkeypatch.setattr(ac, "save_state", lambda d: saved.update(d))
+    state = {}
+    assert ac.record_weekly_sample(state, now) is True
+    assert len(state["weekly_samples"]) == 1 and "weekly_samples" in saved
+
+
+def test_record_weekly_sample_skips_on_no_price(monkeypatch):
+    now = 1_000_000_000
+    monkeypatch.setattr(ac, "get_market", lambda ids: {})
+    monkeypatch.setattr(ac, "save_state", lambda *a, **k: None)
+    state = {}
+    assert ac.record_weekly_sample(state, now) is False and "weekly_samples" not in state
+
+
+def test_generate_recap_none_without_samples(monkeypatch):
+    _stub_market(monkeypatch)
+    assert ac.generate_recap({}, 1_000_000_000) is None
+
+
+def test_generate_recap_grounded_and_capped(monkeypatch):
+    _stub_market(monkeypatch, reply="Y" * 500)
+    monkeypatch.setattr(ac, "RECAP_MAX_CHARS", 30)
+    now = 1_000_000_000
+    out = ac.generate_recap({"weekly_samples": _samples(now, 4)}, now)
+    assert out is not None and len(out) == 30
+
+
+def test_build_reply_recap_command(monkeypatch):
+    _stub_market(monkeypatch, reply="Choppy week, sentiment cooled.")
+    now = int(__import__("time").time())
+    state = {"weekly_samples": _samples(now, 4)}
+    out = ac.build_reply("bob", "@nguyenvulv !recap", state=state)
+    assert "🗓" in out and "Choppy week" in out
+
+
+def test_build_reply_recap_without_data_is_graceful(monkeypatch):
+    _stub_market(monkeypatch)
+    out = ac.build_reply("bob", "@nguyenvulv !recap", state={})
+    assert "chưa đủ dữ liệu" in out
+
+
+# --- (B1) Move-alert explain-mode ------------------------------------------------
+def test_explain_move_off_returns_empty(monkeypatch):
+    _stub_market(monkeypatch)
+    monkeypatch.setattr(ac, "ALERT_EXPLAIN_ENABLED", False)
+    assert ac.explain_move("BTC +6.0% → $110") == ""
+
+
+def test_explain_move_on_grounds_on_moves_and_fg(monkeypatch):
+    _stub_market(monkeypatch, reply="Sharp momentum spike amid greedy sentiment.")
+    monkeypatch.setattr(ac, "ALERT_EXPLAIN_ENABLED", True)
+    seen = {}
+
+    def cap(p, s, t):
+        seen["p"] = p
+        return "Sharp momentum spike amid greedy sentiment."
+
+    monkeypatch.setattr(ac, "_gemini_reply", cap)
+    out = ac.explain_move("BTC +6.0% → $110", "en")
+    assert out.startswith(" — ") and "momentum" in out.lower()
+    assert "BTC +6.0%" in seen["p"] and "Fear&Greed 55" in seen["p"]   # grounded
+
+
+def test_explain_move_empty_on_llm_error(monkeypatch):
+    _stub_market(monkeypatch)
+    monkeypatch.setattr(ac, "ALERT_EXPLAIN_ENABLED", True)
+    monkeypatch.setattr(ac, "_gemini_reply", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
+    assert ac.explain_move("BTC +6.0% → $110") == ""
+
+
+def test_check_price_alert_appends_explanation(monkeypatch):
+    _stub_market(monkeypatch, reply="Momentum breakout.")
+    monkeypatch.setattr(ac, "ALERT_EXPLAIN_ENABLED", True)
+    monkeypatch.setattr(ac, "ALERT_MOVE_PCT", 5)
+    monkeypatch.setattr(ac, "get_market", lambda ids: {"bitcoin": {"usd": 110}, "ethereum": {"usd": 50}})
+    monkeypatch.setattr(ac, "save_state", lambda *a, **k: None)
+    posted = {}
+    monkeypatch.setattr(ac, "post_message", lambda pk, did, text, **k: posted.setdefault("t", text))
+    state = {"last_alert_price": {"bitcoin": 100, "ethereum": 50}}   # BTC +10% -> vượt ngưỡng
+    ac.check_price_alert("pk", "did", state)
+    assert "Move alert" in posted["t"] and "Momentum breakout." in posted["t"]
+
+
+def test_check_price_alert_unchanged_when_explain_off(monkeypatch):
+    _stub_market(monkeypatch, reply="should-not-appear")
+    monkeypatch.setattr(ac, "ALERT_EXPLAIN_ENABLED", False)
+    monkeypatch.setattr(ac, "ALERT_MOVE_PCT", 5)
+    monkeypatch.setattr(ac, "get_market", lambda ids: {"bitcoin": {"usd": 110}, "ethereum": {"usd": 50}})
+    monkeypatch.setattr(ac, "save_state", lambda *a, **k: None)
+    posted = {}
+    monkeypatch.setattr(ac, "post_message", lambda pk, did, text, **k: posted.setdefault("t", text))
+    ac.check_price_alert("pk", "did", {"last_alert_price": {"bitcoin": 100, "ethereum": 50}})
+    assert "should-not-appear" not in posted["t"] and "Move alert" in posted["t"]
