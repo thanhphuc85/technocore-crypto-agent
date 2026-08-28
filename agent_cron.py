@@ -179,6 +179,23 @@ RECAP_SYSTEM = (
     "no quotes, no markdown."
 )
 
+# --- (B1) Explain-mode cho Move Alerts — khi BTC/ETH vượt ngưỡng cảnh báo (đã event-
+#     driven, không spam), kèm 1 câu AI mô tả BỐI CẢNH move (grounded bằng chính mức biến
+#     động + Fear&Greed). 1 câu = 1 suy luận THẬT. Mặc định TẮT -> alert giữ nguyên.
+ALERT_EXPLAIN_ENABLED = os.environ.get("FLOP_ALERT_EXPLAIN_ENABLED", "").strip().lower() in (
+    "1", "true", "on", "yes")
+ALERT_EXPLAIN_TEMPERATURE = _env_float("ALERT_EXPLAIN_TEMPERATURE", 0.5)
+ALERT_EXPLAIN_MAX_CHARS = int(_env_float("ALERT_EXPLAIN_MAX_CHARS", 160))
+ALERT_EXPLAIN_LANG = (os.environ.get("ALERT_EXPLAIN_LANG", "").strip().lower() or DIGEST_LANG)
+ALERT_EXPLAIN_SYSTEM = (
+    f"You are {AGENT_NAME}, a crypto market analyst. A BTC/ETH price just moved past the "
+    "alert threshold. In ONE short sentence (max ~150 chars), characterize the move using "
+    "ONLY the figures given — its magnitude and direction, and the Fear & Greed reading as "
+    "sentiment context. Do NOT invent news, events, or specific causes you cannot verify; "
+    "speak in market terms (momentum, volatility, sentiment). No financial advice. Output "
+    "only the sentence — no prefix, no quotes."
+)
+
 # --- LLM giọng điệu (persona) theo NGỮ CẢNH ---
 # Lớp AN TOÀN là hằng số, KHÔNG đổi theo tone: untrusted, không lộ key, 1 câu ngắn.
 LLM_SAFETY = (
@@ -946,6 +963,22 @@ def generate_recap(state, now, lang: str = None):
     return text[:RECAP_MAX_CHARS] if text else None
 
 
+def explain_move(moves: str, lang: str = None) -> str:
+    """(B1) 1 câu AI mô tả bối cảnh 1 move alert, grounded bằng chính mức biến động +
+    snapshot Fear&Greed. Mặc định TẮT (FLOP_ALERT_EXPLAIN_ENABLED off) -> trả '' để
+    alert giữ NGUYÊN. Event-driven (chỉ chạy khi vượt ngưỡng) nên không spam. Không
+    provider / lỗi -> cũng trả ''. Mỗi câu = 1 suy luận THẬT (đo qua _llm_generate)."""
+    if not ALERT_EXPLAIN_ENABLED:
+        return ""
+    val, cls = get_fear_greed()
+    facts = moves + (f" | Fear&Greed {val}({cls})" if val is not None else "")
+    lg = (lang or ALERT_EXPLAIN_LANG)
+    system = ALERT_EXPLAIN_SYSTEM + ("\nReply in Vietnamese." if lg == "vi" else "\nReply in English.")
+    text = _llm_generate(f"Sudden move: {facts}", system, ALERT_EXPLAIN_TEMPERATURE,
+                         memo="move alert explain")
+    return f" — {text[:ALERT_EXPLAIN_MAX_CHARS]}" if text else ""
+
+
 # --- Trí nhớ hội thoại theo user (lưu trong state.json, persist qua actions/cache) ---
 def mem_get(state, nick):
     """Vài lượt hội thoại gần nhất với 'nick' (list {q,a}); [] nếu không có state."""
@@ -1367,7 +1400,11 @@ def check_price_alert(private_key, did, state):
             base[i] = p                       # reset mốc sau khi cảnh báo
     if hits:
         ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        post_message(private_key, did, f"[{AGENT_NAME}] ⚠️ Move alert | {' · '.join(hits)} | {ts}")
+        moves = " · ".join(hits)
+        # (B1, GATED) kèm 1 câu AI giải thích bối cảnh; TẮT -> explain_move trả '' -> alert
+        # y hệt như cũ. Event-driven nên không spam.
+        post_message(private_key, did,
+                     f"[{AGENT_NAME}] ⚠️ Move alert | {moves}{explain_move(moves)} | {ts}")
     state["last_alert_price"] = base
     save_state({"last_alert_price": base})
 

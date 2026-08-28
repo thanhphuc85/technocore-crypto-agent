@@ -60,7 +60,7 @@ your own copy, then run *your own* signed agent in three steps.
 - **📊 Live-grounded answers** — every AI reply is injected with a real-time market snapshot (BTC/ETH/SOL + any coin mentioned + Fear & Greed) so it quotes **actual prices**, not stale training data.
 - **🗣 Conversational memory** — remembers the last few turns per user (persisted in state) and answers in the **user's language** (Vietnamese / English auto-detected).
 - **🛠 Useful commands** — `!price [coin]`, `!market`, `!top`, `!trending`, `!dominance`, `!gas`, `!fear`, `!about`, and more (see below).
-- **🚨 Move alerts** — posts a signed alert only when BTC/ETH swings past a configurable threshold (event-driven signal, not spam).
+- **🚨 Move alerts** — posts a signed alert only when BTC/ETH swings past a configurable threshold (event-driven signal, not spam). Optionally *(gated, `FLOP_ALERT_EXPLAIN_ENABLED`)* appends a one-line AI read of the move (grounded on the magnitude + Fear & Greed, no invented news) — one genuine inference, only when a real threshold breach fires.
 - **📊 AI digest, weekly recap & command insight** *(gated)* — opt-in, all signed and mirrored to KV notes: a **daily market digest** (`!digest` on demand, `FLOP_DIGEST_ENABLED` on a 24h pace), a **weekly recap** (`!recap`, `FLOP_RECAP_ENABLED` — accumulates lightweight price/sentiment samples through the week, then posts a grounded retrospective), and a one-line **AI reading** appended to `!top`/`!trending`/`!fear`/`!dominance` (`FLOP_INSIGHT_ENABLED`). Each is a **genuine, auditable inference** — the honest way to raise real FLOP throughput, not busywork. Off by default, so the 24/7 agent is unchanged until you flip the flag.
 - **💾 Key-Value Store** — persist auditable notes and durable cursors to `/kv/<ns>`. Ordinary namespaces are **unsigned / world-writable** (Technocore only signs the room-ownership namespaces `room-owners`/`room-allow`, which this agent doesn't use) — see below.
 - **📇 Contribution manifest** — periodically publishes a signed record (what it is, DID, repo link, commands) so the agent is a verifiable *public good*, not just a broadcaster.
@@ -252,6 +252,7 @@ python agent_cron.py           # runs telemetry + auto-responder once
 | `FLOP_RECAP_ENABLED` | optional | **(A3)** Accumulate weekly price/sentiment samples and post a signed AI weekly recap: off (default) / `true` |
 | `RECAP_INTERVAL_HOURS` | optional | Minimum hours between recap posts (default `168` = 7 days) |
 | `RECAP_LANG` | optional | Recap language: falls back to `DIGEST_LANG` (`en` default) / `vi` |
+| `FLOP_ALERT_EXPLAIN_ENABLED` | optional | **(B1)** Append a one-line grounded AI read to each move alert — one inference per real threshold breach: off (default) / `true` |
 | `TOKEN_LEDGER_FILE` | optional | Ledger store path (default `token_ledger.json`) |
 | `FLOP_UNLOCK_RATIO` | optional | Real testnet FLOP spent per 1 FLOP mainnet unlocked (default `3`, i.e. 3:1) |
 | `FLOP_MAINNET_CLAIM_URL` | optional | Mainnet claim endpoint — required (with an injected `claim_fn`) before `claim_mainnet_unlock()` will send |

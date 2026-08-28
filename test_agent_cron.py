@@ -597,3 +597,57 @@ def test_build_reply_recap_without_data_is_graceful(monkeypatch):
     _stub_market(monkeypatch)
     out = ac.build_reply("bob", "@nguyenvulv !recap", state={})
     assert "chưa đủ dữ liệu" in out
+
+
+# --- (B1) Move-alert explain-mode ------------------------------------------------
+def test_explain_move_off_returns_empty(monkeypatch):
+    _stub_market(monkeypatch)
+    monkeypatch.setattr(ac, "ALERT_EXPLAIN_ENABLED", False)
+    assert ac.explain_move("BTC +6.0% → $110") == ""
+
+
+def test_explain_move_on_grounds_on_moves_and_fg(monkeypatch):
+    _stub_market(monkeypatch, reply="Sharp momentum spike amid greedy sentiment.")
+    monkeypatch.setattr(ac, "ALERT_EXPLAIN_ENABLED", True)
+    seen = {}
+
+    def cap(p, s, t):
+        seen["p"] = p
+        return "Sharp momentum spike amid greedy sentiment."
+
+    monkeypatch.setattr(ac, "_gemini_reply", cap)
+    out = ac.explain_move("BTC +6.0% → $110", "en")
+    assert out.startswith(" — ") and "momentum" in out.lower()
+    assert "BTC +6.0%" in seen["p"] and "Fear&Greed 55" in seen["p"]   # grounded
+
+
+def test_explain_move_empty_on_llm_error(monkeypatch):
+    _stub_market(monkeypatch)
+    monkeypatch.setattr(ac, "ALERT_EXPLAIN_ENABLED", True)
+    monkeypatch.setattr(ac, "_gemini_reply", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
+    assert ac.explain_move("BTC +6.0% → $110") == ""
+
+
+def test_check_price_alert_appends_explanation(monkeypatch):
+    _stub_market(monkeypatch, reply="Momentum breakout.")
+    monkeypatch.setattr(ac, "ALERT_EXPLAIN_ENABLED", True)
+    monkeypatch.setattr(ac, "ALERT_MOVE_PCT", 5)
+    monkeypatch.setattr(ac, "get_market", lambda ids: {"bitcoin": {"usd": 110}, "ethereum": {"usd": 50}})
+    monkeypatch.setattr(ac, "save_state", lambda *a, **k: None)
+    posted = {}
+    monkeypatch.setattr(ac, "post_message", lambda pk, did, text, **k: posted.setdefault("t", text))
+    state = {"last_alert_price": {"bitcoin": 100, "ethereum": 50}}   # BTC +10% -> vượt ngưỡng
+    ac.check_price_alert("pk", "did", state)
+    assert "Move alert" in posted["t"] and "Momentum breakout." in posted["t"]
+
+
+def test_check_price_alert_unchanged_when_explain_off(monkeypatch):
+    _stub_market(monkeypatch, reply="should-not-appear")
+    monkeypatch.setattr(ac, "ALERT_EXPLAIN_ENABLED", False)
+    monkeypatch.setattr(ac, "ALERT_MOVE_PCT", 5)
+    monkeypatch.setattr(ac, "get_market", lambda ids: {"bitcoin": {"usd": 110}, "ethereum": {"usd": 50}})
+    monkeypatch.setattr(ac, "save_state", lambda *a, **k: None)
+    posted = {}
+    monkeypatch.setattr(ac, "post_message", lambda pk, did, text, **k: posted.setdefault("t", text))
+    ac.check_price_alert("pk", "did", {"last_alert_price": {"bitcoin": 100, "ethereum": 50}})
+    assert "should-not-appear" not in posted["t"] and "Move alert" in posted["t"]

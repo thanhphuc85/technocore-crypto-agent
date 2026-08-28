@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Move-alert explain-mode (B1)** — a gated, event-driven inference: when a BTC/ETH
+  move trips `ALERT_MOVE_PCT`, `check_price_alert()` optionally appends a one-line AI
+  read (`explain_move()`), grounded on the move magnitude + the current Fear & Greed,
+  behind `FLOP_ALERT_EXPLAIN_ENABLED`. The prompt forbids inventing news or unverifiable
+  causes — it speaks in market terms only. Because it fires solely on a real threshold
+  breach it is naturally rate-limited (no new spam), and off by default leaves the alert
+  byte-for-byte unchanged. Reuses `_llm_generate()`/`_meter_flop()` so the inference is
+  metered. Adds 5 tests (gating on/off, grounding on moves+F&G, error-swallow, alert
+  wiring with/without explain). New env var: `FLOP_ALERT_EXPLAIN_ENABLED`.
 - **Weekly AI recap (A3)** — a third gated, genuine-inference feature. When
   `FLOP_RECAP_ENABLED` is on, each run accumulates a lightweight price/sentiment
   sample (BTC/ETH + Fear & Greed, at most one per `RECAP_SAMPLE_INTERVAL_HOURS`,
