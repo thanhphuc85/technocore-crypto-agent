@@ -808,7 +808,11 @@ def llm_reply(user_text: str, sender_nick=None, state=None):
     # core logic ở đây. Xem token_manager.py.
     try:
         import token_manager
-        token_manager.meter_inference(memo=f"{provider} inference")
+        # event_id gắn lần chi vào MỘT sự kiện thật (tin @mention của user) — điều kiện
+        # cho bất biến FLOP_ORGANIC_ONLY (chống burn-loop tổng hợp). Ở đây luôn có tin
+        # đến thật nên id không rỗng.
+        token_manager.meter_inference(memo=f"{provider} inference",
+                                      event_id=(sender_nick or "mention"))
     except Exception as e:
         print(f"[meter] bỏ qua ({str(e)[:80]})")
     print(f"[llm:{provider}] ok (tone={tone}, lang={lang}, grounded={bool(ctx)})")

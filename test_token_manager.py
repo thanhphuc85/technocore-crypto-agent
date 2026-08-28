@@ -17,7 +17,7 @@ def _clean_env(monkeypatch):
     """Mỗi test khởi đầu ở simulation, không dính env FLOP_/TESTNET_ của máy chạy."""
     for k in ("TESTNET_ENABLED", "FLOP_RPC_URL", "FLOP_SUBMIT_URL", "FLOP_TX_MODE",
               "FLOP_TOKEN_SYMBOL", "TOKEN_LEDGER_FILE", "FLOP_METER_ENABLED",
-              "FLOP_INFERENCE_COST"):
+              "FLOP_INFERENCE_COST", "FLOP_ORGANIC_ONLY"):
         monkeypatch.delenv(k, raising=False)
 
 
@@ -163,3 +163,36 @@ def test_meter_inference_on(ledger, monkeypatch):
     r = tm.meter_inference(path=ledger)
     assert r["outcome"] == "spent_simulated"
     assert r["amount"] == "0.001"                    # mặc định FLOP_INFERENCE_COST
+
+
+# --- Bất biến organic-only (FLOP_ORGANIC_ONLY) chống burn-loop tổng hợp -----------
+
+def test_meter_organic_only_blocks_without_event(ledger, monkeypatch):
+    tm.credit("1", path=ledger)
+    monkeypatch.setenv("FLOP_METER_ENABLED", "true")
+    monkeypatch.setenv("FLOP_ORGANIC_ONLY", "true")
+    r = tm.meter_inference(path=ledger)              # không event_id -> từ chối
+    assert r["outcome"] == "skipped_synthetic"
+    assert tm.check_balance(path=ledger) == "1"      # không hề chi
+
+
+def test_meter_organic_only_blank_event_blocked(ledger, monkeypatch):
+    tm.credit("1", path=ledger)
+    monkeypatch.setenv("FLOP_METER_ENABLED", "true")
+    monkeypatch.setenv("FLOP_ORGANIC_ONLY", "true")
+    assert tm.meter_inference(path=ledger, event_id="   ")["outcome"] == "skipped_synthetic"
+
+
+def test_meter_organic_only_allows_with_event(ledger, monkeypatch):
+    tm.credit("1", path=ledger)
+    monkeypatch.setenv("FLOP_METER_ENABLED", "true")
+    monkeypatch.setenv("FLOP_ORGANIC_ONLY", "true")
+    r = tm.meter_inference(path=ledger, event_id="alice")
+    assert r["outcome"] == "spent_simulated"
+
+
+def test_meter_event_id_not_required_when_flag_off(ledger, monkeypatch):
+    tm.credit("1", path=ledger)
+    monkeypatch.setenv("FLOP_METER_ENABLED", "true")
+    # ORGANIC_ONLY tắt -> event_id không bắt buộc (hành vi cũ giữ nguyên).
+    assert tm.meter_inference(path=ledger)["outcome"] == "spent_simulated"

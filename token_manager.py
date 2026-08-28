@@ -402,13 +402,24 @@ def spend(amount, memo, token: str = None, *, path: str = None,
 # --- Tiện ích: đo phí 1 lần suy luận LLM (ví dụ dùng trong agent, GATED) -----------
 
 def meter_inference(amount: str = None, memo: str = "Gemini Inference",
-                    token: str = None, path: str = None, **kw) -> dict:
+                    token: str = None, path: str = None, event_id: str = None,
+                    **kw) -> dict:
     """Ghi nhận 'trả token cho 1 lần suy luận LLM'. Chỉ chạy khi FLOP_METER_ENABLED
     bật (mặc định TẮT -> agent 24/7 không đổi hành vi). Số tiền lấy từ
     FLOP_INFERENCE_COST (mặc định 0.001). Bọc kín: mọi lỗi -> {'outcome':'skipped_off'}
-    để không bao giờ làm sập luồng trả lời của agent."""
+    để không bao giờ làm sập luồng trả lời của agent.
+
+    Bất biến CHỐNG SYBIL (tùy chọn): khi FLOP_ORGANIC_ONLY bật, chỉ chi khi có
+    `event_id` — dấu vết một sự kiện THẬT (tin nhắn user @mention) đã kích hoạt lần
+    suy luận này. Thiếu event_id -> skipped_synthetic. Đây là bảo hiểm để KHÔNG ai
+    (kể cả cấu hình sai) nối được một vòng lặp tự-gọi đốt token không gắn hoạt động
+    thật — thứ mà sybil filter lọc thẳng."""
     if not _env_flag("FLOP_METER_ENABLED"):
         return {"outcome": "skipped_off", "reason": "FLOP_METER_ENABLED tắt"}
+    if _env_flag("FLOP_ORGANIC_ONLY") and not (event_id and str(event_id).strip()):
+        return {"outcome": "skipped_synthetic",
+                "reason": ("FLOP_ORGANIC_ONLY: từ chối chi cho inference không gắn sự kiện "
+                           "thật (thiếu event_id) — chống burn-loop tổng hợp")}
     token = (token or default_token())
 
     # Dynamic Spend Rate: nếu có FLOP_DAILY_BUDGET, để pacer quyết lượng chi (rải đều,

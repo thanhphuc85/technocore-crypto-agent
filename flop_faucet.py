@@ -18,11 +18,18 @@ Env:
   FLOP_FAUCET_COOLDOWN_HOURS khoảng tối thiểu giữa 2 claim (mặc định 24).
   FLOP_FAUCET_REFILL_BELOW  (tùy chọn) chỉ claim khi số dư testnet < ngưỡng này.
   FLOP_FAUCET_STATE         nơi lưu mốc claim gần nhất (mặc định flop_faucet.json).
+  FLOP_FAUCET_DEMAND_ONLY   (chống sybil) chỉ claim khi số dư CẠN vì chi thật — bắt
+                            buộc phải có FLOP_FAUCET_REFILL_BELOW, nếu không -> skipped_demand
+                            (từ chối claim theo lịch, tránh round-trip faucet->dump).
+  FLOP_FAUCET_JITTER_MIN    (chống sybil) cộng thêm 0..N phút ngẫu nhiên vào cooldown để
+                            claim KHÔNG rơi đúng ranh giới cooldown (dấu hiệu bot 24/7).
+                            Offset ổn định trong 1 chu kỳ (seed theo mốc claim trước).
 """
 
 import os
 import json
 import time
+import random
 
 import token_manager as tm
 
@@ -49,6 +56,30 @@ def cooldown_hours() -> float:
         return v if v >= 0 else 24.0
     except ValueError:
         return 24.0
+
+
+def demand_only() -> bool:
+    return _flag("FLOP_FAUCET_DEMAND_ONLY")
+
+
+def jitter_minutes() -> float:
+    try:
+        v = float(os.environ.get("FLOP_FAUCET_JITTER_MIN", "").strip() or 0)
+        return v if v > 0 else 0.0
+    except ValueError:
+        return 0.0
+
+
+def _cooldown_seconds(last: int) -> float:
+    """Cooldown hiệu dụng = cooldown_hours + (0..JITTER_MIN phút). Offset ngẫu nhiên
+    nhưng TẤT ĐỊNH trong một chu kỳ (seed theo mốc claim trước) -> claim không rơi đúng
+    ranh giới cooldown, cũng không nhấp nháy giữa các lần chạy. last=0 (chưa claim) ->
+    không jitter để lần claim đầu không bị trì hoãn vô cớ."""
+    cd = cooldown_hours() * 3600.0
+    jmin = jitter_minutes()
+    if jmin > 0 and last > 0:
+        cd += random.Random(last).random() * jmin * 60.0
+    return cd
 
 
 def state_path(path: str = None) -> str:
@@ -80,8 +111,8 @@ def run_faucet_cycle(claim_fn=None, token: str = None, now: int = None,
                      private_key=None, did: str = None, log=print) -> dict:
     """Một vòng faucet: kiểm cờ/cấu hình/cooldown/ngưỡng, rồi gọi `claim_fn` được tiêm
     để nhận token, và credit vào sổ cái. Mỗi nhánh là kết quả có ghi nhận, không ném lỗi:
-      skipped_disabled / skipped_unconfigured / skipped_cooldown / skipped_full /
-      error_claim / claimed.
+      skipped_disabled / skipped_unconfigured / skipped_demand / skipped_cooldown /
+      skipped_full / error_claim / claimed.
     `claim_fn(req: dict) -> {"amount":..}` là seam THẬT (đợi spec FLOP), req gồm
     {token, amount, faucet_url, signed}."""
     token = (token or tm.default_token())
@@ -101,11 +132,18 @@ def run_faucet_cycle(claim_fn=None, token: str = None, now: int = None,
         last = int(st.get(token, {}).get("last_claim_ts", 0))
     except (TypeError, ValueError):
         last = 0
-    if now - last < cooldown_hours() * 3600:
-        wait_min = int((cooldown_hours() * 3600 - (now - last)) / 60)
+    cd = _cooldown_seconds(last)                     # cooldown + jitter (chống claim đúng ranh giới)
+    if now - last < cd:
+        wait_min = int((cd - (now - last)) / 60)
         return {"outcome": "skipped_cooldown", "reason": f"còn ~{wait_min} phút tới lượt claim"}
 
+    # Faucet theo NHU CẦU (chống sybil): chỉ claim khi số dư cạn vì chi thật. Bật
+    # DEMAND_ONLY mà thiếu ngưỡng REFILL_BELOW -> từ chối claim theo lịch (calendar).
     below = os.environ.get("FLOP_FAUCET_REFILL_BELOW", "").strip()
+    if demand_only() and not below:
+        return {"outcome": "skipped_demand",
+                "reason": ("FLOP_FAUCET_DEMAND_ONLY bật nhưng thiếu FLOP_FAUCET_REFILL_BELOW "
+                           "— từ chối claim theo lịch (chỉ claim khi số dư cạn vì chi thật)")}
     if below:
         bal = tm._parse_amount(tm.check_balance(token, path=ledger_path)) or 0
         thr = tm._parse_amount(below)
