@@ -10,6 +10,7 @@ docstring with its own requirements and run command.
 | [`03_token_ledger.py`](03_token_ledger.py) | `credit` → `spend` (simulation) → `check_balance` on the FLOP ledger | — | — |
 | [`04_unlock_tracking.py`](04_unlock_tracking.py) | Real testnet spend via an injected fake `submit_tx`, then `unlock_status` (3:1) | — | — |
 | [`05_run_agent.py`](05_run_agent.py) | Run the reference agent once (`agent_cron.main()`) | ✅ | ✅ |
+| [`06_kibble_dryrun.py`](06_kibble_dryrun.py) | Dry-run the kibble worker on the live board — shows which JOBs it would answer, posts nothing | LLM key to generate answers (no `AGENT_PRIVATE_KEY`) | ✅ |
 
 Setup:
 
