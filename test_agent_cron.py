@@ -298,3 +298,110 @@ def test_kv_get_returns_last_non_warning_line(monkeypatch):
 def test_kv_get_none_on_404(monkeypatch):
     monkeypatch.setattr(ac.requests, "get", lambda *a, **k: _Resp(status=404))
     assert ac.kv_get("missing") is None
+
+
+# --- auto_respond: con trỏ (cursor last_seq) -------------------------------------
+# Đây là logic quyết định agent KHÔNG bỏ sót và KHÔNG xử lý lại tin — chốt chặn thật
+# sự đằng sau state persist qua cache/KV (xem #1 trong review: vì sao KHÔNG dùng cache
+# key cố định). Cô lập hoàn toàn khỏi mạng: fetch/post/kv đều bị tiêm giả.
+
+@pytest.fixture
+def respond_env(tmp_path, monkeypatch):
+    """Nối agent_cron vào state file tạm + vô hiệu mạng; tắt PROACTIVE để test riêng
+    logic reply/cursor. Test tự override fetch_messages (và post/kv nếu cần capture)."""
+    monkeypatch.setattr(ac, "STATE_FILE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(ac, "HANDLE", "@bot")            # tin chứa '@bot' -> is_addressed True
+    monkeypatch.setattr(ac, "PROACTIVE", False)
+    monkeypatch.setattr(ac, "kv_get", lambda k: None)
+    monkeypatch.setattr(ac, "kv_set", lambda *a, **k: True)
+    monkeypatch.setattr(ac, "post_message", lambda *a, **k: True)
+    monkeypatch.setattr(ac, "build_reply", lambda *a, **k: "ok")
+    return monkeypatch
+
+
+def _peer(seq, text="@bot hi", frm=None):
+    return {"seq": seq, "from": frm or f"did:key:zPEER{seq}", "text": text}
+
+
+def test_auto_respond_first_run_sets_cursor_and_skips_backlog(pk, respond_env):
+    did = ac.did_of(pk)
+    posts, kv = [], {}
+    respond_env.setattr(ac, "post_message", lambda *a, **k: posts.append(a) or True)
+    respond_env.setattr(ac, "kv_set", lambda pk_, did_, k, v: kv.update({k: v}) or True)
+    respond_env.setattr(ac, "fetch_messages",
+                        lambda since=None: {"messages": [_peer(1)], "last_seq": 9})
+    r, p = ac.auto_respond(pk, did)
+    assert (r, p) == (0, 0)                              # lần đầu: KHÔNG trả lời backlog
+    assert posts == []
+    assert ac.load_state()["last_seq"] == 9             # chỉ đặt con trỏ tại last_seq server
+    assert kv["cursor"] == "9"
+
+
+def test_auto_respond_replies_addressed_and_advances_cursor(pk, respond_env):
+    did = ac.did_of(pk)
+    ac.save_state({"last_seq": 10})                     # đã có state -> không phải lần đầu
+    posts = []
+    respond_env.setattr(ac, "post_message", lambda pk_, did_, msg, **k: posts.append(msg) or True)
+    respond_env.setattr(ac, "fetch_messages", lambda since=None: {
+        "messages": [_peer(11, "@bot hello"), _peer(12, "không gọi mình")], "last_seq": 12})
+    r, p = ac.auto_respond(pk, did)
+    assert r == 1 and posts == ["ok"]                  # chỉ tin gọi đích danh được trả lời
+    assert ac.load_state()["last_seq"] == 12           # con trỏ tiến hết mọi tin đã xét
+
+
+def test_auto_respond_quota_stop_does_not_skip_unanswered(pk, respond_env):
+    """CHỐT CHẶN: hết quota reply -> DỪNG, con trỏ KHÔNG nhảy qua tin chưa trả lời,
+    để lần chạy sau xử lý tiếp (không bỏ sót)."""
+    did = ac.did_of(pk)
+    ac.save_state({"last_seq": 100})
+    respond_env.setattr(ac, "MAX_REPLIES", 2)
+    kv = {}
+    respond_env.setattr(ac, "kv_set", lambda pk_, did_, k, v: kv.update({k: v}) or True)
+    respond_env.setattr(ac, "fetch_messages", lambda since=None: {
+        "messages": [_peer(101), _peer(102), _peer(103)], "last_seq": 103})
+    r, p = ac.auto_respond(pk, did)
+    assert r == 2                                       # đúng trần quota
+    assert ac.load_state()["last_seq"] == 102          # dừng tại tin đã trả lời cuối, KHÔNG qua 103
+    assert kv["cursor"] == "102"
+
+
+def test_auto_respond_cursor_advances_past_errored_message(pk, respond_env):
+    """1 tin gây lỗi KHÔNG được kẹt con trỏ (chống DoS bằng tin độc)."""
+    did = ac.did_of(pk)
+    ac.save_state({"last_seq": 5})
+
+    def boom(*a, **k):
+        raise RuntimeError("bad message")
+
+    respond_env.setattr(ac, "build_reply", boom)
+    respond_env.setattr(ac, "fetch_messages",
+                        lambda since=None: {"messages": [_peer(6, "@bot boom")], "last_seq": 6})
+    r, p = ac.auto_respond(pk, did)
+    assert r == 0                                       # lỗi -> không tính là trả lời
+    assert ac.load_state()["last_seq"] == 6            # nhưng con trỏ VẪN tiến qua tin lỗi
+
+
+def test_auto_respond_skips_own_messages_but_advances_cursor(pk, respond_env):
+    did = ac.did_of(pk)
+    ac.save_state({"last_seq": 20})
+    posts = []
+    respond_env.setattr(ac, "post_message", lambda *a, **k: posts.append(a) or True)
+    respond_env.setattr(ac, "fetch_messages", lambda since=None: {
+        "messages": [_peer(21, "@bot của chính mình", frm=did)], "last_seq": 21})
+    r, p = ac.auto_respond(pk, did)
+    assert (r, p) == (0, 0) and posts == []            # không tự trả lời tin của chính mình
+    assert ac.load_state()["last_seq"] == 21           # nhưng con trỏ vẫn tiến qua
+
+
+def test_auto_respond_restores_cursor_from_kv_and_skips_old(pk, respond_env):
+    """State trống nhưng KV còn cursor -> khôi phục, và tin cũ (<=cursor) bị bỏ qua,
+    chỉ xử lý tin mới. Đây là bất biến khiến state persist mới có ý nghĩa."""
+    did = ac.did_of(pk)
+    respond_env.setattr(ac, "kv_get", lambda k: "50")  # state rỗng, KV có cursor=50
+    posts = []
+    respond_env.setattr(ac, "post_message", lambda pk_, did_, msg, **k: posts.append(msg) or True)
+    respond_env.setattr(ac, "fetch_messages", lambda since=None: {
+        "messages": [_peer(40, "@bot cũ"), _peer(51, "@bot mới")], "last_seq": 51})
+    r, p = ac.auto_respond(pk, did)
+    assert r == 1 and posts == ["ok"]                  # chỉ trả lời tin mới (51), bỏ tin cũ (40)
+    assert ac.load_state()["last_seq"] == 51
