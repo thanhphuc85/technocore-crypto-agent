@@ -287,6 +287,47 @@ def test_fetch_messages_retries_empty_then_succeeds(monkeypatch):
     assert ac.fetch_messages(room="kibble") == {"messages": [{"seq": 9}]}
 
 
+def _job(jtype="explain", title="T", body="B", jobid="kaaaaaaaaaa"):
+    return {"jobid": jobid, "type": jtype, "title": title, "body": body}
+
+
+def test_answer_kibble_job_none_without_provider(monkeypatch):
+    monkeypatch.setattr(ac, "_active_provider", lambda: None)
+    assert ac.answer_kibble_job(_job()) is None
+
+
+def test_answer_kibble_job_returns_answer(monkeypatch):
+    monkeypatch.setattr(ac, "_active_provider", lambda: "gemini")
+    monkeypatch.setattr(ac, "_gemini_reply", lambda *a, **k: "Two tidal bulges form; Earth rotates through both.")
+    monkeypatch.setattr(ac, "_meter_flop", lambda *a, **k: None)
+    assert ac.answer_kibble_job(_job()).startswith("Two tidal bulges")
+
+
+def test_answer_kibble_job_skip_declines(monkeypatch):
+    monkeypatch.setattr(ac, "_active_provider", lambda: "gemini")
+    monkeypatch.setattr(ac, "_gemini_reply", lambda *a, **k: "SKIP")
+    monkeypatch.setattr(ac, "_meter_flop", lambda *a, **k: None)
+    assert ac.answer_kibble_job(_job()) is None
+
+
+def test_answer_kibble_job_empty_declines(monkeypatch):
+    monkeypatch.setattr(ac, "_active_provider", lambda: "gemini")
+    monkeypatch.setattr(ac, "_gemini_reply", lambda *a, **k: "")
+    monkeypatch.setattr(ac, "_meter_flop", lambda *a, **k: None)
+    assert ac.answer_kibble_job(_job()) is None
+
+
+def test_answer_kibble_job_long_answer_starting_with_skip_is_kept(monkeypatch):
+    # Câu trả lời HỢP LỆ mở đầu bằng 'Skip' KHÔNG được coi là từ chối (bug startswith cũ).
+    long = ("Skip lists are a probabilistic data structure that layer multiple linked "
+            "lists to give expected O(log n) search, insertion and deletion.")
+    monkeypatch.setattr(ac, "_active_provider", lambda: "gemini")
+    monkeypatch.setattr(ac, "_gemini_reply", lambda *a, **k: long)
+    monkeypatch.setattr(ac, "_meter_flop", lambda *a, **k: None)
+    out = ac.answer_kibble_job(_job(title="Explain skip lists"))
+    assert out and out.startswith("Skip lists are a probabilistic")
+
+
 def test_kv_set_unsigned_lane_posts_value(pk, monkeypatch):
     monkeypatch.setattr(ac, "KV_SIGNED", False)
     captured = {}

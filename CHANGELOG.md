@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Kibble answers that legitimately begin with "Skip" are no longer dropped as declines.**
+  `answer_kibble_job()` detected a model decline with `text.upper().startswith("SKIP")`, which
+  also killed valid deliverables like *"Skip lists are a data structure…"* / *"Skip connections
+  in ResNets…"*. A decline is now recognized only when the response is short (≤40 chars) and
+  starts with `SKIP`, matching the prompt's "reply with exactly 'SKIP'". Skip logging now
+  distinguishes *empty/guarded* output from an explicit *SKIP* so the cause is visible in run
+  logs. Adds tests.
 - **`FLOP_KIBBLE_TYPES` no longer silently accepts every job type under GitHub Actions.**
   A workflow maps an unset Repo Variable to an **empty string** (the env var exists, value
   `""`), so `os.environ.get("FLOP_KIBBLE_TYPES", <default>)` returned `""` — not the default —
