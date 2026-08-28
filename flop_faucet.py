@@ -24,6 +24,8 @@ Env:
   FLOP_FAUCET_JITTER_MIN    (chống sybil) cộng thêm 0..N phút ngẫu nhiên vào cooldown để
                             claim KHÔNG rơi đúng ranh giới cooldown (dấu hiệu bot 24/7).
                             Offset ổn định trong 1 chu kỳ (seed theo mốc claim trước).
+  FLOP_FAUCET_MAX_PER_DAY   (chống sybil) trần số claim mỗi ngày UTC; chạm trần ->
+                            skipped_daily_cap. Rỗng -> không giới hạn.
 """
 
 import os
@@ -60,6 +62,23 @@ def cooldown_hours() -> float:
 
 def demand_only() -> bool:
     return _flag("FLOP_FAUCET_DEMAND_ONLY")
+
+
+def max_per_day():
+    """Trần số claim faucet mỗi ngày (UTC) — envelope chống sybil để dù cấu hình sai
+    cũng không spike lên vùng bot. Rỗng/không hợp lệ/không dương -> None (không giới hạn)."""
+    raw = os.environ.get("FLOP_FAUCET_MAX_PER_DAY", "").strip()
+    if not raw:
+        return None
+    try:
+        v = int(raw)
+    except ValueError:
+        return None
+    return v if v > 0 else None
+
+
+def _day(now: int) -> str:
+    return time.strftime("%Y-%m-%d", time.gmtime(now))
 
 
 def jitter_minutes() -> float:
@@ -112,7 +131,7 @@ def run_faucet_cycle(claim_fn=None, token: str = None, now: int = None,
     """Một vòng faucet: kiểm cờ/cấu hình/cooldown/ngưỡng, rồi gọi `claim_fn` được tiêm
     để nhận token, và credit vào sổ cái. Mỗi nhánh là kết quả có ghi nhận, không ném lỗi:
       skipped_disabled / skipped_unconfigured / skipped_demand / skipped_cooldown /
-      skipped_full / error_claim / claimed.
+      skipped_full / skipped_daily_cap / error_claim / claimed.
     `claim_fn(req: dict) -> {"amount":..}` là seam THẬT (đợi spec FLOP), req gồm
     {token, amount, faucet_url, signed}."""
     token = (token or tm.default_token())
@@ -151,6 +170,19 @@ def run_faucet_cycle(claim_fn=None, token: str = None, now: int = None,
             return {"outcome": "skipped_full",
                     "reason": f"số dư {tm._fmt(bal)} >= ngưỡng {below}, chưa cần claim"}
 
+    # Envelope chống sybil: trần số claim/ngày (UTC). Đếm theo ngày, kẹp trần tin được.
+    cap = max_per_day()
+    day = _day(now)
+    claims_today = 0
+    if cap is not None:
+        try:
+            claims_today = int(st.get(token, {}).get("claims", {}).get(day, 0))
+        except (TypeError, ValueError):
+            claims_today = 0
+        if claims_today >= cap:
+            return {"outcome": "skipped_daily_cap",
+                    "reason": f"đã claim {claims_today}/{cap} lần hôm nay ({day}) — chạm trần ngày"}
+
     signed = tm.sign_transaction(private_key, did, token, faucet_amount(), "faucet-claim")
     try:
         result = claim_fn({"token": token, "amount": faucet_amount(),
@@ -160,7 +192,10 @@ def run_faucet_cycle(claim_fn=None, token: str = None, now: int = None,
 
     amt = str(result.get("amount") or faucet_amount())
     cr = tm.credit(amt, token=token, memo="faucet claim", path=ledger_path)
-    st.setdefault(token, {})["last_claim_ts"] = now
+    rec = st.setdefault(token, {})
+    rec["last_claim_ts"] = now
+    # Ghi nhận đếm claim trong ngày (chỉ giữ ngày hiện tại -> state không phình).
+    rec["claims"] = {day: claims_today + 1}
     _save(st, faucet_state)
     log(f"[faucet] claimed {amt} {token} testnet -> số dư {cr.get('balance_after')}")
     return {"outcome": "claimed", "amount": amt, "balance_after": cr.get("balance_after"),
