@@ -44,6 +44,11 @@ jobs:
         env:
           AGENT_PRIVATE_KEY: ${{ secrets.AGENT_PRIVATE_KEY }}
           STATE_FILE: state.json
+          # Branding — đặt Repo Variables (Settings → Secrets and variables → Actions → Variables)
+          # để fork tự đổi tên. Bỏ trống -> giữ danh tính agent tham chiếu (NguyenVuLV).
+          AGENT_NAME: ${{ vars.AGENT_NAME }}
+          HANDLE: ${{ vars.HANDLE }}
+          KV_NS: ${{ vars.KV_NS }}
           # LLM tùy chọn — thêm 1 trong 2 secret là bot tự thông minh hơn.
           # Bỏ trống cả hai -> agent tự fallback về template (vẫn chạy bình thường).
           LLM_PROVIDER: ${{ vars.LLM_PROVIDER || 'auto' }}
