@@ -68,6 +68,16 @@ def test_select_filters_type_done_and_dedup():
     assert jobs[0]["title"] == "A2" and jobs[0]["seq"] == 13   # bản seq mới nhất
 
 
+def test_select_empty_allow_types_returns_nothing():
+    # Whitelist RỖNG (vd env FLOP_KIBBLE_TYPES="") KHÔNG được biến thành "nhận mọi type".
+    msgs = [
+        _msg(30, "JOB v1 | k000000000d | research | R | x"),
+        _msg(31, "JOB v1 | k000000000e | explain | E | x"),
+    ]
+    assert k.select_jobs(msgs, done_set=set(), allow_types=[], max_n=5) == []
+    assert k.select_jobs(msgs, done_set=set(), allow_types=None, max_n=5) == []
+
+
 def test_select_skips_own_did_and_orders_and_caps():
     msgs = [
         _msg(20, "JOB v1 | k000000000a | explain | own | x", frm="did:key:zME"),  # của mình

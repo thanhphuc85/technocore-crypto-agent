@@ -131,9 +131,12 @@ def select_jobs(messages, done_set, allow_types, max_n, my_did=None):
       - jobid CHƯA có trong done_set (chưa từng deliver),
       - KHÔNG phải job do CHÍNH mình đăng (nếu biết my_did),
     ưu tiên MỚI nhất (seq lớn), tối đa max_n. Trả list dict job (có thêm 'seq').
-    Hàm THUẦN — không mạng, không side-effect.
+    Hàm THUẦN — không mạng, không side-effect. allow_types RỖNG -> trả [] (whitelist rỗng
+    = không nhận gì), KHÔNG phải "nhận mọi type".
     """
     allow = {t.strip().lower() for t in (allow_types or []) if t and t.strip()}
+    if not allow:
+        return []       # whitelist RỖNG = KHÔNG nhận gì (an toàn) — không phải "nhận tất cả"
     done = set(done_set or [])
     jobs = {}       # jobid -> job dict (giữ bản có seq lớn nhất)
     for m in (messages or []):
@@ -145,7 +148,7 @@ def select_jobs(messages, done_set, allow_types, max_n, my_did=None):
         jobid = parsed["jobid"]
         if jobid in done:
             continue
-        if allow and parsed["type"] not in allow:
+        if parsed["type"] not in allow:
             continue
         sender = m.get("from") or m.get("did")
         if my_did and sender == my_did:
