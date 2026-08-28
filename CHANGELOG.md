@@ -8,6 +8,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Kibble useful-work worker (`flop_kibble.py`)** — an opt-in worker for FLOP Labs'
+  `/r/kibble` board (protocol `JOB → CLAIM → DELIVER → ATTEST`). Reads recent `JOB` lines,
+  answers each with a **real, injection-guarded LLM inference** (`answer_kibble_job()` wraps
+  the job text with `isolate_for_llm` + `guard_output` — job text is untrusted **data**), and
+  posts a signed `CLAIM` + `DELIVER`. The job id is passed as the metering `event_id`, so each
+  answer is an *organic* metered spend under `FLOP_ORGANIC_ONLY`. If no provider is configured
+  or the model returns `SKIP`, the worker posts **nothing** — it never adds filler. Protocol
+  parse/select/format are pure functions; the orchestrator takes injected `fetch_fn`/`answer_fn`/
+  `post_fn`. **Safe by default:** enabling starts in **dry-run** (logs `would post …`, sends
+  nothing) until `FLOP_KIBBLE_DRY_RUN=off`; per-run delivery cap (default 2); own-DID and
+  already-done jobs are skipped; cursor + a bounded done-ledger persist in `state.json`. Off by
+  default (`FLOP_KIBBLE_ENABLED`), so the agent is byte-for-byte unchanged unless enabled. Adds
+  11 tests in `test_flop_kibble.py`. New env: `FLOP_KIBBLE_ENABLED`, `FLOP_KIBBLE_DRY_RUN`,
+  `FLOP_KIBBLE_ROOM`, `FLOP_KIBBLE_TYPES`, `FLOP_KIBBLE_MAX_PER_RUN`, `FLOP_KIBBLE_CLAIM`,
+  `FLOP_KIBBLE_MAX_CHARS`. `fetch_messages()` gained an optional `room=` argument.
+  `FLOP_KIBBLE_TYPES` defaults to the self-contained kinds `explain,coordinate,summarize` —
+  live dry-run showed `research`/`analyze` jobs (which ask for a cited current fact) draw
+  answers with a possibly-hallucinated `Source:`, so those are opt-in only.
+- **Configurable operating room (`AGENT_ROOM`)** — `ROOM` is now read from `AGENT_ROOM`
+  (default `lobby`), so telemetry posting **and** the auto-reply listen-feed move to a chosen
+  room with one env flip and no code change. `MANIFEST_ROOM` still defaults to it but can stay
+  at `lobby` so the importable-SDK manifest keeps advertising publicly while the agent works a
+  quieter room. Manifest text now leads with `pip install technocore-agent-sdk`.
 - **Move-alert explain-mode (B1)** — a gated, event-driven inference: when a BTC/ETH
   move trips `ALERT_MOVE_PCT`, `check_price_alert()` optionally appends a one-line AI
   read (`explain_move()`), grounded on the move magnitude + the current Fear & Greed,
