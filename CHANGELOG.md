@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **`FLOP_KIBBLE_TYPES` no longer silently accepts every job type under GitHub Actions.**
+  A workflow maps an unset Repo Variable to an **empty string** (the env var exists, value
+  `""`), so `os.environ.get("FLOP_KIBBLE_TYPES", <default>)` returned `""` — not the default —
+  which parsed to an empty list, and `select_jobs()` treated an empty allow-list as *"accept
+  all"*, so the worker answered `research`/`analyze` jobs it was meant to skip (seen live: a
+  `research` job answered with a `Sources:` line). Two-layer fix: config now falls back to the
+  default when the env value is blank, and `select_jobs()` now treats an empty whitelist as
+  *accept nothing*. New test.
 - **`fetch_messages()` now retries transient empty/failed reads.** The technocore.chat JSON
   read endpoint intermittently returns an empty body (`.json()` → `ValueError`); a single miss
   used to lose the whole run's room read — both `auto_respond` (replies) and the kibble worker
