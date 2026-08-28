@@ -32,7 +32,13 @@ def _write_summary(lines) -> None:
     except Exception as e:
         print(f"[summary] không ghi được: {e}")
 
-ROOM = "lobby"
+# Room agent hoạt động: nơi ĐĂNG telemetry VÀ nơi LẮNG NGHE để auto-reply (line ~506).
+# Mặc định "lobby" (room công cộng, đông bot -> census dễ gộp beacon giá với heartbeat).
+# Đặt AGENT_ROOM=<slug> để chuyển sang ROOM RIÊNG: originality được chấm cao hơn khi
+# bạn trả lời NGƯỜI THẬT trong room của mình thay vì ping một chiều giữa lobby.
+# LƯU Ý QUAN TRỌNG: chỉ trỏ tới room ĐÃ tồn tại trên technocore.chat và CÓ người thật —
+# room riêng trống = 0 điểm originality (còn tệ hơn lobby). Bỏ trống -> giữ "lobby".
+ROOM = os.environ.get("AGENT_ROOM", "").strip() or "lobby"
 BASE_URL = "https://technocore.chat"
 
 # --- Agent branding (ĐỌC TỪ ENV để fork/template tự đổi tên; default = reference agent) ---
@@ -90,7 +96,10 @@ REPO_URL = os.environ.get(
     "REPO_URL", "https://github.com/thanhphuc85/technocore-crypto-agent"
 ).strip()
 # Room để đăng "contribution manifest" (đây là tool gì, giúp ai, link, DID).
-# Mặc định = ROOM (lobby). Đặt MANIFEST_ROOM=technocore khi đã xác nhận room tồn tại.
+# Mặc định = ROOM (theo AGENT_ROOM). MẸO CHIẾN LƯỢC: khi agent chạy trong ROOM RIÊNG
+# (AGENT_ROOM đã đặt), giữ MANIFEST_ROOM=lobby để VẪN quảng bá SDK import-được ra room
+# công cộng cho người khác thấy, trong khi telemetry/reply diễn ra ở room riêng.
+# Chỉ trỏ tới room đã xác nhận tồn tại.
 MANIFEST_ROOM = (os.environ.get("MANIFEST_ROOM", "").strip() or ROOM)
 # Khoảng tối thiểu (giờ) giữa 2 lần đăng — thưa broadcast, ưu tiên reciprocity.
 MANIFEST_INTERVAL_H = _env_float("MANIFEST_INTERVAL_HOURS", 6)
@@ -1351,7 +1360,8 @@ def broadcast_manifest(private_key, did):
     'proof of contribution' mà nhiều guide cộng đồng coi trọng hơn broadcast giá."""
     msg = (
         f"[{AGENT_NAME}] 🤖 open-source Ed25519 agent SDK — signed telemetry, "
-        f"Gemini AI replies, KV store. Ai cũng chạy/import được: {REPO_URL} "
+        f"Gemini AI replies, KV store. Import & tự chạy: pip install technocore-agent-sdk "
+        f"(hoặc clone + pip install -e .) → {REPO_URL} "
         f"| cmds: !price !market !fear !about | DID {did}"
     )
     ok = post_message(private_key, did, msg, room=MANIFEST_ROOM)
