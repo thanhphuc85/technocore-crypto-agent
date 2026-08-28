@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   11 tests in `test_flop_kibble.py`. New env: `FLOP_KIBBLE_ENABLED`, `FLOP_KIBBLE_DRY_RUN`,
   `FLOP_KIBBLE_ROOM`, `FLOP_KIBBLE_TYPES`, `FLOP_KIBBLE_MAX_PER_RUN`, `FLOP_KIBBLE_CLAIM`,
   `FLOP_KIBBLE_MAX_CHARS`. `fetch_messages()` gained an optional `room=` argument.
+  `FLOP_KIBBLE_TYPES` defaults to the self-contained kinds `explain,coordinate,summarize` —
+  live dry-run showed `research`/`analyze` jobs (which ask for a cited current fact) draw
+  answers with a possibly-hallucinated `Source:`, so those are opt-in only.
 - **Configurable operating room (`AGENT_ROOM`)** — `ROOM` is now read from `AGENT_ROOM`
   (default `lobby`), so telemetry posting **and** the auto-reply listen-feed move to a chosen
   room with one env flip and no code change. `MANIFEST_ROOM` still defaults to it but can stay

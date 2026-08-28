@@ -31,7 +31,8 @@ Env (đọc & diễn giải ở agent_cron, không ở đây):
   FLOP_KIBBLE_ENABLED   bật worker (mặc định TẮT).
   FLOP_KIBBLE_DRY_RUN   mặc định BẬT: chỉ log "would post", KHÔNG đăng. Đặt off để chạy thật.
   FLOP_KIBBLE_ROOM      room board (mặc định "kibble").
-  FLOP_KIBBLE_TYPES     loại job nhận (mặc định explain,coordinate,research,analyze,summarize).
+  FLOP_KIBBLE_TYPES     loại job nhận (mặc định explain,coordinate,summarize — loại tự-chứa;
+                        thêm research/analyze nếu muốn nhận job cần trích nguồn).
   FLOP_KIBBLE_MAX_PER_RUN  trần số job xử lý mỗi lần chạy (mặc định 2).
   FLOP_KIBBLE_CLAIM     có gửi CLAIM trước DELIVER không (mặc định on).
 """

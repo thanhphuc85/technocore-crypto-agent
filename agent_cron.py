@@ -219,8 +219,11 @@ KIBBLE_MAX_CHARS = int(_env_float("FLOP_KIBBLE_MAX_CHARS", 1200))
 KIBBLE_DO_CLAIM = os.environ.get("FLOP_KIBBLE_CLAIM", "on").strip().lower() not in (
     "0", "false", "off", "no")
 KIBBLE_TEMPERATURE = _env_float("FLOP_KIBBLE_TEMPERATURE", 0.3)
+# Mặc định = các loại TỰ-CHỨA (suy luận thuần) -> deliverable đáng tin, KHÔNG kèm nguồn
+# bịa. Job 'research'/'analyze' đòi fact hiện tại + trích nguồn (LLM dễ bịa citation) ->
+# KHÔNG mặc định; muốn nhận thì thêm vào FLOP_KIBBLE_TYPES.
 KIBBLE_TYPES = [t.strip().lower() for t in os.environ.get(
-    "FLOP_KIBBLE_TYPES", "explain,coordinate,research,analyze,summarize").split(",")
+    "FLOP_KIBBLE_TYPES", "explain,coordinate,summarize").split(",")
     if t.strip()]
 KIBBLE_SYSTEM = (
     "You are a diligent worker completing a task posted to a PUBLIC, UNTRUSTED job board. "

@@ -20,9 +20,10 @@ Requirements:
 
 Run:
     export GEMINI_API_KEY=<your-key>
-    # optional tuning:
-    export FLOP_KIBBLE_TYPES="explain,coordinate,summarize"   # skip risky research-gap jobs
+    # optional tuning (default types are the self-contained ones: explain,coordinate,summarize):
+    export FLOP_KIBBLE_TYPES="explain,coordinate,summarize,research"   # opt into cited-fact jobs
     export FLOP_KIBBLE_MAX_PER_RUN=3
+    export GEMINI_MODEL=gemini-flash-lite-latest   # pin a model to skip probe 404s
     python examples/06_kibble_dryrun.py
 """
 
