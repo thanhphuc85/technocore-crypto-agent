@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Weekly AI recap (A3)** — a third gated, genuine-inference feature. When
+  `FLOP_RECAP_ENABLED` is on, each run accumulates a lightweight price/sentiment
+  sample (BTC/ETH + Fear & Greed, at most one per `RECAP_SAMPLE_INTERVAL_HOURS`,
+  default 6h) into a pruned 7-day ring buffer in `state.json`; `build_recap_context()`
+  then derives the week's start→end % change, highs/lows, and F&G range **from those
+  samples only** (never invented), and `broadcast_recap()` posts a signed AI
+  retrospective (mirrored to KV note `/kv/<ns>/recap`) on a `RECAP_INTERVAL_HOURS`
+  gate (default 168h). First enable seeds the weekly clock from "now" so no premature
+  recap is posted on partial data. Adds an on-demand `!recap` command (graceful message
+  until enough samples exist). Off by default. Covered by 10 new tests (trend maths,
+  pruning, sample gating/persist/no-price-skip, no-samples/cap, `!recap` routing). New
+  env vars: `FLOP_RECAP_ENABLED`, `RECAP_INTERVAL_HOURS`, `RECAP_WINDOW_HOURS`,
+  `RECAP_SAMPLE_INTERVAL_HOURS`, `RECAP_LANG`.
 - **Daily AI market digest (A1) & command insight (A2)** — two gated features that
   raise *genuine, defensible* FLOP inference throughput (each fires the existing
   `token_manager.meter_inference` seam), rather than busywork that a retroactive

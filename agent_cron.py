@@ -157,6 +157,28 @@ INSIGHT_SYSTEM = (
     "numbers not provided. Output only the sentence — no prefix, no quotes."
 )
 
+# --- (A3) Weekly recap — bản tổng kết tuần do AI sinh, grounded bằng CHÍNH các mẫu
+#     giá/sentiment agent tích lũy trong tuần (đỉnh/đáy, đổi %, dịch Fear&Greed). 1 lần/
+#     tuần = 1 suy luận THẬT, giá trị thật (retrospective công khai). Mặc định TẮT ->
+#     KHÔNG tích mẫu, KHÔNG đăng gì. Xem record_weekly_sample()/generate_recap().
+RECAP_ENABLED = os.environ.get("FLOP_RECAP_ENABLED", "").strip().lower() in (
+    "1", "true", "on", "yes")
+RECAP_INTERVAL_H = _env_float("RECAP_INTERVAL_HOURS", 168)          # 7 ngày/lần
+RECAP_WINDOW_H = _env_float("RECAP_WINDOW_HOURS", 168)             # cửa sổ mẫu = 7 ngày
+RECAP_SAMPLE_INTERVAL_H = _env_float("RECAP_SAMPLE_INTERVAL_HOURS", 6)  # tối đa 6h/mẫu
+RECAP_MAX_SAMPLES = int(_env_float("RECAP_MAX_SAMPLES", 60))       # trần ring-buffer state
+RECAP_LANG = (os.environ.get("RECAP_LANG", "").strip().lower() or DIGEST_LANG)
+RECAP_TEMPERATURE = _env_float("RECAP_TEMPERATURE", 0.6)
+RECAP_MAX_CHARS = int(_env_float("RECAP_MAX_CHARS", 300))
+RECAP_SYSTEM = (
+    f"You are {AGENT_NAME}, a crypto market analyst posting a weekly recap to a public "
+    "chat. Using ONLY the week's figures provided (start->end, highs/lows, Fear & Greed "
+    "range), write a concise retrospective in 2-3 short sentences (max ~290 characters): "
+    "the week's trend, the standout move, and the sentiment shift. Never give financial "
+    "advice, never invent numbers not provided. Output only the recap text — no preamble, "
+    "no quotes, no markdown."
+)
+
 # --- LLM giọng điệu (persona) theo NGỮ CẢNH ---
 # Lớp AN TOÀN là hằng số, KHÔNG đổi theo tone: untrusted, không lộ key, 1 câu ngắn.
 LLM_SAFETY = (
@@ -863,6 +885,67 @@ def _insight(kind: str, facts: str, lang: str = "en", event_id: str = None) -> s
     return f" — {text[:INSIGHT_MAX_CHARS]}" if text else ""
 
 
+def record_weekly_sample(state, now) -> bool:
+    """(A3) Tích 1 mẫu {ts, btc, eth, fg} cho weekly recap — tối đa RECAP_SAMPLE_INTERVAL_H
+    giờ/lần (đỡ gọi API), prune mẫu cũ hơn RECAP_WINDOW_H, giữ tối đa RECAP_MAX_SAMPLES.
+    KHÔNG ghi mẫu rác: thiếu giá BTC -> bỏ qua, thử lại vòng sau. Persist ngay (merge vào
+    state.json). Trả True nếu vừa ghi thêm mẫu."""
+    if not _due(state, "last_weekly_sample", RECAP_SAMPLE_INTERVAL_H, now):
+        return False
+    m = get_market(["bitcoin", "ethereum"])
+    btc = m.get("bitcoin", {}).get("usd")
+    eth = m.get("ethereum", {}).get("usd")
+    if btc is None:
+        return False
+    fg, _ = get_fear_greed()
+    samples = [s for s in (state.get("weekly_samples") or [])
+               if now - s.get("ts", 0) <= RECAP_WINDOW_H * 3600]
+    samples.append({"ts": now, "btc": btc, "eth": eth, "fg": fg})
+    samples = samples[-RECAP_MAX_SAMPLES:]
+    state["weekly_samples"] = samples                 # cập nhật state trong-run cho recap
+    state["last_weekly_sample"] = now
+    save_state({"weekly_samples": samples, "last_weekly_sample": now})
+    return True
+
+
+def build_recap_context(state, now) -> str:
+    """Chất liệu weekly recap tính TỪ mẫu đã tích (không bịa): đổi % đầu->cuối tuần,
+    đỉnh/đáy BTC/ETH, biên Fear&Greed. Trả '' nếu chưa đủ (>=2 mẫu) để tổng kết."""
+    samples = [s for s in (state.get("weekly_samples") or [])
+               if now - s.get("ts", 0) <= RECAP_WINDOW_H * 3600]
+    if len(samples) < 2:
+        return ""
+    first, last = samples[0], samples[-1]
+
+    def pct(a, b):
+        return None if not a else (b - a) / a * 100.0
+
+    days = max((last["ts"] - first["ts"]) / 86400.0, 0.0)
+    parts = [f"Window: last {days:.1f}d, {len(samples)} samples"]
+    for sym, key in (("BTC", "btc"), ("ETH", "eth")):
+        vals = [s[key] for s in samples if s.get(key)]
+        if vals and first.get(key) and last.get(key):
+            parts.append(f"{sym} {first[key]}->{last[key]} ({pct(first[key], last[key]):+.1f}%), "
+                         f"low {min(vals)} high {max(vals)}")
+    fgs = [s["fg"] for s in samples if s.get("fg") is not None]
+    if fgs:
+        parts.append(f"Fear&Greed {fgs[0]}->{fgs[-1]} (range {min(fgs)}-{max(fgs)})")
+    return " | ".join(parts)
+
+
+def generate_recap(state, now, lang: str = None):
+    """(A3) Sinh bản tổng kết tuần grounded từ mẫu đã tích. Trả text hoặc None (chưa đủ
+    mẫu / thiếu provider / lỗi). Mỗi lần = 1 suy luận THẬT (đo qua _llm_generate)."""
+    ctx = build_recap_context(state, now)
+    if not ctx:
+        print("[recap] chưa đủ mẫu trong tuần -> bỏ qua")
+        return None
+    lg = (lang or RECAP_LANG)
+    system = RECAP_SYSTEM + ("\nReply in Vietnamese." if lg == "vi" else "\nReply in English.")
+    text = _llm_generate(ctx, system, RECAP_TEMPERATURE, memo="weekly recap")
+    return text[:RECAP_MAX_CHARS] if text else None
+
+
 # --- Trí nhớ hội thoại theo user (lưu trong state.json, persist qua actions/cache) ---
 def mem_get(state, nick):
     """Vài lượt hội thoại gần nhất với 'nick' (list {q,a}); [] nếu không có state."""
@@ -944,8 +1027,8 @@ def build_reply(sender_nick: str, text: str, state=None) -> str:
 
     if has("!help"):
         return tag("commands: !price [coin] · !market · !top · !trending · !dominance · "
-                   "!gas · !fear · !digest · !time · !ping · !about — or just @mention me a "
-                   "question and I'll answer with live-grounded AI.")
+                   "!gas · !fear · !digest · !recap · !time · !ping · !about — or just @mention "
+                   "me a question and I'll answer with live-grounded AI.")
     if has("!about"):
         return tag(f"I'm {AGENT_NAME}, an autonomous Ed25519 agent: signed oracle telemetry, "
                    "Gemini AI replies, KV store, injection-guarded. Open-source SDK on GitHub.")
@@ -1016,6 +1099,11 @@ def build_reply(sender_nick: str, text: str, state=None) -> str:
         # do user gọi -> luôn phục vụ (không phụ thuộc gate lịch của broadcast).
         body = generate_digest(detect_lang(text))
         return tag(f"📊 {body}") if body else tag("digest tạm chưa sẵn sàng, thử lại sau.")
+    if has("!recap"):
+        # (A3) Tổng kết tuần theo YÊU CẦU — cần đã tích đủ mẫu (FLOP_RECAP_ENABLED bật
+        # một thời gian). Chưa đủ -> báo nhẹ nhàng thay vì lỗi.
+        body = generate_recap(state or {}, int(time.time()), detect_lang(text))
+        return tag(f"🗓 {body}") if body else tag("weekly recap chưa đủ dữ liệu, quay lại sau nhé.")
     # Mention không kèm lệnh → LLM: grounding data-live + trí nhớ + đúng ngôn ngữ
     smart = llm_reply(text, sender_nick=sender_nick, state=state)
     if smart:
@@ -1189,7 +1277,7 @@ def auto_respond(private_key, did):
 
 # --- Contribution manifest (proof of contribution, CÓ KÝ) ---
 COMMANDS = ["!price", "!market", "!top", "!trending", "!dominance", "!gas",
-            "!fear", "!digest", "!about", "!time", "!ping", "!help"]
+            "!fear", "!digest", "!recap", "!about", "!time", "!ping", "!help"]
 
 
 def broadcast_digest(private_key, did) -> bool:
@@ -1206,6 +1294,21 @@ def broadcast_digest(private_key, did) -> bool:
     text = f"[{AGENT_NAME}] 📊 Daily AI digest — {body} | {ts}"
     ok = post_message(private_key, did, text)
     kv_set(private_key, did, "digest", text)
+    return ok
+
+
+def broadcast_recap(private_key, did, state, now) -> bool:
+    """(A3, GATED) Đăng bản tổng kết TUẦN do AI sinh (grounded từ mẫu đã tích), CÓ KÝ,
+    + lưu KV note `recap` để audit (GET /kv/<ns>/recap). Retrospective công khai hữu ích:
+    mỗi lần = 1 suy luận THẬT -> nguồn FLOP hợp lệ. Trả kết quả post; False nếu chưa đủ
+    mẫu / thiếu provider / post fail -> caller KHÔNG đóng cổng, thử lại vòng sau."""
+    body = generate_recap(state, now)
+    if not body:
+        return False
+    ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    text = f"[{AGENT_NAME}] 🗓 Weekly recap — {body} | {ts}"
+    ok = post_message(private_key, did, text)
+    kv_set(private_key, did, "recap", text)
     return ok
 
 
@@ -1328,6 +1431,28 @@ def main():
         else:
             digest_status = "skip"
 
+    # 1e) (A3, Tùy chọn, GATED) Weekly recap — tích mẫu giá/sentiment đều trong tuần rồi
+    #     mỗi RECAP_INTERVAL_H giờ đăng 1 bản tổng kết AI (grounded từ chính mẫu đó). 1
+    #     lần/tuần = 1 suy luận THẬT, giá trị thật. Mặc định TẮT -> KHÔNG tích, KHÔNG đăng.
+    recap_status = "off"
+    if RECAP_ENABLED:
+        record_weekly_sample(state, now)          # tích chất liệu đều (tối đa 6h/mẫu)
+        if not state.get("last_recap"):
+            # Lần đầu bật: khởi động ĐỒNG HỒ TUẦN từ bây giờ để mẫu kịp tích đủ —
+            # KHÔNG đăng recap "non" khi mới có vài giờ dữ liệu.
+            save_state({"last_recap": now})
+            state["last_recap"] = now
+            recap_status = "seed"
+        elif _due(state, "last_recap", RECAP_INTERVAL_H, now):
+            if broadcast_recap(private_key, did, state, now):
+                save_state({"last_recap": now})
+                recap_status = "ok"
+            else:
+                recap_status = "fail"
+                print("[recap] chưa đủ mẫu / post fail -> KHÔNG đóng cổng, thử lại sau")
+        else:
+            recap_status = "skip"
+
     # 2) Câu hỏi nhập tay khi Run workflow (test AI mà không lo firehose)
     if ASK:
         ask = sanitize_input(ASK)
@@ -1367,12 +1492,13 @@ def main():
         f"- telemetry: **{tele_status}**",
         f"- manifest: **{manifest_status}**",
         f"- digest: **{digest_status}**",
+        f"- recap: **{recap_status}**",
         f"- replies: **{replies}** · proactive: **{proactive}**",
         f"- technocore.chat 200s: **{_server_ok_count}**",
     ]
     print(f"[run] telemetry={tele_status} manifest={manifest_status} "
-          f"digest={digest_status} replies={replies} proactive={proactive} "
-          f"server200s={_server_ok_count}")
+          f"digest={digest_status} recap={recap_status} replies={replies} "
+          f"proactive={proactive} server200s={_server_ok_count}")
 
     if _server_ok_count == 0:
         summary.append("- ⚠️ **Không call nào tới technocore.chat thành công "

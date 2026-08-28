@@ -512,3 +512,88 @@ def test_meter_flop_never_raises(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", boom)
     ac._meter_flop("x")   # không raise = pass
+
+
+# --- (A3) Weekly recap -----------------------------------------------------------
+def _samples(now, n=4, span_days=6.0):
+    """n mẫu giá/F&G trải đều trong span_days ngày, giá tăng dần để có trend rõ."""
+    out = []
+    for k in range(n):
+        ts = int(now - (span_days * 86400) * (n - 1 - k) / max(n - 1, 1))
+        out.append({"ts": ts, "btc": 100 + 10 * k, "eth": 50 + 5 * k, "fg": 40 + 5 * k})
+    return out
+
+
+def test_build_recap_context_computes_trend(monkeypatch):
+    now = 1_000_000_000
+    state = {"weekly_samples": _samples(now, 4)}
+    ctx = ac.build_recap_context(state, now)
+    assert "BTC 100->130" in ctx and "high 130" in ctx and "Fear&Greed 40->55" in ctx
+
+
+def test_build_recap_context_empty_when_too_few(monkeypatch):
+    now = 1_000_000_000
+    assert ac.build_recap_context({"weekly_samples": [{"ts": now, "btc": 1}]}, now) == ""
+
+
+def test_build_recap_context_prunes_old_samples(monkeypatch):
+    now = 1_000_000_000
+    old = {"ts": now - int(ac.RECAP_WINDOW_H * 3600) - 10, "btc": 1, "eth": 1, "fg": 10}
+    state = {"weekly_samples": [old] + _samples(now, 3)}
+    ctx = ac.build_recap_context(state, now)
+    assert "BTC 100->" in ctx            # mẫu cũ bị loại, không lấy làm 'first'
+
+
+def test_record_weekly_sample_gated_by_interval(monkeypatch):
+    now = 1_000_000_000
+    monkeypatch.setattr(ac, "get_market", lambda ids: {i: {"usd": 100} for i in ids})
+    monkeypatch.setattr(ac, "get_fear_greed", lambda: (50, "Neutral"))
+    monkeypatch.setattr(ac, "save_state", lambda *a, **k: None)
+    state = {"last_weekly_sample": now}          # vừa lấy mẫu -> chưa tới nhịp
+    assert ac.record_weekly_sample(state, now) is False
+
+
+def test_record_weekly_sample_appends_and_persists(monkeypatch):
+    now = 1_000_000_000
+    monkeypatch.setattr(ac, "get_market", lambda ids: {i: {"usd": 100} for i in ids})
+    monkeypatch.setattr(ac, "get_fear_greed", lambda: (50, "Neutral"))
+    saved = {}
+    monkeypatch.setattr(ac, "save_state", lambda d: saved.update(d))
+    state = {}
+    assert ac.record_weekly_sample(state, now) is True
+    assert len(state["weekly_samples"]) == 1 and "weekly_samples" in saved
+
+
+def test_record_weekly_sample_skips_on_no_price(monkeypatch):
+    now = 1_000_000_000
+    monkeypatch.setattr(ac, "get_market", lambda ids: {})
+    monkeypatch.setattr(ac, "save_state", lambda *a, **k: None)
+    state = {}
+    assert ac.record_weekly_sample(state, now) is False and "weekly_samples" not in state
+
+
+def test_generate_recap_none_without_samples(monkeypatch):
+    _stub_market(monkeypatch)
+    assert ac.generate_recap({}, 1_000_000_000) is None
+
+
+def test_generate_recap_grounded_and_capped(monkeypatch):
+    _stub_market(monkeypatch, reply="Y" * 500)
+    monkeypatch.setattr(ac, "RECAP_MAX_CHARS", 30)
+    now = 1_000_000_000
+    out = ac.generate_recap({"weekly_samples": _samples(now, 4)}, now)
+    assert out is not None and len(out) == 30
+
+
+def test_build_reply_recap_command(monkeypatch):
+    _stub_market(monkeypatch, reply="Choppy week, sentiment cooled.")
+    now = int(__import__("time").time())
+    state = {"weekly_samples": _samples(now, 4)}
+    out = ac.build_reply("bob", "@nguyenvulv !recap", state=state)
+    assert "🗓" in out and "Choppy week" in out
+
+
+def test_build_reply_recap_without_data_is_graceful(monkeypatch):
+    _stub_market(monkeypatch)
+    out = ac.build_reply("bob", "@nguyenvulv !recap", state={})
+    assert "chưa đủ dữ liệu" in out
