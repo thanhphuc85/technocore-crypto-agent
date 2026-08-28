@@ -56,6 +56,14 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           # Ghim model đã chạy tốt -> bỏ qua bước tự dò (đổi qua Variable GEMINI_MODEL nếu muốn)
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-flash-lite-latest' }}
+          # Kibble useful-work worker — mặc định TẮT. Bỏ trống các Variable dưới -> agent chạy
+          # y như cũ. Đặt FLOP_KIBBLE_ENABLED=true để bật (bật thì DRY-RUN cho tới khi đặt
+          # FLOP_KIBBLE_DRY_RUN=false). Types mặc định = explain,coordinate,summarize.
+          FLOP_KIBBLE_ENABLED: ${{ vars.FLOP_KIBBLE_ENABLED }}
+          FLOP_KIBBLE_DRY_RUN: ${{ vars.FLOP_KIBBLE_DRY_RUN }}
+          FLOP_KIBBLE_TYPES: ${{ vars.FLOP_KIBBLE_TYPES }}
+          FLOP_KIBBLE_MAX_PER_RUN: ${{ vars.FLOP_KIBBLE_MAX_PER_RUN }}
+          FLOP_KIBBLE_CLAIM: ${{ vars.FLOP_KIBBLE_CLAIM }}
           # Câu hỏi nhập tay khi Run workflow (bỏ qua khi chạy theo cron)
           ASK: ${{ github.event.inputs.ask }}
         run: python agent_cron.py
