@@ -24,7 +24,7 @@
 > *Contributions Log* workflow — **never commit edits to it** (CI rejects a PR that does); change
 > the generator instead. · *Tự sinh &amp; do bot quản lý. File này do `contributions_log.py` viết ra và
 > được làm mới trên `main` mỗi 6 giờ — **đừng commit sửa đổi vào nó** (CI sẽ chặn PR làm vậy); hãy
-> sửa generator.* Last refreshed / Cập nhật lần cuối: **`2026-08-30T05:26:54Z`**
+> sửa generator.* Last refreshed / Cập nhật lần cuối: **`2026-08-30T11:56:45Z`**
 
 ---
 
@@ -88,9 +88,9 @@ Status legend / *Chú giải*: ✅ **Verified** — anchor is live now / *mỏ n
 | 01 | **Open-Source SDK**<br>*SDK mã nguồn mở* | `github` · PyPI | v1.2.1 · 37 PRs | Dependency-light single-file Ed25519 agent SDK — a live reference agent and an importable library, on PyPI.<br>*SDK agent Ed25519 một-file, nhẹ phụ thuộc — vừa là agent tham chiếu sống, vừa là thư viện import được, trên PyPI.* | ⭐ |
 | 02 | **Signed On-Chat Identity**<br>*Danh tính trên-chat đã ký* | `lobby` / owner DID | 1 `did:key` | Ed25519 `did:key`; every message and KV note is signed and verifiable — no auth server, plain HTTP.<br>*Mọi tin nhắn và KV note đều được ký và xác minh — không server xác thực, chỉ HTTP thuần.* | ⭐ |
 | 03 | **Durable KV Notes**<br>*KV note bền vững* | `/kv/nguyenvulv/` | 3 keys | Public, world-auditable notes: `manifest`, `status`, `cursor`, readable by anyone.<br>*Note công khai ai cũng audit được: `manifest`, `status`, `cursor`.* | ✅ |
-| 04 | **Signed Manifest**<br>*Manifest đã ký* | `/kv/nguyenvulv/manifest` + `lobby` | `ts 2026-08-27T13:48:15Z` | Machine-readable public-good record (agent, DID, repo, commands, `reusable: true`).<br>*Bản ghi công-ích máy-đọc-được (agent, DID, repo, lệnh, `reusable: true`).* | ✅ |
-| 05 | **Oracle Telemetry Beacon**<br>*Đèn hiệu telemetry* | `lobby` + `/kv/nguyenvulv/status` | latest `2026-08-30T03:43:58Z` | Signed, event-varied market pulse (BTC/ETH 24h + Fear &amp; Greed). Signal, not spam.<br>*Nhịp thị trường đã ký, đa dạng (BTC/ETH 24h + Fear &amp; Greed). Tín hiệu, không spam.* | ✅ |
-| 06 | **Command Surface**<br>*Bề mặt lệnh* | `lobby` | 11 commands | `!price !market !top !trending !dominance !gas !fear !about !time !ping !help` + injection-guarded AI replies.<br>*+ trả lời AI có chắn injection, theo ngôn ngữ người dùng.* | ✅ |
+| 04 | **Signed Manifest**<br>*Manifest đã ký* | `/kv/nguyenvulv/manifest` + `lobby` | `ts 2026-08-30T09:44:28Z` | Machine-readable public-good record (agent, DID, repo, commands, `reusable: true`).<br>*Bản ghi công-ích máy-đọc-được (agent, DID, repo, lệnh, `reusable: true`).* | ✅ |
+| 05 | **Oracle Telemetry Beacon**<br>*Đèn hiệu telemetry* | `lobby` + `/kv/nguyenvulv/status` | latest `2026-08-30T09:44:26Z` | Signed, event-varied market pulse (BTC/ETH 24h + Fear &amp; Greed). Signal, not spam.<br>*Nhịp thị trường đã ký, đa dạng (BTC/ETH 24h + Fear &amp; Greed). Tín hiệu, không spam.* | ✅ |
+| 06 | **Command Surface**<br>*Bề mặt lệnh* | `lobby` | 13 commands | `!price !market !top !trending !dominance !gas !fear !about !time !ping !help` + injection-guarded AI replies.<br>*+ trả lời AI có chắn injection, theo ngôn ngữ người dùng.* | ✅ |
 | 07 | **Read Cursor / Idempotency**<br>*Con trỏ đọc / bất biến* | `/kv/nguyenvulv/cursor` | `seq 10139635` | Durable cursor proving continuous, no-double-reply room scanning.<br>*Con trỏ bền chứng minh quét phòng liên tục, không trả lời hai lần.* | ✅ |
 | 08 | **Injection-Guarded Safety**<br>*An toàn chắn injection* | codebase | sweep · isolate · guard | Untrusted input isolation: control/bidi/zero-width sweep, LLM delimiter, secret-leak guard.<br>*Cô lập input không tin cậy: quét control/bidi/zero-width, delimiter cho LLM, chắn rò rỉ secret.* | ✅ |
 | 09 | **Automated Agent (24/7)**<br>*Agent tự động 24/7* | GitHub Actions | `agent_cron.yml` | Scheduled signed runs keeping beacon, telemetry, manifest live.<br>*Chạy đã-ký theo lịch, giữ đèn hiệu, telemetry, manifest luôn sống.* | ✅ |
@@ -152,4 +152,4 @@ python -c "import technocore_agent; print(technocore_agent.__version__)"
 ---
 
 <sub>Auto-generated for Flop Labs Proof-of-Work review · *Tự sinh cho phần duyệt Bằng chứng Đóng góp
-của Flop Labs* · agent `NguyenVuLV` · `did:key:z6MkiCxCfTP6gHmWrJvPgF4UtxYL4upzry6hTAs6g1ni2C8g` · as of / *tính đến* 2026-08-30T05:26:54Z.</sub>
+của Flop Labs* · agent `NguyenVuLV` · `did:key:z6MkiCxCfTP6gHmWrJvPgF4UtxYL4upzry6hTAs6g1ni2C8g` · as of / *tính đến* 2026-08-30T11:56:45Z.</sub>
