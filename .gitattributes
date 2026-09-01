@@ -1,0 +1,6 @@
+# Các file chạy trên Linux VM (Oracle) BẮT BUỘC dùng LF — CRLF làm hỏng shebang shell
+# (bad interpreter) và unit systemd. Ép LF bất kể máy commit là Windows hay không.
+*.sh              text eol=lf
+deploy/*.service  text eol=lf
+deploy/*.timer    text eol=lf
+deploy/*.env*     text eol=lf

@@ -9,6 +9,7 @@ ngôn ngữ/coin/tone, bộ nhớ hội thoại, và lớp mạng (post/fetch/kv
 """
 
 import base64
+import json
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -795,3 +796,112 @@ def test_deepseek_reply_hits_deepseek_endpoint(monkeypatch):
     assert ac._deepseek_reply("hi", "sys", 0.5) == "ok"
     assert seen["url"] == "https://api.deepseek.com/chat/completions"
     assert seen["auth"] == "Bearer dk" and seen["model"] == "deepseek-chat"
+
+
+# --- Runner coordination: VM Oracle (chính) + GitHub Actions (phụ) via KV heartbeat ---
+def test_primary_alive_fresh_heartbeat(monkeypatch):
+    now = 1_000_000
+    monkeypatch.setattr(ac, "kv_get", lambda k: str(now - 600))   # 10 phút trước
+    assert ac.primary_alive(now, within_min=45) is True
+
+
+def test_primary_alive_stale_heartbeat(monkeypatch):
+    now = 1_000_000
+    monkeypatch.setattr(ac, "kv_get", lambda k: str(now - 3600))  # 60 phút trước
+    assert ac.primary_alive(now, within_min=45) is False
+
+
+def test_primary_alive_missing_or_bad_heartbeat_means_dead(monkeypatch):
+    now = 1_000_000
+    monkeypatch.setattr(ac, "kv_get", lambda k: None)
+    assert ac.primary_alive(now, within_min=45) is False         # phụ tiếp quản (fail-open)
+    monkeypatch.setattr(ac, "kv_get", lambda k: "not-an-int")
+    assert ac.primary_alive(now, within_min=45) is False
+
+
+def test_hydrate_durable_takes_max_timestamp(monkeypatch):
+    # local đã có mốc mới hơn KV -> giữ local (không lùi mốc, tránh re-post).
+    remote = {"last_telemetry": 100, "last_seq": 5}
+    monkeypatch.setattr(ac, "kv_get", lambda k: json.dumps(remote))
+    state = {"last_telemetry": 500, "last_seq": 2}
+    ac.hydrate_durable_from_kv(state)
+    assert state["last_telemetry"] == 500          # local mới hơn -> giữ
+    assert state["last_seq"] == 5                  # KV mới hơn -> lấy KV
+
+
+def test_hydrate_durable_fills_empty_local_from_kv(monkeypatch):
+    # Runner mới / cache mất: local rỗng -> lấy hết mốc từ KV để KHÔNG re-post telemetry.
+    remote = {"last_telemetry": 900, "last_manifest": 800, "weekly_samples": [{"p": 1}]}
+    monkeypatch.setattr(ac, "kv_get", lambda k: json.dumps(remote))
+    state = {}
+    ac.hydrate_durable_from_kv(state)
+    assert state["last_telemetry"] == 900 and state["last_manifest"] == 800
+    assert state["weekly_samples"] == [{"p": 1}]
+
+
+def test_hydrate_durable_noop_on_missing_or_bad_kv(monkeypatch):
+    monkeypatch.setattr(ac, "kv_get", lambda k: None)
+    state = {"last_telemetry": 7}
+    ac.hydrate_durable_from_kv(state)
+    assert state == {"last_telemetry": 7}
+    monkeypatch.setattr(ac, "kv_get", lambda k: "{not json")
+    ac.hydrate_durable_from_kv(state)
+    assert state == {"last_telemetry": 7}
+
+
+def test_persist_durable_writes_only_durable_subset(monkeypatch):
+    snap = {"last_telemetry": 111, "last_seq": 9, "weekly_samples": [1, 2],
+            "mem": {"bob": "secret"}, "kibble_cursor": 42}
+    monkeypatch.setattr(ac, "load_state", lambda: snap)
+    sent = {}
+    monkeypatch.setattr(ac, "kv_set",
+                        lambda pk, did, key, val: sent.update({"key": key, "val": val}) or True)
+    ac.persist_durable_to_kv("pk", "did")
+    payload = json.loads(sent["val"])
+    assert sent["key"] == "state"
+    assert payload["last_telemetry"] == 111 and payload["last_seq"] == 9
+    assert payload["weekly_samples"] == [1, 2]
+    assert "mem" not in payload and "kibble_cursor" not in payload   # không mirror bừa
+
+
+def test_main_backup_stands_down_when_primary_alive(monkeypatch):
+    # Thuộc tính an toàn cốt lõi: phụ KHÔNG đăng telemetry / KHÔNG auto_respond khi chính sống.
+    monkeypatch.setattr(ac, "SEED_HEX", SEED_HEX)
+    monkeypatch.setattr(ac, "RUNNER_ROLE", "backup")
+    monkeypatch.setattr(ac, "load_state", lambda: {"last_seq": 3})
+    monkeypatch.setattr(ac, "hydrate_durable_from_kv", lambda s: None)
+    monkeypatch.setattr(ac, "primary_alive", lambda now, m: True)
+    monkeypatch.delenv("GITHUB_EVENT_NAME", raising=False)
+    saved = {}
+    monkeypatch.setattr(ac, "save_state", lambda d: saved.update(d))
+    hit = {}
+    monkeypatch.setattr(ac, "broadcast_telemetry",
+                        lambda *a, **k: hit.setdefault("tele", True))
+    monkeypatch.setattr(ac, "auto_respond",
+                        lambda *a, **k: hit.update(resp=True) or (0, 0))
+    ac.main()
+    assert "tele" not in hit and "resp" not in hit   # đứng im hoàn toàn
+    assert saved.get("last_seq") == 3                # nhưng vẫn giữ cursor để sẵn sàng tiếp quản
+
+
+def test_main_backup_runs_when_forced_even_if_primary_alive(monkeypatch):
+    # Chạy tay (workflow_dispatch) BỎ QUA standby để còn test được -> auto_respond phải chạy.
+    monkeypatch.setattr(ac, "SEED_HEX", SEED_HEX)
+    monkeypatch.setattr(ac, "RUNNER_ROLE", "backup")
+    monkeypatch.setattr(ac, "load_state", lambda: {})
+    monkeypatch.setattr(ac, "hydrate_durable_from_kv", lambda s: None)
+    monkeypatch.setattr(ac, "primary_alive", lambda now, m: True)
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    monkeypatch.setattr(ac, "save_state", lambda d: None)
+    monkeypatch.setattr(ac, "write_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(ac, "persist_durable_to_kv", lambda *a, **k: None)
+    monkeypatch.setattr(ac, "_write_summary", lambda *a, **k: None)
+    monkeypatch.setattr(ac, "broadcast_telemetry", lambda *a, **k: True)
+    monkeypatch.setattr(ac, "broadcast_manifest", lambda *a, **k: True)
+    monkeypatch.setattr(ac, "check_price_alert", lambda *a, **k: None)
+    monkeypatch.setattr(ac, "_server_ok_count", 1)
+    hit = {}
+    monkeypatch.setattr(ac, "auto_respond",
+                        lambda *a, **k: hit.update(resp=True) or (0, 0))
+    ac.main()
+    assert hit.get("resp") is True                   # force -> KHÔNG standby, chạy đầy đủ

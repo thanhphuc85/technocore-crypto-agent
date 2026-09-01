@@ -1,0 +1,13 @@
+# systemd USER service — chạy MỘT vòng agent rồi thoát (oneshot). Kích bởi .timer.
+# Cài vào ~/.config/systemd/user/ (xem oracle-vm-setup.sh). Xem log:
+#   journalctl --user -u technocore-agent -n 50 --no-pager
+[Unit]
+Description=Technocore crypto agent — one run
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/technocore-crypto-agent/deploy/run-agent.sh
+# Không tự restart: timer sẽ gọi lại vòng sau. Timeout rộng cho lần chạy chậm.
+TimeoutStartSec=300

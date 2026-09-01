@@ -105,6 +105,17 @@ MANIFEST_ROOM = (os.environ.get("MANIFEST_ROOM", "").strip() or ROOM)
 MANIFEST_INTERVAL_H = _env_float("MANIFEST_INTERVAL_HOURS", 6)
 TELEMETRY_INTERVAL_H = _env_float("TELEMETRY_INTERVAL_HOURS", 1)
 
+# --- Phối hợp 2 runner (VM Oracle CHÍNH + GitHub Actions PHỤ) qua heartbeat trên KV ---
+# Chạy CÙNG agent ở 2 nơi mà KHÔNG double-post: runner CHÍNH ghi 'heartbeat' (mốc thời
+# gian) lên KV mỗi vòng; runner PHỤ chỉ chạy đầy đủ khi heartbeat của chính đã CŨ (chính
+# nghỉ/sập). Còn tươi -> phụ ĐỨNG IM (đồng bộ cursor rồi thoát) để lobby không bị nhân đôi
+# telemetry. RUNNER_ROLE: primary (mặc định) | backup. Bỏ trống -> primary (giữ hành vi cũ).
+RUNNER_ROLE = (os.environ.get("RUNNER_ROLE", "primary").strip().lower() or "primary")
+# Phụ coi 'chính còn sống' nếu heartbeat mới hơn ngần này phút. Nên > chu kỳ cron của
+# chính (mặc định 30') + biên trễ -> 45' là an toàn cho cadence 30'.
+BACKUP_STANDBY_MIN = _env_float("BACKUP_STANDBY_MINUTES", 45)
+HEARTBEAT_KEY = "heartbeat"
+
 # --- Trí tuệ (grounding data-live / trí nhớ / cảnh báo biến động) ---
 MEM_TURNS = 3                   # số lượt hội thoại nhớ cho mỗi user
 MEM_MAX_USERS = 40              # trần số user lưu trong bộ nhớ (chống phình state.json)
@@ -633,6 +644,69 @@ def kv_get(key: str):
         return lines[-1].strip() if lines else None
     except requests.RequestException:
         return None
+
+
+# --- Heartbeat phối hợp runner CHÍNH/PHỤ (xem RUNNER_ROLE) ---
+def write_heartbeat(private_key, did, now: int) -> None:
+    """Runner CHÍNH đóng dấu 'còn sống' lên KV để runner PHỤ biết đang được phủ sóng."""
+    kv_set(private_key, did, HEARTBEAT_KEY, str(now))
+
+
+def primary_alive(now: int, within_min: float) -> bool:
+    """True nếu heartbeat của runner chính còn tươi (mới hơn within_min phút). Đọc lỗi /
+    chưa có heartbeat -> coi như chính KHÔNG sống (để phụ tiếp quản, fail-open về phía có
+    người trực)."""
+    raw = kv_get(HEARTBEAT_KEY)
+    try:
+        last = int(raw)
+    except (TypeError, ValueError):
+        return False
+    return (now - last) <= int(within_min * 60)
+
+
+# --- State BỀN DÙNG CHUNG qua KV (đồng bộ cooldown giữa 2 runner) ---
+# state.json là CỤC BỘ mỗi runner: VM có đĩa bền, nhưng runner PHỤ (Actions cache có thể bị
+# xoá) và lúc phụ TIẾP QUẢN lại KHÔNG thấy mốc cooldown broadcast của chính (chỉ nằm trong
+# state.json) -> dễ đăng lại telemetry. Mirror các khóa BỀN lên KV (nguồn dùng chung cho cả
+# runner chính lẫn phụ) rồi hydrate lúc khởi động -> cooldown được tôn trọng ở mọi nơi.
+_TS_DURABLE_KEYS = ("last_seq", "last_telemetry", "last_manifest", "last_digest",
+                    "last_recap", "last_weekly_sample")
+_BLOB_DURABLE_KEYS = ("weekly_samples", "last_alert_price")
+DURABLE_STATE_KEYS = _TS_DURABLE_KEYS + _BLOB_DURABLE_KEYS
+STATE_KV_KEY = "state"
+
+
+def hydrate_durable_from_kv(state: dict) -> None:
+    """Kéo khóa BỀN từ KV vào state trước khi kiểm tra cooldown. Mốc thời gian: lấy
+    MAX(local, kv) -> không re-post khi local rỗng (runner mới / cache mất) hoặc cũ (2 runner).
+    Khóa blob (mẫu tuần / mốc giá alert): dùng KV khi local thiếu/rỗng."""
+    raw = kv_get(STATE_KV_KEY)
+    if not raw:
+        return
+    try:
+        remote = json.loads(raw)
+    except (ValueError, TypeError):
+        return
+    if not isinstance(remote, dict):
+        return
+    for k in _TS_DURABLE_KEYS:
+        if k in remote:
+            try:
+                state[k] = max(int(state.get(k) or 0), int(remote[k] or 0))
+            except (TypeError, ValueError):
+                pass
+    for k in _BLOB_DURABLE_KEYS:
+        if k in remote and not state.get(k):
+            state[k] = remote[k]
+
+
+def persist_durable_to_kv(private_key, did) -> None:
+    """Ghi khóa BỀN của state hiện tại (đọc lại từ file trong-run) lên KV — nguồn dùng
+    chung cho mọi runner. Gọi cuối main() sau khi các save_state đã cập nhật mốc."""
+    snap = load_state()
+    payload = {k: snap[k] for k in DURABLE_STATE_KEYS if k in snap}
+    if payload:
+        kv_set(private_key, did, STATE_KV_KEY, json.dumps(payload, ensure_ascii=False))
 
 
 # =========================================================================
@@ -1565,9 +1639,26 @@ def main():
     print(f"[agent] DID: {did}")
 
     state = load_state()
+    # Hydrate mốc cooldown/cursor BỀN từ KV -> chống re-post khi state cục bộ mất/lệch giữa runner
+    # và đồng bộ cooldown giữa 2 runner. Đặt TRƯỚC mọi kiểm tra _due bên dưới.
+    hydrate_durable_from_kv(state)
     now = int(time.time())
     # Run thủ công (workflow_dispatch) luôn phát để dễ kiểm chứng.
     force = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+
+    # 0) Phối hợp CHÍNH/PHỤ: runner PHỤ đứng im khi runner CHÍNH còn sống (heartbeat tươi),
+    #    để không nhân đôi telemetry/reply. Chạy tay (force) thì BỎ QUA standby để test được.
+    #    CHÍNH luôn đóng dấu heartbeat ngay để phụ thấy "cadence còn chạy" (kể cả vòng này
+    #    về sau có lỗi -> vòng chính kế tiếp tự phục hồi).
+    if RUNNER_ROLE == "backup" and not force and primary_alive(now, BACKUP_STANDBY_MIN):
+        # Cursor đã được hydrate từ KV ở trên -> lưu cục bộ để nếu sau này CHÍNH sập, phụ
+        # tiếp quản mà KHÔNG replay backlog. Không đăng gì trong vòng standby.
+        if state.get("last_seq") is not None:
+            save_state({"last_seq": state["last_seq"]})
+        print("[role] backup standby — heartbeat runner chính còn tươi, bỏ qua vòng này")
+        return
+    if RUNNER_ROLE == "primary":
+        write_heartbeat(private_key, did, now)
 
     # 1) Telemetry một chiều — THƯA hơn (tối thiểu TELEMETRY_INTERVAL_H giờ/lần)
     #    để giảm spam lobby; auto_respond (reciprocity) vẫn chạy mỗi vòng.
@@ -1721,6 +1812,10 @@ def main():
         _write_summary(summary)
         print("[run] OUTAGE toàn phần -> exit 1 để run hiện ĐỎ + báo email")
         sys.exit(1)
+
+    # Mirror mốc BỀN lên KV (nguồn dùng chung cho VM chính + Actions phụ). Đặt SAU
+    # kiểm tra outage để 1 lần kv_set thành công ở đây không che giấu outage thật.
+    persist_durable_to_kv(private_key, did)
 
     _write_summary(summary)
 

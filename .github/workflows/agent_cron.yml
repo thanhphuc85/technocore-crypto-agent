@@ -47,6 +47,10 @@ jobs:
         env:
           AGENT_PRIVATE_KEY: ${{ secrets.AGENT_PRIVATE_KEY }}
           STATE_FILE: state.json
+          # Runner PHỤ: VM Oracle Always Free là CHÍNH. Job này ĐỨNG IM khi heartbeat runner
+          # chính còn tươi (không nhân đôi telemetry/reply), chỉ chạy đầy đủ khi VM reboot/sập.
+          # Đổi thành 'primary' nếu KHÔNG dùng VM và muốn Actions chạy chính.
+          RUNNER_ROLE: ${{ vars.RUNNER_ROLE || 'backup' }}
           # Branding — đặt Repo Variables (Settings → Secrets and variables → Actions → Variables)
           # để fork tự đổi tên. Bỏ trống -> giữ danh tính agent tham chiếu (NguyenVuLV).
           AGENT_NAME: ${{ vars.AGENT_NAME }}
