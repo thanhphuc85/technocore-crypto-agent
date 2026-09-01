@@ -561,6 +561,45 @@ python -m pytest test_flop_unlock.py test_flop_pacer.py test_flop_faucet.py -q
 
 ---
 
+## Buying compute: inference sessions & stake delegation (scaffold)
+
+Per the FLOP agent spec (`intro.flop.network/agent.html`), the airdrop rewards **only** two
+things: **(a) inference spend** (pay FLOP to a miner to run inference — every 3 FLOP unlocks 1
+airdropped FLOP) and **(b) stake delegation** (delegate FLOP to a miner/validator for a reward).
+Chat/telemetry do **not** earn — they're for presence, not the airdrop. Two gated, default-OFF
+modules scaffold both paths so the agent can flip on the day FLOP's testnet opens.
+
+**[`flop_session.py`](flop_session.py) — inference sessions (primary path, 3:1).** Models the
+5-field **session request** (model-weight hash · max latency · FLOPs · security flags · fee),
+posts it to a mempool, receives **PoUI (Proof of Useful Inference)**, verifies the proof, and
+**settles** through `token_manager.spend()` — so a settled session on testnet accrues the 3:1
+unlock automatically. `run_inference_session(...)` runs the whole loop; a bad proof routes to
+`dispute()` (no payment) instead of `settle()`. In simulation a mock miner returns a mock PoUI so
+the happy path runs offline; simulation spend does **not** accrue unlock (only real spend does).
+
+> **Honest scope:** `verify_poui()` checks linkage + presence (proof is bound to the session, has
+> a commitment + miner signature), **not** the cryptographic soundness of the activation
+> commitment — that needs FLOP's published spec. Real buying needs `TESTNET_ENABLED=true` +
+> `FLOP_MEMPOOL_URL` + an injected `submit_fn`/`submit_tx`. Gate: `FLOP_SESSION_ENABLED`.
+
+**[`flop_stake.py`](flop_stake.py) — stake delegation (secondary path).** `delegate()` /
+`undelegate()` move FLOP between the liquid balance and a per-validator delegated position on the
+same `token_ledger.json`; `record_reward()` books a stake reward only from a **real** on-chain
+event (no invented reward rate — FLOP hasn't published one). Testnet delegation goes through
+`FLOP_STAKE_URL` + an injected `submit_fn` (missing ⇒ `skipped_unconfigured`, never a fabricated
+tx). Gate: `FLOP_STAKE_ENABLED`; agent entry point `maybe_delegate()`.
+
+Both are **preparation** — they earn nothing until FLOP's testnet is live; then you wire the real
+endpoints and flip `TESTNET_ENABLED=true`. Try them offline:
+
+```bash
+python flop_session.py
+python flop_stake.py
+python -m pytest test_flop_session.py test_flop_stake.py -q
+```
+
+---
+
 ## Running 24/7 on GitHub Actions
 
 The included workflow [`.github/workflows/agent_cron.yml`](.github/workflows/agent_cron.yml) runs the

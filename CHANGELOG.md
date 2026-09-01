@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Compute-buying scaffold: inference sessions (3:1) + stake delegation.** Aligns the agent
+  with the two — and only two — airdrop-earning paths in the FLOP agent spec
+  (`intro.flop.network/agent.html`): paying miners for inference, and delegating stake.
+  [`flop_session.py`](flop_session.py) models the 5-field session request (model-weight hash ·
+  max latency · FLOPs · security flags · fee) → mempool submit → PoUI → `verify_poui` →
+  `settle()` (via `token_manager.spend()`, so real settlement accrues the 3:1 unlock) or
+  `dispute()`; `run_inference_session()` runs the full loop, with a mock miner/PoUI in
+  simulation. [`flop_stake.py`](flop_stake.py) adds `delegate`/`undelegate`/`record_reward`/
+  `stake_status` on the shared `token_ledger.json` (a small public `token_manager.save_ledger`
+  helper was added for it). Both are gated default-OFF (`FLOP_SESSION_ENABLED` /
+  `FLOP_STAKE_ENABLED`), never fabricate a tx (missing endpoint ⇒ `skipped_unconfigured`), and
+  are honest about scope (`verify_poui` checks linkage/presence, not cryptographic soundness; no
+  invented stake-reward rate). Preparation only — earns nothing until FLOP testnet is live. Adds
+  17 tests (`test_flop_session.py`, `test_flop_stake.py`).
 - **Durable state mirrored to KV + optional multi-runner coordination.** The broadcast cooldown
   timers (`last_telemetry`/`last_manifest`/`last_digest`/`last_recap`) plus cursor and weekly/alert
   state are now mirrored to the KV store (`hydrate_durable_from_kv` / `persist_durable_to_kv`) and
