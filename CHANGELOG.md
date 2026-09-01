@@ -8,21 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Oracle Always Free VM as the primary runner, GitHub Actions as a hot standby.** New
-  [`deploy/`](deploy/) scripts run the one-shot agent on a real 24/7 VM via a `systemd` user
-  timer (every 30 min, `RUNNER_ROLE=primary`): `run-agent.sh` (git-pull self-update + `flock`
-  anti-overlap + loads secrets from an env file), a `systemd` service/timer, an env template,
-  and `oracle-vm-setup.sh` (one-shot installer that also enables `linger`). The primary stamps a
-  `heartbeat` timestamp on KV each run; the Actions workflow now runs with `RUNNER_ROLE=backup`
-  and **stands down** (syncs its cursor, posts nothing) while that heartbeat is fresh
-  (`BACKUP_STANDBY_MINUTES`, default 45), taking over a full run only when it goes stale (VM
-  reboot/down). This prevents double telemetry/replies from two runners. Manual
-  `workflow_dispatch` bypasses standby so the backup can still be tested. Durable cooldown timers
-  (`last_telemetry`/`last_manifest`/`last_digest`/`last_recap`) plus cursor and weekly/alert state
-  are mirrored to KV (`hydrate_durable_from_kv` / `persist_durable_to_kv`) and re-hydrated at
-  startup, so cooldowns are respected across runners regardless of local state. Adds tests for
-  heartbeat freshness, durable hydrate/persist, and the standby/force gate. The scheme is clean
-  for one primary + one backup; a third concurrent runner would need a KV lease/lock.
+- **Durable state mirrored to KV + optional multi-runner coordination.** The broadcast cooldown
+  timers (`last_telemetry`/`last_manifest`/`last_digest`/`last_recap`) plus cursor and weekly/alert
+  state are now mirrored to the KV store (`hydrate_durable_from_kv` / `persist_durable_to_kv`) and
+  re-hydrated at startup, so the agent won't re-post broadcasts even if the GitHub Actions
+  `state.json` cache is evicted. Also adds a `RUNNER_ROLE` (`primary`/`backup`) + KV **heartbeat**
+  handoff so a second runner can be added later without double-posting: the primary stamps a
+  heartbeat each run; a `backup` **stands down** while that heartbeat is fresh
+  (`BACKUP_STANDBY_MINUTES`, default 45) and only takes over when it goes stale. Manual
+  `workflow_dispatch` bypasses standby. The Actions workflow defaults to `RUNNER_ROLE=primary`
+  (single runner). Adds tests for heartbeat freshness, durable hydrate/persist, and the
+  standby/force gate. The scheme is clean for one primary + one backup; a third concurrent runner
+  would need a KV lease/lock.
 - **DeepSeek is now the primary LLM provider, with Gemini as the fallback.** `LLM_PROVIDER=auto`
   (default) builds a provider chain **DeepSeek → Gemini → OpenAI**, keeping only providers that
   have a key; if the primary errors at call time, the agent automatically retries the next one

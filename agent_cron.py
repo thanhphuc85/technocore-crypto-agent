@@ -105,8 +105,9 @@ MANIFEST_ROOM = (os.environ.get("MANIFEST_ROOM", "").strip() or ROOM)
 MANIFEST_INTERVAL_H = _env_float("MANIFEST_INTERVAL_HOURS", 6)
 TELEMETRY_INTERVAL_H = _env_float("TELEMETRY_INTERVAL_HOURS", 1)
 
-# --- Phối hợp 2 runner (VM Oracle CHÍNH + GitHub Actions PHỤ) qua heartbeat trên KV ---
-# Chạy CÙNG agent ở 2 nơi mà KHÔNG double-post: runner CHÍNH ghi 'heartbeat' (mốc thời
+# --- Phối hợp nhiều runner (TÙY CHỌN: 1 CHÍNH + 1 PHỤ) qua heartbeat trên KV ---
+# Mặc định chỉ Actions chạy (RUNNER_ROLE=primary). Nếu thêm runner thứ 2 chạy CÙNG agent thì
+# tránh double-post: runner CHÍNH ghi 'heartbeat' (mốc thời
 # gian) lên KV mỗi vòng; runner PHỤ chỉ chạy đầy đủ khi heartbeat của chính đã CŨ (chính
 # nghỉ/sập). Còn tươi -> phụ ĐỨNG IM (đồng bộ cursor rồi thoát) để lobby không bị nhân đôi
 # telemetry. RUNNER_ROLE: primary (mặc định) | backup. Bỏ trống -> primary (giữ hành vi cũ).
@@ -1813,7 +1814,7 @@ def main():
         print("[run] OUTAGE toàn phần -> exit 1 để run hiện ĐỎ + báo email")
         sys.exit(1)
 
-    # Mirror mốc BỀN lên KV (nguồn dùng chung cho VM chính + Actions phụ). Đặt SAU
+    # Mirror mốc BỀN lên KV (chống mất khi cache Actions bị xoá + dùng chung nếu có runner phụ). Đặt SAU
     # kiểm tra outage để 1 lần kv_set thành công ở đây không che giấu outage thật.
     persist_durable_to_kv(private_key, did)
 

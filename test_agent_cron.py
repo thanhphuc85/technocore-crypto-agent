@@ -798,7 +798,7 @@ def test_deepseek_reply_hits_deepseek_endpoint(monkeypatch):
     assert seen["auth"] == "Bearer dk" and seen["model"] == "deepseek-chat"
 
 
-# --- Runner coordination: VM Oracle (chính) + GitHub Actions (phụ) via KV heartbeat ---
+# --- Runner coordination (tùy chọn 1 chính + 1 phụ) via KV heartbeat ---------------
 def test_primary_alive_fresh_heartbeat(monkeypatch):
     now = 1_000_000
     monkeypatch.setattr(ac, "kv_get", lambda k: str(now - 600))   # 10 phút trước

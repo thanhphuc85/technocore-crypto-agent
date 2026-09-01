@@ -570,50 +570,24 @@ agent every 30 minutes and on demand:
 2. Keep the repo **public** for auditability; enable Actions.
 3. `Actions → Technocore Agent Automation → Run workflow` — the **ask** input posts an AI reply instantly.
 
-State persists across runs via `actions/cache` (`state.json`) **and** the KV `cursor`.
+State persists across runs via `actions/cache` (`state.json`) **and** the KV store: the message
+`cursor` plus the broadcast cooldown timers (`last_telemetry`/`last_manifest`/`last_digest`/
+`last_recap`) are mirrored to KV (`hydrate_durable_from_kv` / `persist_durable_to_kv`) and
+re-hydrated at startup, so even if the Actions cache is evicted the agent won't re-post.
 
----
+### Optional: adding a second runner (hot standby)
 
-## Running on an Oracle Always Free VM (primary) with GitHub Actions as backup
+The workflow runs as `RUNNER_ROLE=primary` (the single runner). If you ever add a second runner
+(e.g. an always-on VM), the agent already supports a no-double-post handoff via a KV **heartbeat**:
 
-You can run the agent on **two** runners without double-posting: a free **Oracle Cloud Always
-Free** VM as the *primary* (a real 24/7 server — no sleep, no minute limits), and GitHub Actions
-as a *backup* that only takes over when the VM reboots or goes down.
+- The **primary** (`RUNNER_ROLE=primary`) stamps a `heartbeat` timestamp on KV every run.
+- A **backup** (`RUNNER_ROLE=backup`) **stands down** while that heartbeat is fresh
+  (`BACKUP_STANDBY_MINUTES`, default 45) and only runs a full cycle when it goes stale (primary
+  down). A manual `workflow_dispatch` bypasses standby for testing.
 
-**Why a VM fits best:** the agent is a one-shot script, so a `systemd` timer runs
-`python agent_cron.py` every 30 min directly — no HTTP wrapper, no container needed. The VM has a
-persistent disk (so `state.json` survives too) and never sleeps.
-
-**How they coordinate (KV heartbeat):** the primary (`RUNNER_ROLE=primary`) stamps a `heartbeat`
-timestamp on KV every run. The backup (`RUNNER_ROLE=backup`) reads it and, while it's fresh
-(`BACKUP_STANDBY_MINUTES`, default 45), **stands down** — it syncs its cursor and posts nothing,
-so telemetry/replies are never doubled. If the heartbeat goes stale (the VM rebooted or the box is
-down), the backup runs a full cycle and keeps the agent alive. A manual `workflow_dispatch`
-bypasses standby so you can still test the backup on demand. Durable cooldown timers are mirrored
-to KV (`hydrate_durable_from_kv` / `persist_durable_to_kv`) so the two runners never re-post.
-
-**Setup (one-time, on the VM):** see [`deploy/`](deploy/) — `run-agent.sh` (git-pull + `flock` +
-loads secrets), a `systemd` user service/timer, and an env template.
-
-```bash
-# On a fresh Oracle Ubuntu VM (Ampere ARM, or the always-available E2.1.Micro AMD):
-git clone https://github.com/thanhphuc85/technocore-crypto-agent.git
-bash technocore-crypto-agent/deploy/oracle-vm-setup.sh
-nano ~/technocore-agent.env          # fill AGENT_PRIVATE_KEY + keys, then it's live
-```
-
-The setup script installs Python, a venv, the `systemd` user timer (every 30 min), and enables
-`linger` so it runs without you logged in. Secrets live in `~/technocore-agent.env` (chmod 600) —
-never committed. Leave the GitHub Actions workflow as-is; it already defaults to
-`RUNNER_ROLE=backup`. To run **only** on Actions (no VM), set repo Variable `RUNNER_ROLE=primary`.
-
-| `RUNNER_ROLE` | Behavior |
-|---|---|
-| `primary` (VM default) | Full run every cycle; stamps the KV heartbeat. |
-| `backup` (Actions default) | Stands down while the primary heartbeat is fresh; full run when it's stale. |
-
-> **Note:** the heartbeat scheme is clean for exactly **one primary + one backup**. Running a
-> *third* concurrent runner would need a KV lease/lock so only one runs per cycle.
+Set repo Variable `RUNNER_ROLE=backup` on whichever runner should be the standby. The scheme is
+clean for exactly **one primary + one backup**; a third concurrent runner would need a KV
+lease/lock.
 
 ---
 
