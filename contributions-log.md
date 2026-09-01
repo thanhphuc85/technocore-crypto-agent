@@ -24,7 +24,7 @@
 > *Contributions Log* workflow — **never commit edits to it** (CI rejects a PR that does); change
 > the generator instead. · *Tự sinh &amp; do bot quản lý. File này do `contributions_log.py` viết ra và
 > được làm mới trên `main` mỗi 6 giờ — **đừng commit sửa đổi vào nó** (CI sẽ chặn PR làm vậy); hãy
-> sửa generator.* Last refreshed / Cập nhật lần cuối: **`2026-09-01T11:41:28Z`**
+> sửa generator.* Last refreshed / Cập nhật lần cuối: **`2026-09-01T16:42:05Z`**
 
 ---
 
@@ -95,7 +95,7 @@ Status legend / *Chú giải*: ✅ **Verified** — anchor is live now / *mỏ n
 | 08 | **Injection-Guarded Safety**<br>*An toàn chắn injection* | codebase | sweep · isolate · guard | Untrusted input isolation: control/bidi/zero-width sweep, LLM delimiter, secret-leak guard.<br>*Cô lập input không tin cậy: quét control/bidi/zero-width, delimiter cho LLM, chắn rò rỉ secret.* | ✅ |
 | 09 | **Automated Agent (24/7)**<br>*Agent tự động 24/7* | GitHub Actions | `agent_cron.yml` | Scheduled signed runs keeping beacon, telemetry, manifest live.<br>*Chạy đã-ký theo lịch, giữ đèn hiệu, telemetry, manifest luôn sống.* | ✅ |
 | 10 | **CI + Release Pipeline**<br>*Pipeline CI + phát hành* | GitHub Actions | `ci.yml` · `release.yml` | 4-version matrix (3.9–3.12) + PyPI Trusted Publishing on tag (v1.2.1). All green.<br>*Ma trận 4 phiên bản + phát hành PyPI theo tag. Tất cả xanh.* | ✅ |
-| 11 | **Test Suite &amp; Quality**<br>*Bộ test &amp; chất lượng* | repo | 181 tests | `pytest` suite (crypto, safety, network, FLOP ledger) + coverage in CI.<br>*Bộ `pytest` (crypto, an toàn, mạng, sổ cái FLOP) + coverage trong CI.* | ✅ |
+| 11 | **Test Suite &amp; Quality**<br>*Bộ test &amp; chất lượng* | repo | 198 tests | `pytest` suite (crypto, safety, network, FLOP ledger) + coverage in CI.<br>*Bộ `pytest` (crypto, an toàn, mạng, sổ cái FLOP) + coverage trong CI.* | ✅ |
 
 ---
 
@@ -152,4 +152,4 @@ python -c "import technocore_agent; print(technocore_agent.__version__)"
 ---
 
 <sub>Auto-generated for Flop Labs Proof-of-Work review · *Tự sinh cho phần duyệt Bằng chứng Đóng góp
-của Flop Labs* · agent `NguyenVuLV` · `did:key:z6MkiCxCfTP6gHmWrJvPgF4UtxYL4upzry6hTAs6g1ni2C8g` · as of / *tính đến* 2026-09-01T11:41:28Z.</sub>
+của Flop Labs* · agent `NguyenVuLV` · `did:key:z6MkiCxCfTP6gHmWrJvPgF4UtxYL4upzry6hTAs6g1ni2C8g` · as of / *tính đến* 2026-09-01T16:42:05Z.</sub>
