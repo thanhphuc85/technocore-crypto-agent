@@ -327,9 +327,41 @@ def test_a2a_fear(monkeypatch):
 
 
 def test_a2a_help_and_about():
-    assert "ok help verbs=price|fear|help|about" in ac.a2a_reply(_mention("help"), "bob")
+    h = ac.a2a_reply(_mention("help"), "bob")
+    assert "ok help verbs=" in h and "price" in h and "market" in h and "gas" in h
     ab = ac.a2a_reply(_mention("about"), "bob")
     assert "ok about" in ab and ac.REPO_URL in ab
+
+
+def test_a2a_market_top_dominance_gas(monkeypatch):
+    monkeypatch.setattr(ac, "get_market",
+                        lambda ids: {i: {"usd": 100.0, "chg": 1.0} for i in ids})
+    monkeypatch.setattr(ac, "get_top_movers", lambda n=3: [("AAA", 9.1), ("BBB", 4.2)])
+    monkeypatch.setattr(ac, "get_dominance", lambda: (54.3, 17.1))
+    monkeypatch.setattr(ac, "get_eth_gas", lambda: 12.5)
+    assert "ok market BTC 100.0" in ac.a2a_reply(_mention("market"), "bob")
+    assert "ok top AAA +9.1%" in ac.a2a_reply(_mention("top"), "bob")
+    assert "ok dominance btc=54.3% eth=17.1%" in ac.a2a_reply(_mention("dominance"), "bob")
+    assert "ok gas 12.5gwei" in ac.a2a_reply(_mention("gas"), "bob")
+
+
+def test_a2a_gas_feed_offline(monkeypatch):
+    monkeypatch.setattr(ac, "get_eth_gas", lambda: None)
+    assert "err feed-offline gas" in ac.a2a_reply(_mention("gas"), "bob")
+
+
+def test_a2a_price_new_coin(monkeypatch):
+    # coin mới thêm (vd SUI) phải resolve được qua COIN_IDS mở rộng.
+    assert ac.COIN_IDS.get("sui") == "sui"
+    monkeypatch.setattr(ac, "get_market", lambda ids: {ids[0]: {"usd": 3.14, "chg": -1.2}})
+    assert "ok price SUI 3.14" in ac.a2a_reply(_mention("price sui"), "bob")
+
+
+def test_expanded_coin_ids_have_binance_fallback():
+    # Mọi coin mới nên có cặp Binance dự phòng (trừ alias tên đầy đủ trùng id gốc).
+    for sym in ("ltc", "uni", "sui", "arb", "op", "aave", "tia", "mkr"):
+        cid = ac.COIN_IDS[sym]
+        assert cid in ac.BINANCE_SYMBOLS, f"{sym} ({cid}) thiếu Binance fallback"
 
 
 def test_a2a_natural_language_is_not_a2a():

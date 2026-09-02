@@ -402,6 +402,15 @@ COIN_IDS = {
     "xrp": "ripple", "ada": "cardano", "doge": "dogecoin", "avax": "avalanche-2",
     "link": "chainlink", "dot": "polkadot", "matic": "matic-network",
     "ton": "the-open-network", "trx": "tron", "atom": "cosmos", "near": "near",
+    # Mở rộng: các đồng phổ biến khác (CoinGecko chính, Binance dự phòng bên dưới)
+    "ltc": "litecoin", "bch": "bitcoin-cash", "uni": "uniswap", "shib": "shiba-inu",
+    "pepe": "pepe", "wbtc": "wrapped-bitcoin", "sui": "sui", "apt": "aptos",
+    "arb": "arbitrum", "op": "optimism", "inj": "injective-protocol", "ldo": "lido-dao",
+    "aave": "aave", "fil": "filecoin", "etc": "ethereum-classic", "ftm": "fantom",
+    "algo": "algorand", "hbar": "hedera-hashgraph", "vet": "vechain",
+    "icp": "internet-computer", "stx": "blockstack", "sei": "sei-network",
+    "tia": "celestia", "rune": "thorchain", "grt": "the-graph", "mkr": "maker",
+    # Alias tên đầy đủ -> id (để câu tự nhiên vẫn khớp)
     "bitcoin": "bitcoin", "ethereum": "ethereum", "solana": "solana",
 }
 
@@ -412,6 +421,15 @@ BINANCE_SYMBOLS = {
     "dogecoin": "DOGEUSDT", "tron": "TRXUSDT", "chainlink": "LINKUSDT",
     "polkadot": "DOTUSDT", "cosmos": "ATOMUSDT", "near": "NEARUSDT",
     "avalanche-2": "AVAXUSDT",
+    "litecoin": "LTCUSDT", "bitcoin-cash": "BCHUSDT", "uniswap": "UNIUSDT",
+    "shiba-inu": "SHIBUSDT", "pepe": "PEPEUSDT", "wrapped-bitcoin": "WBTCUSDT",
+    "sui": "SUIUSDT", "aptos": "APTUSDT", "arbitrum": "ARBUSDT", "optimism": "OPUSDT",
+    "injective-protocol": "INJUSDT", "lido-dao": "LDOUSDT", "aave": "AAVEUSDT",
+    "filecoin": "FILUSDT", "ethereum-classic": "ETCUSDT", "fantom": "FTMUSDT",
+    "algorand": "ALGOUSDT", "hedera-hashgraph": "HBARUSDT", "vechain": "VETUSDT",
+    "internet-computer": "ICPUSDT", "blockstack": "STXUSDT", "sei-network": "SEIUSDT",
+    "celestia": "TIAUSDT", "thorchain": "RUNEUSDT", "the-graph": "GRTUSDT",
+    "maker": "MKRUSDT",
 }
 
 
@@ -1358,8 +1376,9 @@ def llm_reply(user_text: str, sender_nick=None, state=None, mem_key=None):
 # câu dài/nhiều token -> KHÔNG coi là A2A, để rơi xuống LLM cho người hỏi tự nhiên.
 # CHỈ-ĐỌC theo thiết kế: không verb nào GHI state từ input untrusted (không remember/kv-set)
 # -> một peer thù địch không thể bơm dữ liệu vào bộ nhớ/hồ sơ của agent qua giao thức này.
-A2A_VERBS = {"price", "fear", "help", "about"}
-_A2A_PROTO = f"{HANDLE} price|fear|help|about [coin]"
+_A2A_VERB_LIST = "price|market|top|trending|dominance|fear|gas|help|about"
+A2A_VERBS = set(_A2A_VERB_LIST.split("|"))
+_A2A_PROTO = f"{HANDLE} {_A2A_VERB_LIST} [coin]"
 
 
 def a2a_reply(text: str, sender_nick: str):
@@ -1397,6 +1416,44 @@ def a2a_reply(text: str, sender_nick: str):
             return line(f"err feed-offline {sym.upper()} | t={ts}")
         return line(f"ok price {ID_TO_SYM.get(cid, sym.upper())} {d['usd']}"
                     f"{_fmt_chg(d.get('chg'))} | src=coingecko/binance | t={ts}")
+    if verb == "market":
+        if args:
+            return None
+        pairs = [("BTC", "bitcoin"), ("ETH", "ethereum"), ("SOL", "solana"), ("BNB", "binancecoin")]
+        m = get_market([cid for _, cid in pairs])
+        parts = [f"{sym} {m[cid]['usd']}{_fmt_chg(m[cid].get('chg'))}"
+                 for sym, cid in pairs if m.get(cid, {}).get("usd") is not None]
+        if not parts:
+            return line(f"err feed-offline market | t={ts}")
+        return line(f"ok market {' · '.join(parts)} | src=coingecko/binance | t={ts}")
+    if verb == "top":
+        if args:
+            return None
+        movers = get_top_movers(3)
+        if not movers:
+            return line(f"err feed-offline top | t={ts}")
+        return line(f"ok top {' · '.join(f'{s} {c:+.1f}%' for s, c in movers)} | src=coingecko | t={ts}")
+    if verb == "trending":
+        if args:
+            return None
+        tr = get_trending(5)
+        if not tr:
+            return line(f"err feed-offline trending | t={ts}")
+        return line(f"ok trending {','.join(tr)} | src=coingecko | t={ts}")
+    if verb == "dominance":
+        if args:
+            return None
+        b, e = get_dominance()
+        if b is None or e is None:
+            return line(f"err feed-offline dominance | t={ts}")
+        return line(f"ok dominance btc={b:.1f}% eth={e:.1f}% | src=coingecko | t={ts}")
+    if verb == "gas":
+        if args:
+            return None
+        g = get_eth_gas()
+        if g is None:
+            return line(f"err feed-offline gas | t={ts}")
+        return line(f"ok gas {g}gwei | src=publicnode | t={ts}")
     if verb == "fear":
         if args:
             return None
@@ -1407,7 +1464,7 @@ def a2a_reply(text: str, sender_nick: str):
     if verb == "help":
         if args:
             return None
-        return line(f"ok help verbs=price|fear|help|about | proto={_A2A_PROTO} | t={ts}")
+        return line(f"ok help verbs={_A2A_VERB_LIST} | proto={_A2A_PROTO} | t={ts}")
     # verb == "about"
     if args:
         return None
@@ -1442,7 +1499,7 @@ def build_reply(sender_nick: str, text: str, state=None, sender_id=None) -> str:
         return tag("commands: !price [coin] · !market · !top · !trending · !dominance · "
                    "!gas · !fear · !digest · !recap · !time · !ping · !about — or just @mention "
                    "me a question and I'll answer with live-grounded AI. "
-                   f"Agents: '{HANDLE} price eth' returns a machine-readable line (verbs: price|fear|help|about).")
+                   f"Agents: '{HANDLE} price eth' returns a machine-readable line (verbs: {_A2A_VERB_LIST}).")
     if has("!about"):
         return tag(f"I'm {AGENT_NAME}, an autonomous Ed25519 agent: signed oracle telemetry, "
                    "Gemini AI replies, KV store, injection-guarded. Open-source SDK on GitHub.")
