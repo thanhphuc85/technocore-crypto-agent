@@ -416,6 +416,30 @@ def test_post_message_returns_false_on_network_error(pk, monkeypatch):
     assert ac.post_message(pk, ac.did_of(pk), "hi") is False
 
 
+# --- Health-guard: bắt outage ĐƯỜNG GHI (server đọc được nhưng POST 503) -----------------
+def test_posts_degraded_write_path_health(monkeypatch):
+    monkeypatch.setattr(ac, "_post_ok_count", 0)
+    monkeypatch.setattr(ac, "_post_fail_count", 0)
+    assert ac.posts_degraded() is False        # chưa thử post nào -> chưa kết luận sập
+    ac._note_post(False)
+    assert ac.posts_degraded() is True         # đã thử, toàn fail -> đường ghi sập
+    ac._note_post(True)
+    assert ac.posts_degraded() is False         # có 1 POST 200 -> còn sống, không chặn nhầm
+
+
+def test_post_message_503_marks_write_degraded(pk, monkeypatch):
+    monkeypatch.setattr(ac, "_post_ok_count", 0)
+    monkeypatch.setattr(ac, "_post_fail_count", 0)
+    monkeypatch.setattr(ac.requests, "post", lambda url, json=None, **k: _Resp(status=503))
+    assert ac.post_message(pk, ac.did_of(pk), "hi") is False
+    assert ac.posts_degraded() is True         # 503 tính là fail ghi
+    def boom(*a, **k):
+        raise ac.requests.RequestException("down")
+    monkeypatch.setattr(ac.requests, "post", boom)
+    ac.post_message(pk, ac.did_of(pk), "hi2")
+    assert ac._post_fail_count == 2            # cả exception cũng tính fail
+
+
 def test_fetch_messages_returns_json(monkeypatch):
     monkeypatch.setattr(ac.requests, "get",
                         lambda url, headers=None, timeout=None: _Resp(data=[{"seq": 1}]))

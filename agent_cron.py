@@ -14,11 +14,31 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 # = 0 ở cuối run nghĩa là server không truy cập được (outage toàn phần) -> run nên
 # ĐỎ để lộ ra, thay vì xanh âm thầm. Chỉ đếm host chính, KHÔNG đếm CoinGecko/Binance.
 _server_ok_count = 0
+# Đếm RIÊNG kết quả POST (ghi): server có thể còn ĐỌC được (GET 200) nhưng CHẶN GHI (POST
+# 503/timeout) — outage kiểu này _server_ok_count KHÔNG lộ ra. Dùng để guard việc tốn-
+# inference-rồi-không-giao-được (vd kibble answer trước rồi DELIVER 503).
+_post_ok_count = 0
+_post_fail_count = 0
 
 
 def _note_server_ok() -> None:
     global _server_ok_count
     _server_ok_count += 1
+
+
+def _note_post(ok: bool) -> None:
+    global _post_ok_count, _post_fail_count
+    if ok:
+        _post_ok_count += 1
+    else:
+        _post_fail_count += 1
+
+
+def posts_degraded() -> bool:
+    """True khi trong run này ĐÃ thử POST mà KHÔNG lần nào thành công -> đường GHI đang sập.
+    Thận trọng: chỉ cần 1 POST 200 là coi như đường ghi còn sống (không chặn nhầm khi lỗi
+    chỉ thoáng qua)."""
+    return _post_fail_count > 0 and _post_ok_count == 0
 
 
 def _write_summary(lines) -> None:
@@ -587,10 +607,12 @@ def post_message(private_key, did, text, room=ROOM) -> bool:
         ok = res.status_code == 200
         if ok:
             _note_server_ok()
+        _note_post(ok)                   # đếm sức khoẻ đường GHI (kể cả 503 -> fail)
         print(f"[post] {res.status_code} | r/{room} | {text[:60]}")
         return ok
     except requests.RequestException as e:
         # Server lag / mạng lỗi tạm thời: log lại nhưng không fail workflow
+        _note_post(False)
         print(f"[post] request_failed | {e}")
         return False
 
@@ -1981,7 +2003,15 @@ def main():
     #      tới khi FLOP_KIBBLE_DRY_RUN=off. Nội dung JOB là UNTRUSTED (xem answer_kibble_job).
     #      Bọc kín: mọi lỗi bị nuốt để không làm sập run. Trạng thái độc lập trong state.
     kibble_status = "off"
-    if KIBBLE_ENABLED:
+    if KIBBLE_ENABLED and posts_degraded():
+        # HEALTH-GUARD: technocore.chat còn ĐỌC nhưng CHẶN GHI (mọi POST 503/timeout) -> nếu
+        # chạy worker thì sẽ tốn inference answer job rồi DELIVER 503 (phí + ghi FLOP spend
+        # "treo" cho việc không giao được). Bỏ qua vòng này; cursor kibble KHÔNG tiến nên
+        # job vẫn còn đó, làm lại khi server sống.
+        kibble_status = "skip-outage"
+        print(f"[kibble] bỏ qua — đường ghi technocore.chat đang lỗi "
+              f"(post ok={_post_ok_count} fail={_post_fail_count}); không phí inference.")
+    elif KIBBLE_ENABLED:
         try:
             import flop_kibble
             state["kibble_did"] = did          # để select_jobs bỏ qua JOB do chính mình đăng

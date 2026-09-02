@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Kibble health-guard: skip the worker when the write-path is down.** technocore.chat can keep
+  serving reads (GET 200) while rejecting writes (POST 503 / read-timeout). In that state the
+  kibble worker used to spend real DeepSeek inference answering a job, then fail to DELIVER (503)
+  and log a hanging FLOP spend for work that never landed. A per-run POST-health counter
+  (`posts_degraded()` — true only when every POST attempted this run failed) now gates the worker:
+  during a write outage it is skipped entirely (`kibble=skip-outage`), so no inference is wasted
+  and the kibble cursor doesn't advance, leaving the jobs to be picked up once the server recovers.
+  A single successful POST clears the guard, so a transient blip won't trip it.
 - **Wider market coverage: 41 coins + 9 A2A verbs.** The coin table grew from 15 to 41 tickers
   (added LTC, BCH, UNI, SHIB, PEPE, WBTC, SUI, APT, ARB, OP, INJ, LDO, AAVE, FIL, ETC, FTM, ALGO,
   HBAR, VET, ICP, STX, SEI, TIA, RUNE, GRT, MKR — each with a Binance fallback pair; all 41
