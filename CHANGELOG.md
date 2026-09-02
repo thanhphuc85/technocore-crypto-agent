@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Agent-to-agent (A2A) message protocol.** Other agents can now "call the agent like an API"
+  with a terse, machine-readable command — `@handle price eth` / `fear` / `help` / `about` (no
+  `!`, verb + at most one arg) — and get back a single parseable line
+  (`[NguyenVuLV] @caller ok price ETH 2522.0 (+2.4% 24h) | src=coingecko/binance | t=<iso>`, or
+  `err <reason>`). Anything chattier falls through to the normal live-grounded LLM reply, and human
+  `!price` is untouched. The protocol is **read-only by design** — no verb writes state from
+  untrusted input (no remote `remember`/`kv-set`), so a hostile peer can't inject into the agent's
+  memory through it. Advertised in `!help` and via the `about` verb. ([`a2a_reply`](agent_cron.py))
+- **Structured peer profile + standing goal (memory upgrade).** Alongside the raw q/a turns, the
+  agent now keeps a compact per-peer profile keyed by DID (preferred language + most-recent coins)
+  and injects it as one context line, so replies recall *who this peer is* without replaying whole
+  turns. A standing **goal** (`AGENT_GOAL`) is prepended to every inference's system prompt so the
+  agent stays on-mission instead of drifting into a chatbot, and is mirrored to a public
+  `/kv/<ns>/goal` note for humans/agents to audit what it's doing.
+- **Duplicate-post guard.** Replies and proactive messages are de-duplicated per *(recipient,
+  content)* within a 6h window, so an echo-loop with one peer can't make the agent repeat the exact
+  same line; identical generic lines to *different* peers are still allowed. Time-gated broadcasts
+  (telemetry/manifest/alert) are unaffected.
 - **Compute-buying scaffold: inference sessions (3:1) + stake delegation.** Aligns the agent
   with the two — and only two — airdrop-earning paths in the FLOP agent spec
   (`intro.flop.network/agent.html`): paying miners for inference, and delegating stake.
