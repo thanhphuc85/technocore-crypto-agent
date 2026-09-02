@@ -248,6 +248,105 @@ def test_llm_reply_memory_falls_back_to_nick_without_did(monkeypatch):
     assert "friend" in state["mem"]
 
 
+# --- Hồ sơ peer có cấu trúc (#3) --------------------------------------------------
+
+def test_prof_update_captures_lang_and_coins():
+    state = {}
+    ac.prof_update(state, "did:key:zX", "giá ETH và BTC thế nào?")
+    p = state["prof"]["did:key:zX"]
+    assert p["lang"] == "vi"
+    assert p["coins"][:2] == ["ETH", "BTC"]                 # coin mới nhất đứng trước
+    assert p["seen"] == 1
+
+
+def test_prof_update_caps_coins_and_dedupes():
+    state = {}
+    for msg in ("price btc", "price eth", "price sol", "price bnb"):
+        ac.prof_update(state, "did:key:zX", msg)
+    coins = state["prof"]["did:key:zX"]["coins"]
+    assert len(coins) == ac.PROFILE_MAX_COINS               # giữ tối đa N coin gần nhất
+    assert coins[0] == "BNB" and "BTC" not in coins         # cũ nhất bị đẩy ra
+
+
+def test_prof_line_renders_context_or_empty():
+    assert ac.prof_line({}, "did:key:zX") == ""            # chưa biết gì
+    state = {}
+    ac.prof_update(state, "did:key:zX", "eth price?")
+    line = ac.prof_line(state, "did:key:zX")
+    assert "lang=en" in line and "ETH" in line
+
+
+# --- Chống đăng trùng (#7) --------------------------------------------------------
+
+def test_dedup_blocks_same_text_same_peer_within_window():
+    state = {}
+    now = 1_000_000
+    who = "did:key:zPEER"
+    assert ac.is_dup_out(state, "@zPEER hi", now, who) is False
+    ac.note_out(state, "@zPEER hi", now, who)
+    assert ac.is_dup_out(state, "@zPEER hi", now + 5, who) is True       # trùng đúng peer
+
+
+def test_dedup_ignores_same_text_different_peer():
+    state = {}
+    now = 1_000_000
+    ac.note_out(state, "ok", now, "did:key:zA")
+    assert ac.is_dup_out(state, "ok", now, "did:key:zB") is False        # peer khác -> không trùng
+
+
+def test_dedup_expires_after_window():
+    state = {}
+    now = 1_000_000
+    who = "did:key:zPEER"
+    ac.note_out(state, "hi", now, who)
+    assert ac.is_dup_out(state, "hi", now + ac.DEDUP_WINDOW_S + 1, who) is False  # hết hạn
+
+
+# --- Giao thức agent-to-agent (#5) ------------------------------------------------
+
+def _mention(rest):
+    return f"{ac.HANDLE} {rest}"
+
+
+def test_a2a_price_returns_machine_line(monkeypatch):
+    monkeypatch.setattr(ac, "get_market", lambda ids: {ids[0]: {"usd": 2522.0, "chg": 2.4}})
+    out = ac.a2a_reply(_mention("price eth"), "bob")
+    assert "ok price ETH 2522.0 (+2.4% 24h)" in out
+    assert "src=coingecko/binance" in out and "| t=" in out
+
+
+def test_a2a_price_unknown_coin(monkeypatch):
+    out = ac.a2a_reply(_mention("price notacoin"), "bob")
+    assert "err unknown-coin" in out
+
+
+def test_a2a_fear(monkeypatch):
+    monkeypatch.setattr(ac, "get_fear_greed", lambda: (33, "Fear"))
+    out = ac.a2a_reply(_mention("fear"), "bob")
+    assert "ok fear 33/100 Fear" in out
+
+
+def test_a2a_help_and_about():
+    assert "ok help verbs=price|fear|help|about" in ac.a2a_reply(_mention("help"), "bob")
+    ab = ac.a2a_reply(_mention("about"), "bob")
+    assert "ok about" in ab and ac.REPO_URL in ab
+
+
+def test_a2a_natural_language_is_not_a2a():
+    # Câu dài (nhiều token) -> KHÔNG phải A2A, để rơi xuống LLM cho người.
+    assert ac.a2a_reply(_mention("price of eth please?"), "bob") is None
+
+
+def test_a2a_ignores_human_bang_command():
+    # "!price" là lệnh người -> A2A trả None, để luồng !command xử lý.
+    assert ac.a2a_reply(_mention("!price eth"), "bob") is None
+
+
+def test_a2a_read_only_no_state_write(monkeypatch):
+    # Giao thức A2A CHỈ-ĐỌC: verb lạ (vd 'remember') KHÔNG được nhận -> None (không ghi state).
+    assert ac.a2a_reply(_mention("remember BTC watch"), "bob") is None
+
+
 # --- Lớp mạng (requests giả) -----------------------------------------------------
 
 def test_post_message_signs_canonical_and_posts(pk, monkeypatch):
