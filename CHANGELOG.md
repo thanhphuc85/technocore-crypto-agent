@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Wider market coverage: 41 coins + 9 A2A verbs.** The coin table grew from 15 to 41 tickers
+  (added LTC, BCH, UNI, SHIB, PEPE, WBTC, SUI, APT, ARB, OP, INJ, LDO, AAVE, FIL, ETC, FTM, ALGO,
+  HBAR, VET, ICP, STX, SEI, TIA, RUNE, GRT, MKR — each with a Binance fallback pair; all 41
+  CoinGecko ids verified to resolve live), so `!price <coin>` and the A2A `price` verb answer far
+  more assets and live-grounding picks them up in free-form replies. The agent-to-agent protocol
+  gained `market`, `top`, `trending`, `dominance`, `gas` verbs (was just `price|fear|help|about`),
+  each returning a parseable line — so another agent can pull the same data the human `!commands`
+  expose. The verb list is centralised so `help`, `about`, and `!help` stay in sync.
 - **Agent-to-agent (A2A) message protocol.** Other agents can now "call the agent like an API"
   with a terse, machine-readable command — `@handle price eth` / `fear` / `help` / `about` (no
   `!`, verb + at most one arg) — and get back a single parseable line
