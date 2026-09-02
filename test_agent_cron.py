@@ -223,6 +223,31 @@ def test_mem_get_empty():
     assert ac.mem_get({}, "") == []
 
 
+def test_llm_reply_memory_keyed_by_did_not_nick(monkeypatch):
+    """Trí nhớ phải khóa theo DID đã verify: hai peer TRÙNG nick hiển thị vẫn có
+    bộ nhớ RIÊNG (nick giả mạo/tái dùng được, DID thì không)."""
+    monkeypatch.setattr(ac, "_active_provider", lambda: True)
+    monkeypatch.setattr(ac, "_provider_reply", lambda p, s, t: ("answer", "stub"))
+    monkeypatch.setattr(ac, "build_market_context", lambda coins: "")
+    state = {}
+    did_a, did_b = "did:key:zAAA", "did:key:zBBB"
+    ac.llm_reply("hi from A", sender_nick="dupnick", state=state, mem_key=did_a)
+    ac.llm_reply("hi from B", sender_nick="dupnick", state=state, mem_key=did_b)
+    assert list(state["mem"].keys()) == [did_a, did_b]      # tách theo DID, không gộp theo nick
+    assert len(state["mem"][did_a]) == 1
+    assert len(state["mem"][did_b]) == 1
+
+
+def test_llm_reply_memory_falls_back_to_nick_without_did(monkeypatch):
+    """Không có DID (input tay / non-peer) -> lùi về nick làm khóa, vẫn nhớ được."""
+    monkeypatch.setattr(ac, "_active_provider", lambda: True)
+    monkeypatch.setattr(ac, "_provider_reply", lambda p, s, t: ("answer", "stub"))
+    monkeypatch.setattr(ac, "build_market_context", lambda coins: "")
+    state = {}
+    ac.llm_reply("hello", sender_nick="friend", state=state, mem_key=None)
+    assert "friend" in state["mem"]
+
+
 # --- Lớp mạng (requests giả) -----------------------------------------------------
 
 def test_post_message_signs_canonical_and_posts(pk, monkeypatch):

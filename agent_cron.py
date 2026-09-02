@@ -1206,36 +1206,44 @@ def explain_move(moves: str, lang: str = None) -> str:
 
 
 # --- Trí nhớ hội thoại theo user (lưu trong state.json, persist qua actions/cache) ---
-def mem_get(state, nick):
-    """Vài lượt hội thoại gần nhất với 'nick' (list {q,a}); [] nếu không có state."""
-    if not state or not nick:
+# KHÓA bộ nhớ ưu tiên DID đã verify (`did:key:...`) thay vì nick hiển thị: nick bị
+# rút gọn/tái dùng/giả mạo được, còn DID là danh tính ký Ed25519 ổn định -> memory
+# không lẫn giữa hai peer trùng nick, cũng không bị 1 peer "mượn" ngữ cảnh của peer khác.
+def mem_get(state, key):
+    """Vài lượt hội thoại gần nhất với 'key' (DID, hoặc nick khi không có DID);
+    list {q,a}; [] nếu không có state."""
+    if not state or not key:
         return []
-    return (state.get("mem") or {}).get(nick, [])
+    return (state.get("mem") or {}).get(key, [])
 
 
-def mem_add(state, nick, q, a):
-    """Ghi thêm 1 lượt vào bộ nhớ của 'nick', giữ N lượt gần nhất & trần số user."""
-    if state is None or not nick:
+def mem_add(state, key, q, a):
+    """Ghi thêm 1 lượt vào bộ nhớ của 'key' (DID ưu tiên), giữ N lượt gần nhất & trần số user."""
+    if state is None or not key:
         return
     mem = state.setdefault("mem", {})
-    turns = mem.get(nick, [])
+    turns = mem.get(key, [])
     turns.append({"q": q[:MEM_MAX_CHARS], "a": a[:MEM_MAX_CHARS]})
-    mem[nick] = turns[-MEM_TURNS:]                    # giữ N lượt gần nhất
+    mem[key] = turns[-MEM_TURNS:]                     # giữ N lượt gần nhất
     if len(mem) > MEM_MAX_USERS:                      # chống phình: bỏ user cũ nhất
         for k in list(mem.keys())[:len(mem) - MEM_MAX_USERS]:
             mem.pop(k, None)
 
 
-def llm_reply(user_text: str, sender_nick=None, state=None):
+def llm_reply(user_text: str, sender_nick=None, state=None, mem_key=None):
     """Câu trả lời LLM THÔNG MINH: bám data-live (grounding) + nhớ hội thoại của
-    user + đáp đúng ngôn ngữ. Trả None nếu không có provider hoặc lỗi."""
+    user + đáp đúng ngôn ngữ. Trả None nếu không có provider hoặc lỗi.
+
+    `mem_key` là KHÓA bộ nhớ ổn định (DID đã verify); mặc định lùi về `sender_nick`
+    khi người gửi không có DID (input tay / non-peer)."""
     if not _active_provider():
         return None
+    key = mem_key or sender_nick                              # DID ưu tiên, nick dự phòng
     tone, system, temperature = pick_tone(user_text)          # giọng theo ngữ cảnh
     lang = detect_lang(user_text)                             # trả lời đúng ngôn ngữ
     system += "\nReply in Vietnamese." if lang == "vi" else "\nReply in English."
     ctx = build_market_context(extract_coins(user_text))      # chèn giá live -> hết bịa số
-    history = mem_get(state, sender_nick)                     # trí nhớ theo user
+    history = mem_get(state, key)                            # trí nhớ theo DID (dự phòng nick)
     hist_txt = ""
     if history:
         # Lịch sử = tin CŨ của cùng người lạ -> vẫn là UNTRUSTED, chỉ là ngữ cảnh,
@@ -1256,20 +1264,21 @@ def llm_reply(user_text: str, sender_nick=None, state=None):
     if not text:
         return None
     text = text[:LLM_MAX_CHARS]
-    mem_add(state, sender_nick, user_text, text)              # cập nhật trí nhớ
+    mem_add(state, key, user_text, text)                     # cập nhật trí nhớ (theo DID)
     # (GATED) 1 suy luận THẬT -> 1 nhịp FLOP. event_id gắn lần chi vào MỘT sự kiện thật
     # (tin @mention của user) — điều kiện cho bất biến FLOP_ORGANIC_ONLY (chống burn-loop
-    # tổng hợp). Ở đây luôn có tin đến thật nên id không rỗng.
-    _meter_flop(f"{provider} inference", event_id=(sender_nick or "mention"))
+    # tổng hợp). Ở đây luôn có tin đến thật nên id không rỗng. Dùng DID khi có -> id ổn định.
+    _meter_flop(f"{provider} inference", event_id=(key or "mention"))
     print(f"[llm:{provider}] ok (tone={tone}, lang={lang}, grounded={bool(ctx)})")
     return text
 
 
-def build_reply(sender_nick: str, text: str, state=None) -> str:
+def build_reply(sender_nick: str, text: str, state=None, sender_id=None) -> str:
     """Sinh câu trả lời từ TEMPLATE cố định (hoặc LLM cho mention tự do).
     Nội dung tin nhắn là UNTRUSTED — chỉ dùng để khớp từ khóa, không bao giờ
     để nó điều khiển hành vi hay chèn thẳng vào lệnh. `state` (nếu có) dùng cho
-    trí nhớ hội thoại của LLM."""
+    trí nhớ hội thoại của LLM. `sender_id` là DID đã verify của người gửi (nếu
+    là peer) -> làm KHÓA bộ nhớ ổn định; `sender_nick` chỉ để echo `@nick`."""
     sender_nick = safe_nick(sender_nick)       # nick echo lại phải sạch
     t = text.lower()
     tokens = t.split()
@@ -1362,7 +1371,7 @@ def build_reply(sender_nick: str, text: str, state=None) -> str:
         body = generate_recap(state or {}, int(time.time()), detect_lang(text))
         return tag(f"🗓 {body}") if body else tag("weekly recap chưa đủ dữ liệu, quay lại sau nhé.")
     # Mention không kèm lệnh → LLM: grounding data-live + trí nhớ + đúng ngôn ngữ
-    smart = llm_reply(text, sender_nick=sender_nick, state=state)
+    smart = llm_reply(text, sender_nick=sender_nick, state=state, mem_key=sender_id)
     if smart:
         return tag(smart)
     # Fallback template khi không cấu hình LLM hoặc API lỗi
@@ -1446,7 +1455,9 @@ def proactive_engage(state, frm, text, now, greeted):
                 "Hỏi mình !price/!market/!top hay @nguyenvulv bất cứ lúc nào nhé.")
     # 2) Giúp khi peer hỏi crypto (KHÔNG @mình) — chỉ khi chưa đụng peer này trong cooldown
     if _peer_count(state, frm, now, PROACTIVE_COOLDOWN_H) == 0 and _is_crypto_question(low):
-        ans = llm_reply(text, sender_nick=nick, state=state) if _active_provider() else None
+        # Cùng KHÓA DID với luồng reply -> lượt "giúp chủ động" và lượt "trả lời đích danh"
+        # của cùng peer chia sẻ chung trí nhớ (không tách theo nick).
+        ans = llm_reply(text, sender_nick=nick, state=state, mem_key=frm) if _active_provider() else None
         if ans:
             return f"[{AGENT_NAME}] @{nick} {ans}"
     return None
@@ -1506,7 +1517,10 @@ def auto_respond(private_key, did):
                           f"{PEER_REPLY_WINDOW_H}h -> nghỉ (chống loop)")
                 else:
                     sender = short_nick(frm) if is_peer else "friend"
-                    if post_message(private_key, did, build_reply(sender, text, state=state)):
+                    # KHÓA bộ nhớ = DID đầy đủ (ổn định, đã verify) khi là peer; nick chỉ để echo.
+                    sender_id = frm if is_peer else None
+                    if post_message(private_key, did,
+                                    build_reply(sender, text, state=state, sender_id=sender_id)):
                         replies += 1
                     if is_peer:
                         _peer_touch(state, frm, now)
