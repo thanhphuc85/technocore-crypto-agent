@@ -227,8 +227,8 @@ def test_llm_reply_memory_keyed_by_did_not_nick(monkeypatch):
     """Trí nhớ phải khóa theo DID đã verify: hai peer TRÙNG nick hiển thị vẫn có
     bộ nhớ RIÊNG (nick giả mạo/tái dùng được, DID thì không)."""
     monkeypatch.setattr(ac, "_active_provider", lambda: True)
-    monkeypatch.setattr(ac, "_provider_reply", lambda p, s, t: ("answer", "stub"))
-    monkeypatch.setattr(ac, "build_market_context", lambda coins: "")
+    monkeypatch.setattr(ac, "_provider_reply", lambda p, s, t, *a, **k: ("answer", "stub"))
+    monkeypatch.setattr(ac, "build_market_context", lambda coins, *a, **k: "")
     state = {}
     did_a, did_b = "did:key:zAAA", "did:key:zBBB"
     ac.llm_reply("hi from A", sender_nick="dupnick", state=state, mem_key=did_a)
@@ -241,8 +241,8 @@ def test_llm_reply_memory_keyed_by_did_not_nick(monkeypatch):
 def test_llm_reply_memory_falls_back_to_nick_without_did(monkeypatch):
     """Không có DID (input tay / non-peer) -> lùi về nick làm khóa, vẫn nhớ được."""
     monkeypatch.setattr(ac, "_active_provider", lambda: True)
-    monkeypatch.setattr(ac, "_provider_reply", lambda p, s, t: ("answer", "stub"))
-    monkeypatch.setattr(ac, "build_market_context", lambda coins: "")
+    monkeypatch.setattr(ac, "_provider_reply", lambda p, s, t, *a, **k: ("answer", "stub"))
+    monkeypatch.setattr(ac, "build_market_context", lambda coins, *a, **k: "")
     state = {}
     ac.llm_reply("hello", sender_nick="friend", state=state, mem_key=None)
     assert "friend" in state["mem"]
@@ -661,8 +661,8 @@ def _stub_market(monkeypatch, provider="gemini", reply="Risk-on: BTC steady, F&G
     monkeypatch.setattr(ac, "get_dominance", lambda: (52.0, 17.0))
     monkeypatch.setattr(ac, "get_trending", lambda n=5: ["aaa", "bbb"])
     monkeypatch.setattr(ac, "_provider_chain", lambda: [] if provider is None else [provider])
-    monkeypatch.setattr(ac, "_gemini_reply", lambda p, s, t: reply)
-    monkeypatch.setattr(ac, "_openai_reply", lambda p, s, t: reply)
+    monkeypatch.setattr(ac, "_gemini_reply", lambda p, s, t, *a, **k: reply)
+    monkeypatch.setattr(ac, "_openai_reply", lambda p, s, t, *a, **k: reply)
 
 
 def test_build_digest_context_includes_movers_and_dominance(monkeypatch):
@@ -856,7 +856,7 @@ def test_explain_move_on_grounds_on_moves_and_fg(monkeypatch):
     monkeypatch.setattr(ac, "ALERT_EXPLAIN_ENABLED", True)
     seen = {}
 
-    def cap(p, s, t):
+    def cap(p, s, t, *a, **k):
         seen["p"] = p
         return "Sharp momentum spike amid greedy sentiment."
 
