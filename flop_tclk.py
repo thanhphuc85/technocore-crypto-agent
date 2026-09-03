@@ -399,7 +399,8 @@ def make_reveal(contract: str, secret_hex: str, my_did: str) -> dict:
 
 
 def find_payer_lock(messages, contract: str, payer_did: str):
-    """Tìm frame `lock` của ĐÚNG payer cho ĐÚNG contract trong deal room. None nếu chưa có."""
+    """Tìm frame `lock` của ĐÚNG payer cho ĐÚNG contract trong room offers (nơi deal ở lại;
+    xem run_tclk_complete). Lọc theo contract id nên chọn đúng deal giữa room đông. None nếu chưa có."""
     for m in messages or []:
         f = parse_frame(m.get("text", ""))
         if (f and f.get("type") == "lock" and f.get("contract") == contract
@@ -409,14 +410,21 @@ def find_payer_lock(messages, contract: str, payer_did: str):
 
 
 def run_tclk_complete(read_room_fn, kv_get_fn, post_fn, do_work_fn, state, *, my_did,
-                      now_ms=None, dry_run=True, max_per_run=2, log=print):
+                      offers_room="tclk-offers", now_ms=None, dry_run=True, max_per_run=2, log=print):
     """Hoàn tất deal đã accept: chờ payer lock -> verify rail -> làm việc -> reveal.
       read_room_fn(room)   -> data JSON /r/<room>
       kv_get_fn(ns, key)   -> str|None (đã strip banner)
       post_fn(room, text)  -> bool (deliverable + reveal; chỉ khi dry_run=False)
       do_work_fn(meta)     -> str|None (None = không làm được -> KHÔNG reveal)
     state: 'tclk_secrets' (đã accept) + 'tclk_completed' (đã reveal). Trả
-    {revealed, waiting, expired, dry_run}."""
+    {revealed, waiting, expired, dry_run}.
+
+    `offers_room` = room lock/reveal thực sự diễn ra. Spec gốc bảo deal DỜI sang room riêng
+    theo contract (deal_room()), NHƯNG trên technocore.chat room cap thường ĐẦY -> POST tạo
+    room mới trả 400, nên payer KHÔNG dời được: lock/reveal ở lại NGAY room offers. State
+    machine khớp theo CONTRACT ID (không đọc tên room), nên đọc/ghi trong offers_room + lọc
+    theo contract là đúng chuẩn. (Kiểm thực tế: 200 tin gần nhất /r/tclk-offers chứa cả lock
+    lẫn reveal, deal_room rỗng -> đọc deal_room = chờ vô hạn.)"""
     import time
     now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
     secrets = state.get("tclk_secrets", {})
@@ -430,8 +438,8 @@ def run_tclk_complete(read_room_fn, kv_get_fn, post_fn, do_work_fn, state, *, my
             log("[tclk] " + contract[:14] + " quá cửa sổ claim -> bỏ (không reveal muộn)")
             continue
         try:
-            room = deal_room(contract)
-            data = read_room_fn(room)
+            room = offers_room                           # lock/reveal ở lại room offers (room cap
+            data = read_room_fn(room)                     # đầy -> deal room mới không tạo được)
             msgs = data.get("messages", []) if data else []
             lockf = find_payer_lock(msgs, contract, meta.get("payer_did"))
             if not lockf:                                # payer chưa lock -> chờ
