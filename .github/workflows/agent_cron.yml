@@ -75,6 +75,13 @@ jobs:
           FLOP_KIBBLE_TYPES: ${{ vars.FLOP_KIBBLE_TYPES }}
           FLOP_KIBBLE_MAX_PER_RUN: ${{ vars.FLOP_KIBBLE_MAX_PER_RUN }}
           FLOP_KIBBLE_CLAIM: ${{ vars.FLOP_KIBBLE_CLAIM }}
+          # tclk/1 payee (deal-making). Đặt FLOP_TCLK_ENABLED=on để bật (bật thì DRY-RUN — chỉ
+          # log 'would ACCEPT', không post — cho tới khi đặt FLOP_TCLK_DRY_RUN=off). Module CHỈ
+          # discover+accept, KHÔNG BAO GIỜ tự lock/reveal.
+          FLOP_TCLK_ENABLED: ${{ vars.FLOP_TCLK_ENABLED }}
+          FLOP_TCLK_DRY_RUN: ${{ vars.FLOP_TCLK_DRY_RUN }}
+          FLOP_TCLK_RAILS: ${{ vars.FLOP_TCLK_RAILS }}
+          FLOP_TCLK_MAX_PER_RUN: ${{ vars.FLOP_TCLK_MAX_PER_RUN }}
           # Câu hỏi nhập tay khi Run workflow (bỏ qua khi chạy theo cron)
           ASK: ${{ github.event.inputs.ask }}
         run: python agent_cron.py
