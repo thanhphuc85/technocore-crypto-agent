@@ -228,6 +228,30 @@ def test_complete_live_posts_deliver_then_reveal():
     assert contract in state["tclk_completed"]
 
 
+def test_complete_uses_offers_room_not_deal_room():
+    """Fix: lock/reveal ở lại room offers (deal room mới không tạo được vì cap đầy). Đọc & post
+    phải vào offers_room, KHÔNG phải deal_room(contract) — nếu đọc deal room sẽ chờ vô hạn."""
+    contract, state, _read, kv_get, now = _complete_env()
+    seen_read, seen_post = [], []
+    lock = {"type": "lock", "from": "zPAYER", "contract": contract, "rail": "paper", "ref": contract}
+
+    def read_room(room):
+        seen_read.append(room)
+        return {"messages": [{"text": "tclk1 " + t.to_ascii(t.canonical_json(lock))}]}
+
+    def post(room, x):
+        seen_post.append(room)
+        return True
+
+    res = t.run_tclk_complete(read_room, kv_get, post, do_work_fn=lambda meta: "d",
+                              state=state, my_did="zSELF", now_ms=now, dry_run=False,
+                              offers_room="tclk-offers")
+    assert res["revealed"] == [contract]
+    assert seen_read == ["tclk-offers"]                       # đọc room offers
+    assert seen_post == ["tclk-offers", "tclk-offers"]        # deliver + reveal, cùng room offers
+    assert t.deal_room(contract) not in seen_read + seen_post  # TUYỆT ĐỐI không dùng deal room
+
+
 def test_complete_waits_when_no_lock():
     contract, state, read_room, kv_get, now = _complete_env(lock_present=False)
     posts = []

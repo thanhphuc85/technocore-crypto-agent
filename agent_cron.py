@@ -2193,6 +2193,7 @@ def main():
                 post_fn=lambda room, text: post_message(private_key, did, text, room=room),
                 do_work_fn=tclk_do_work,
                 state=state, my_did=did, now_ms=now * 1000,
+                offers_room=TCLK_ROOM,          # lock/reveal ở lại room offers (deal room cap đầy)
                 dry_run=TCLK_COMPLETE_DRY_RUN,
             )
             save_state({"tclk_secrets": state.get("tclk_secrets", {}),
