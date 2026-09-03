@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **tclk payee: text-only job filter at accept time.** The payee now reads an offer's job spec
+  (`job.context`) before accepting and **skips jobs that need media** (video/image — a text LLM
+  can't genuinely deliver them), instead of accepting and only bailing later via the completion
+  SKIP. `is_media_job()` is a keyword classifier (video/mp4/reel/9:16/image/photo/tiktok/… — strong
+  media signals, so text jobs like "post or article" are untouched); `run_tclk_payee` takes a
+  `job_spec_fn` to fetch the spec, and `agent_cron` wires it to `tclk_job_spec` (shared with the
+  completion worker). Validated on the live board (19 text / 1 media correctly split). Keeps the
+  agent to work it can genuinely fulfil — no bad-faith accepts. Adds 3 tests.
 - **tclk/1 payee completion loop (accept → lock → work → reveal), gated + dry-run.** Extends
   `flop_tclk.py` so an accepted deal can be carried to done: derive the deal room
   (`mb-p-tclk-<contract16>`), watch for the payer's `lock` frame, **verify the lock on the paper

@@ -734,6 +734,13 @@ def kv_get_ns(ns: str, key: str):
         return None
 
 
+def tclk_job_spec(ctx: str):
+    """Đọc job-spec từ context dạng '/kv/<ns>/<key>'. None nếu context sai/không đọc được.
+    Dùng cho cả bộ lọc chỉ-nhận-text (lúc accept) lẫn lúc làm việc (lúc hoàn tất)."""
+    m = re.match(r"^/kv/([^/]+)/([^/]+)$", ctx or "")
+    return kv_get_ns(m.group(1), m.group(2)) if m else None
+
+
 def tclk_do_work(meta: dict):
     """Làm việc cho 1 deal tclk: đọc job-spec (KV note ở job.context) rồi sinh deliverable bằng
     LLM (cùng lớp guard như kibble). Trả None khi: không có provider / không có spec / model SKIP
@@ -741,8 +748,7 @@ def tclk_do_work(meta: dict):
     if not _active_provider():
         return None
     job = meta.get("job") or {}
-    m = re.match(r"^/kv/([^/]+)/([^/]+)$", (job.get("context") or ""))
-    spec = kv_get_ns(m.group(1), m.group(2)) if m else None
+    spec = tclk_job_spec(job.get("context") or "")
     if not spec:
         return None                              # không biết phải làm gì -> không reveal
     prompt = isolate_for_llm(f"[job {job.get('id', '')}] {spec}")
@@ -2114,6 +2120,7 @@ def main():
                 max_per_run=TCLK_MAX_PER_RUN,
                 dry_run=TCLK_DRY_RUN,
                 now_ms=now * 1000,
+                job_spec_fn=tclk_job_spec,       # bộ lọc chỉ-nhận-text: bỏ job media ngay ở accept
             )
             save_state({"tclk_cursor": state.get("tclk_cursor"),
                         "tclk_accepted": state.get("tclk_accepted", []),
