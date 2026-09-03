@@ -138,7 +138,128 @@ def test_run_payee_live_posts_accept_only_never_reveal():
     assert meta["offer_id"] == REAL_OFFER["id"] and meta["preimage"].startswith("0x")
 
 
-def test_module_has_no_reveal_builder():
-    # Bảo chứng thiết kế: module KHÔNG cung cấp hàm dựng reveal/lock -> worker không thể tự claim.
-    assert not hasattr(t, "make_reveal")
+def test_payee_never_locks():
+    # Payee KHÔNG BAO GIỜ escrow tiền -> module không có hàm dựng `lock`. (reveal có, nhưng bị
+    # guard chặt trong run_tclk_complete: chỉ reveal sau lock+rail-verify+deadline+làm-được-việc.)
     assert not hasattr(t, "make_lock")
+    assert hasattr(t, "make_reveal")
+
+
+# ═══ Vòng HOÀN TẤT: derivation + guards + worker ═══════════════════════════════
+# Vector THẬT (deal đã chạy trên venue): contract -> deal room / paper note / state note.
+REAL_CONTRACT = "0x312dd45894e96f35abc4b99b2ab0e4a080fdae7d5728a05f19a11f6904893cfa"
+REAL_PAPER_LINE = ("tclkpaper1 locked hash "
+                   "0xed99072602abb7a2f5fc991faaa237ce2b8a285ffaeb03e87920bbca147de508 1788401042781")
+
+
+def test_deal_room_and_notes_derivation_byte_exact():
+    assert t.deal_room(REAL_CONTRACT) == "mb-p-tclk-312dd45894e96f35"
+    assert t.paper_note(REAL_CONTRACT) == {"ns": "tclk-paper-31", "key": "2dd45894e96f35"}
+    assert t.state_note(REAL_CONTRACT) == {"ns": "tclk-31", "key": "2dd45894e96f35"}
+
+
+def test_decode_paper_record_real_and_malformed():
+    rec = t.decode_paper_record(REAL_PAPER_LINE)
+    assert rec["status"] == "locked" and rec["lock"] == "hash"
+    assert rec["refundAfterMs"] == 1788401042781 and "secret" not in rec
+    # claimed phải có secret; locked không được có -> các dòng sai => None
+    assert t.decode_paper_record("tclkpaper1 claimed hash 0x" + "a" * 64 + " 123") is None
+    assert t.decode_paper_record("tclkpaper1 locked hash 0x" + "a" * 64 + " 123 0x" + "b" * 64) is None
+    assert t.decode_paper_record("wrongprefix locked hash 0x" + "a" * 64 + " 123") is None
+    assert t.decode_paper_record("garbage") is None
+
+
+def test_verify_paper_lock_gate():
+    stmt = "0x" + "a" * 64
+    ok = {"status": "locked", "lock": "hash", "statement": stmt, "refundAfterMs": 999}
+    assert t.verify_paper_lock(ok, "hash", stmt, 999) is True
+    assert t.verify_paper_lock({**ok, "status": "claimed"}, "hash", stmt, 999) is False
+    assert t.verify_paper_lock(ok, "hash", "0x" + "b" * 64, 999) is False   # statement lệch
+    assert t.verify_paper_lock(ok, "hash", stmt, 1000) is False             # refundAfterMs lệch
+    assert t.verify_paper_lock(None, "hash", stmt, 999) is False
+
+
+def test_find_payer_lock():
+    lock = {"type": "lock", "from": "zPAYER", "contract": REAL_CONTRACT, "rail": "paper", "ref": REAL_CONTRACT}
+    msgs = [{"text": "tclk1 " + t.to_ascii(t.canonical_json(lock))}]
+    assert t.find_payer_lock(msgs, REAL_CONTRACT, "zPAYER")["rail"] == "paper"
+    assert t.find_payer_lock(msgs, REAL_CONTRACT, "zOTHER") is None         # sai payer
+    assert t.find_payer_lock(msgs, "0x" + "0" * 64, "zPAYER") is None       # sai contract
+
+
+# --- worker completion: các nhánh an toàn -----------------------------------------
+def _complete_env(lock_present=True, paper_ok=True, past_claim=False):
+    stmt = "0x" + "c" * 64
+    contract = REAL_CONTRACT
+    now = 1000
+    meta = {"preimage": "0x" + "e" * 64, "statement": stmt, "payer_did": "zPAYER",
+            "amount": "10", "asset": "PAPER", "claimByMs": 500 if past_claim else 5000,
+            "refundAfterMs": 9999, "job": {"proto": "a2a", "id": "task-1"}}
+    state = {"tclk_secrets": {contract: meta}}
+    lock = {"type": "lock", "from": "zPAYER", "contract": contract, "rail": "paper", "ref": contract}
+    room_msgs = [{"text": "tclk1 " + t.to_ascii(t.canonical_json(lock))}] if lock_present else []
+    paper = ("tclkpaper1 locked hash " + stmt + " 9999") if paper_ok else None
+    read_room = lambda room: {"messages": room_msgs}
+    kv_get = lambda ns, key: paper
+    return contract, state, read_room, kv_get, now
+
+
+def test_complete_dry_run_reveals_nothing_but_reports():
+    contract, state, read_room, kv_get, now = _complete_env()
+    posts = []
+    res = t.run_tclk_complete(read_room, kv_get, lambda r, x: posts.append(x) or True,
+                              do_work_fn=lambda meta: "the deliverable", state=state,
+                              my_did="zSELF", now_ms=now, dry_run=True)
+    assert res["revealed"] == [contract]
+    assert posts == []                                   # DRY: không post
+    assert state.get("tclk_completed", []) == []
+
+
+def test_complete_live_posts_deliver_then_reveal():
+    contract, state, read_room, kv_get, now = _complete_env()
+    posts = []
+    res = t.run_tclk_complete(read_room, kv_get, lambda r, x: posts.append(x) or True,
+                              do_work_fn=lambda meta: "the deliverable", state=state,
+                              my_did="zSELF", now_ms=now, dry_run=False)
+    assert res["revealed"] == [contract]
+    assert len(posts) == 2                               # deliverable THEN reveal
+    assert "deliver]" in posts[0]
+    assert '"type":"reveal"' in posts[1] and '"secret":"0x' in posts[1]
+    assert contract in state["tclk_completed"]
+
+
+def test_complete_waits_when_no_lock():
+    contract, state, read_room, kv_get, now = _complete_env(lock_present=False)
+    posts = []
+    res = t.run_tclk_complete(read_room, kv_get, lambda r, x: posts.append(x) or True,
+                              do_work_fn=lambda meta: "x", state=state, my_did="zSELF",
+                              now_ms=now, dry_run=False)
+    assert res["revealed"] == [] and res["waiting"] == 1 and posts == []
+
+
+def test_complete_refuses_when_rail_not_confirmed():
+    # lock frame CÓ nhưng rail chưa xác nhận -> KHÔNG reveal (cổng an toàn)
+    contract, state, read_room, kv_get, now = _complete_env(paper_ok=False)
+    posts = []
+    res = t.run_tclk_complete(read_room, kv_get, lambda r, x: posts.append(x) or True,
+                              do_work_fn=lambda meta: "x", state=state, my_did="zSELF",
+                              now_ms=now, dry_run=False)
+    assert res["revealed"] == [] and res["waiting"] == 1 and posts == []
+
+
+def test_complete_refuses_past_claim_window():
+    contract, state, read_room, kv_get, now = _complete_env(past_claim=True)
+    res = t.run_tclk_complete(read_room, kv_get, lambda r, x: True,
+                              do_work_fn=lambda meta: "x", state=state, my_did="zSELF",
+                              now_ms=now, dry_run=False)
+    assert res["revealed"] == [] and res["expired"] == 1
+
+
+def test_complete_refuses_when_work_fails():
+    # do_work_fn trả None (không làm được) -> KHÔNG reveal (giữ thiện chí)
+    contract, state, read_room, kv_get, now = _complete_env()
+    posts = []
+    res = t.run_tclk_complete(read_room, kv_get, lambda r, x: posts.append(x) or True,
+                              do_work_fn=lambda meta: None, state=state, my_did="zSELF",
+                              now_ms=now, dry_run=False)
+    assert res["revealed"] == [] and posts == []

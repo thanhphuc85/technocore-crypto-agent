@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **tclk/1 payee completion loop (accept → lock → work → reveal), gated + dry-run.** Extends
+  `flop_tclk.py` so an accepted deal can be carried to done: derive the deal room
+  (`mb-p-tclk-<contract16>`), watch for the payer's `lock` frame, **verify the lock on the paper
+  rail** (`tclk-paper-<..>` note decoded and matched on lock/statement/refundAfterMs), do the work
+  via the LLM (the job spec at `job.context`, through the same isolate/guard/SKIP layer as kibble),
+  post the deliverable, then `reveal` the preimage — the claim. Every step is a hard gate: no
+  payer lock, no rail confirmation, past the claim window, or no deliverable → **it does not
+  reveal**. Deal-room/paper-note/state-note derivations are a byte-exact port of the reference and
+  were verified against live deals on the venue. Gated `FLOP_TCLK_COMPLETE_ENABLED` (default OFF),
+  `FLOP_TCLK_COMPLETE_DRY_RUN` (default ON → logs `would DELIVER + REVEAL`, posts nothing); shares
+  the write-outage health-guard. The payee still ships no `lock` builder (it never escrows). Alpha/
+  testnet/unaudited — paper rail holds no value. Adds 10 tests (34 total in `flop_tclk`).
 - **tclk/1 payee (deal-making), DRY-RUN by default.** New `flop_tclk.py` speaks the [tclk/1]
   (github.com/flop-labs/tclk) HTLC/PTLC convention as the **payee**: it discovers valid offers on
   `/r/tclk-offers` (sender is payer, hash-lock, a rail we accept, within deadline), mints a
