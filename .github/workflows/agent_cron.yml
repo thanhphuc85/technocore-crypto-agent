@@ -2,7 +2,8 @@ name: Technocore Agent Automation
 
 on:
   schedule:
-    - cron: '*/30 * * * *'   # mỗi 30 phút
+    - cron: '*/5 * * * *'   # mỗi 5 phút (sàn cron; repo public -> free). Dày hơn để bắt job
+                            # kibble + LOCK tclk trước khi cuộn khỏi cửa sổ 200 tin (offers ~15'/200)
   workflow_dispatch:
     inputs:
       ask:
