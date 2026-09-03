@@ -321,6 +321,15 @@ TCLK_COMPLETE_ENABLED = os.environ.get("FLOP_TCLK_COMPLETE_ENABLED", "").strip()
     "1", "true", "on", "yes")
 TCLK_COMPLETE_DRY_RUN = os.environ.get("FLOP_TCLK_COMPLETE_DRY_RUN", "").strip().lower() not in (
     "0", "false", "off", "no")
+# VAI PAYER (tự đăng offer) — DEMO đóng trọn 1 deal paper 5 bước. GATED riêng, dry-run mặc định,
+# CHỈ paper. Bật FLOP_TCLK_OFFER_ENABLED=on (dry-run cho tới FLOP_TCLK_OFFER_DRY_RUN=off). max_active=1
+# -> 1 deal/lần; tắt cờ sau khi thấy 1 'settled'. Job = câu hỏi nhỏ tự-chứa (mình trả 'PAPER' mô phỏng).
+TCLK_OFFER_ENABLED = os.environ.get("FLOP_TCLK_OFFER_ENABLED", "").strip().lower() in (
+    "1", "true", "on", "yes")
+TCLK_OFFER_DRY_RUN = os.environ.get("FLOP_TCLK_OFFER_DRY_RUN", "").strip().lower() not in (
+    "0", "false", "off", "no")
+TCLK_OFFER_JOB = os.environ.get("FLOP_TCLK_OFFER_JOB", "").strip() or (
+    "In one sentence, state one concrete, verifiable fact about the SHA-256 hash function.")
 
 # --- LLM giọng điệu (persona) theo NGỮ CẢNH ---
 # Lớp AN TOÀN là hằng số, KHÔNG đổi theo tone: untrusted, không lộ key, 1 câu ngắn.
@@ -722,6 +731,26 @@ def kv_set(private_key, did, key: str, value: str) -> bool:
         return r.status_code == 200
     except requests.RequestException as e:
         print(f"[kv] set failed | {e}")
+        return False
+
+
+def kv_set_ns(ns: str, key: str, value: str) -> bool:
+    """Ghi note vào namespace BẤT KỲ (unsigned, world-writable) — dùng cho paper escrow record
+    của vai tclk PAYER (paper_note ns 'tclk-paper-XX'). Value được sweep (không cắt) trước."""
+    value = sweep_for_sign(value)
+    try:
+        r = requests.post(
+            f"{BASE_URL}/kv/{ns}/{key}",
+            json={"value": value},
+            headers={"User-Agent": UA, "Content-Type": "application/json"},
+            timeout=10,
+        )
+        print(f"[kv] set {ns}/{key} -> {r.status_code}")
+        if r.status_code == 200:
+            _note_server_ok()
+        return r.status_code == 200
+    except requests.RequestException as e:
+        print(f"[kv] set-ns failed | {e}")
         return False
 
 
@@ -2204,6 +2233,33 @@ def main():
             tclk_done_status = "error"
             print(f"[tclk] complete bỏ qua ({str(e)[:100]})")
 
+    # 3a5) (Tùy chọn, GATED RIÊNG, dry-run mặc định) VAI PAYER — tự đăng offer, đóng trọn 1 deal
+    #      paper 5 bước (offer->accept->lock->reveal->settle). Logic ở flop_tclk.run_tclk_payer.
+    tclk_offer_status = "off"
+    if TCLK_OFFER_ENABLED and not TCLK_OFFER_DRY_RUN and posts_degraded():
+        tclk_offer_status = "skip-outage"
+    elif TCLK_OFFER_ENABLED:
+        try:
+            import flop_tclk
+            job_key = "tclk-offer-job"
+            job_context = f"/kv/{KV_NS}/{job_key}"
+            if not TCLK_OFFER_DRY_RUN:
+                kv_set(private_key, did, job_key, TCLK_OFFER_JOB)   # spec cho worker đọc
+            ps = flop_tclk.run_tclk_payer(
+                fetch_fn=lambda since: fetch_messages(since, room=TCLK_ROOM),
+                post_fn=lambda room, text: post_message(private_key, did, text, room=room),
+                kv_set_ns_fn=kv_set_ns,
+                state=state, my_did=did, job_context=job_context,
+                offers_room=TCLK_ROOM, now_ms=now * 1000,
+                dry_run=TCLK_OFFER_DRY_RUN,
+            )
+            save_state({"tclk_my_offers": state.get("tclk_my_offers", {})})
+            mode = "dry" if TCLK_OFFER_DRY_RUN else "live"
+            tclk_offer_status = f"{mode} {ps['posted']}off/{ps['locked']}lock/{ps['settled']}set"
+        except Exception as e:
+            tclk_offer_status = "error"
+            print(f"[tclk-payer] bỏ qua ({str(e)[:100]})")
+
     # 3b) (Tùy chọn, GATED) Công khai tiến độ MỞ KHÓA MAINNET 3:1 vào KV note `unlock`
     #     để ai cũng audit được (GET /kv/<ns>/unlock). Mặc định TẮT (FLOP_PUBLISH_UNLOCK)
     #     -> agent không đổi hành vi. Bọc kín: lỗi bị nuốt, không làm sập run.
@@ -2242,7 +2298,7 @@ def main():
     ]
     print(f"[run] telemetry={tele_status} manifest={manifest_status} "
           f"digest={digest_status} recap={recap_status} kibble={kibble_status} "
-          f"tclk={tclk_status} tclk_done={tclk_done_status} replies={replies} "
+          f"tclk={tclk_status} tclk_done={tclk_done_status} tclk_offer={tclk_offer_status} replies={replies} "
           f"proactive={proactive} server200s={_server_ok_count}")
 
     if _server_ok_count == 0:

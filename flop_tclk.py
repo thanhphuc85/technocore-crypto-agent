@@ -482,3 +482,150 @@ def run_tclk_complete(read_room_fn, kv_get_fn, post_fn, do_work_fn, state, *, my
     if not dry_run:
         state["tclk_completed"] = list(done)[-200:]
     return {"revealed": revealed, "waiting": waiting, "expired": expired, "dry_run": dry_run}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# VAI PAYER (tự đăng offer) — DEMO đóng trọn 1 deal paper 5 bước, GATED + dry-run mặc định.
+# Bối cảnh: cả mạng nghẽn ở bước LOCK (payer lạ nhận rồi không lock; ~13% accept mới được lock).
+# Payee thì háo hức (57% offer được accept) và luôn reveal sau lock (100%). Nên khi MÌNH làm
+# payer + tự lock đáng tin, ta cầm đúng bước nghẽn -> đóng deal chủ động thay vì chờ may rủi.
+# CHỈ paper rail (asset PAPER = mô phỏng, không giá trị thật). State machine 1 offer/lần:
+#   OFFER (ta) -> ACCEPT (worker) -> LOCK ghi paper record (ta) -> REVEAL (worker) -> SETTLE (ta).
+# ═══════════════════════════════════════════════════════════════════════════════
+def make_offer(my_did: str, job_context: str, *, amount="1", asset="PAPER", rail="paper",
+               now_ms: int, expires_ms=20 * 60 * 1000, claim_window_ms=30 * 60 * 1000,
+               refund_gap_ms=30 * 60 * 1000):
+    """Dựng frame `offer` vai PAYER (hash-lock). job_context = '/kv/<ns>/<key>' trỏ tới spec việc
+    (worker đọc để làm). Deadline rộng để qua validate_deadlines của payee. Trả (frame, fields)."""
+    fields = {
+        "type": "offer", "from": my_did, "role": "payer", "amount": str(amount), "asset": asset,
+        "lock": "hash", "rails": [rail],
+        "claimByMs": now_ms + claim_window_ms,
+        "refundAfterMs": now_ms + claim_window_ms + refund_gap_ms,
+        "expiresMs": now_ms + expires_ms,
+        "nonce": os.urandom(8).hex(),
+        "job": {"context": job_context},
+    }
+    fields["id"] = offer_id(fields)
+    return dict(fields), fields
+
+
+def find_accept_for_offer(messages, offer_with_id: dict, my_did: str):
+    """Tìm frame `accept` của MỘT worker (không phải mình) nhận ĐÚNG offer này. Kiểm lại contract_id
+    (offer + accept_core) khớp contract trong frame -> chống accept bịa. None nếu chưa có."""
+    oid = offer_with_id.get("id")
+    for m in messages or []:
+        f = parse_frame(m.get("text", ""))
+        if not f or f.get("type") != "accept":
+            continue
+        if f.get("ref") != oid or f.get("from") == my_did:
+            continue
+        core = {"from": f.get("from"), "ref": f.get("ref"),
+                "statement": f.get("statement"), "nonce": f.get("nonce")}
+        if any(core[k] is None for k in core):
+            continue
+        try:
+            if contract_id(offer_with_id, core) == f.get("contract"):
+                return f
+        except Exception:
+            continue
+    return None
+
+
+def make_paper_locked_record(statement: str, refund_after_ms: int) -> str:
+    """Record escrow rail 'paper' trạng thái LOCKED (byte khớp decode_paper_record)."""
+    return f"{PAPER_RECORD_PREFIX} locked hash {statement} {int(refund_after_ms)}"
+
+
+def make_lock_frame(contract: str, rail: str, my_did: str) -> dict:
+    """Frame `lock` của payer (find_payer_lock của payee sẽ thấy: type/contract/from/rail)."""
+    return {"type": "lock", "from": my_did, "contract": _require_contract(contract),
+            "rail": rail, "ref": contract}
+
+
+def find_reveal(messages, contract: str, payee_did: str):
+    """Secret trong frame `reveal` của ĐÚNG payee cho ĐÚNG contract (payee đã claim). None nếu chưa."""
+    for m in messages or []:
+        f = parse_frame(m.get("text", ""))
+        if (f and f.get("type") == "reveal" and f.get("contract") == contract
+                and (payee_did is None or f.get("from") == payee_did) and f.get("secret")):
+            return f.get("secret")
+    return None
+
+
+def run_tclk_payer(fetch_fn, post_fn, kv_set_ns_fn, state, *, my_did, job_context,
+                   offers_room="tclk-offers", dry_run=True, max_active=1, amount="1",
+                   asset="PAPER", rail="paper", now_ms=None, log=print):
+    """DEMO vai payer: đẩy 1 offer paper qua đủ 5 bước.
+      fetch_fn(since)          -> data JSON /r/tclk-offers (đọc accept/reveal)
+      post_fn(room, text)      -> bool (offer + lock frame; chỉ khi dry_run=False)
+      kv_set_ns_fn(ns,key,val) -> bool (ghi paper record khi LOCK; unsigned, world-writable)
+    state['tclk_my_offers'] = {offer_id: {fields, status(offered|accepted|locked|settled),
+    contract, statement, payee_did, claimByMs, refundAfterMs}}. Trả {posted,accepted,locked,settled}.
+    AN TOÀN: chỉ rail 'paper' (mô phỏng). max_active=1 -> 1 deal/lần; tắt cờ sau khi thấy 1 settled."""
+    import time
+    now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
+    offers = state.setdefault("tclk_my_offers", {})
+    data = fetch_fn(None)
+    msgs = data.get("messages", []) if data else []
+    posted = accepted = locked = settled = 0
+
+    # 1) Đẩy các offer đang có qua state machine
+    for oid, o in list(offers.items()):
+        if o.get("status") == "settled":
+            continue
+        if now_ms >= o.get("refundAfterMs", 0):          # quá hạn hoàn -> bỏ (demo: không refund)
+            offers.pop(oid, None)
+            log("[tclk-payer] " + oid[:14] + " quá refundAfterMs -> bỏ")
+            continue
+        if o.get("status") == "offered":                 # chờ worker accept
+            acc = find_accept_for_offer(msgs, o["fields"], my_did)
+            if acc:
+                o.update(status="accepted", contract=acc["contract"],
+                         statement=acc["statement"], payee_did=acc["from"])
+                accepted += 1
+                log("[tclk-payer] ACCEPT thấy " + acc["contract"][:14] + " từ "
+                    + str(acc["from"])[:16] + " -> LOCK")
+        if o.get("status") == "accepted" and not dry_run:   # LOCK: ghi paper record + post lock frame
+            rec = make_paper_locked_record(o["statement"], o["refundAfterMs"])
+            pn = paper_note(o["contract"])
+            if kv_set_ns_fn(pn["ns"], pn["key"], rec):
+                post_fn(offers_room, encode_frame(make_lock_frame(o["contract"], rail, my_did)))
+                o["status"] = "locked"
+                locked += 1
+                log("[tclk-payer] LOCK posted " + o["contract"][:14] + " (paper record ghi)")
+            else:
+                log("[tclk-payer] LOCK fail (kv_set) " + o["contract"][:14])
+        if o.get("status") == "locked":                  # chờ worker reveal -> verify -> settle
+            secret = find_reveal(msgs, o["contract"], o.get("payee_did"))
+            if secret and verify_hash_preimage(o["statement"], secret):
+                o["status"] = "settled"
+                settled += 1
+                log("[tclk-payer] SETTLED " + o["contract"][:14]
+                    + " — worker reveal+claim, deal 5 bước HOÀN TẤT ✓")
+
+    # 2) Đăng offer MỚI nếu còn slot (active < max_active)
+    active = sum(1 for o in offers.values() if o.get("status") != "settled")
+    if active < max_active and job_context:
+        frame, fields = make_offer(my_did, job_context, amount=amount, asset=asset,
+                                   rail=rail, now_ms=now_ms)
+        oid = fields["id"]
+        if oid not in offers:
+            try:
+                line = encode_frame(frame)
+            except Exception as e:
+                log("[tclk-payer] dựng offer lỗi: " + str(e)[:80])
+                line = None
+            if line and dry_run:
+                log("[tclk-payer:DRY] would OFFER " + oid[:14] + " | " + str(amount) + " "
+                    + asset + " | job=" + job_context)
+            elif line and post_fn(offers_room, line):
+                offers[oid] = {"fields": fields, "status": "offered",
+                               "claimByMs": fields["claimByMs"],
+                               "refundAfterMs": fields["refundAfterMs"],
+                               "amount": str(amount), "asset": asset, "posted_ms": now_ms}
+                posted += 1
+                log("[tclk-payer] OFFER posted " + oid[:14] + " | " + str(amount) + " " + asset)
+
+    return {"posted": posted, "accepted": accepted, "locked": locked, "settled": settled,
+            "dry_run": dry_run}

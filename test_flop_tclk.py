@@ -358,3 +358,81 @@ def test_run_payee_accepts_text_job_with_filter_on():
                            dry_run=False, now_ms=now,
                            job_spec_fn=lambda ctx: "x post or article <=25000 chars")
     assert res["accepted"] == [REAL_OFFER["id"]] and len(posts) == 1   # job text -> vẫn nhận
+
+
+# ═══ VAI PAYER (tự đăng offer) — DEMO đóng trọn 1 deal paper ═════════════════════
+def test_make_offer_is_acceptable_by_payee():
+    """Offer mình dựng phải hợp lệ để vai PAYEE (select_offers) nhận — chứng minh khớp chuẩn."""
+    now = 1_000_000
+    frame, fields = t.make_offer("did:key:zME", "/kv/myns/job1", now_ms=now)
+    assert fields["role"] == "payer" and fields["lock"] == "hash" and fields["rails"] == ["paper"]
+    assert t.offer_id(fields) == fields["id"]                     # id tự khớp
+    picks = t.select_offers([{"text": t.encode_frame(frame), "seq": 1}], set(),
+                            "did:key:zWORKER", now, ["paper"], 5 * 60 * 1000, 5 * 60 * 1000, 2)
+    assert len(picks) == 1 and picks[0][1]["id"] == fields["id"]  # payee nhặt được offer của mình
+
+
+def test_make_paper_locked_record_roundtrips():
+    stmt = "0x" + "c" * 64
+    rec = t.make_paper_locked_record(stmt, 9999)
+    dec = t.decode_paper_record(rec)
+    assert dec and dec["status"] == "locked" and dec["statement"] == stmt
+    assert t.verify_paper_lock(dec, "hash", stmt, 9999)           # payee sẽ qua cổng verify
+
+
+def test_find_accept_rejects_forged_contract():
+    now = 1_000_000
+    _frame, fields = t.make_offer("did:key:zME", "/kv/n/k", now_ms=now)
+    forged = {"type": "accept", "from": "did:key:zW", "ref": fields["id"],
+              "statement": "0x" + "a" * 64, "nonce": "deadbeef", "contract": "0x" + "0" * 64}
+    msgs = [{"text": t.encode_frame(forged)}]
+    assert t.find_accept_for_offer(msgs, fields, "did:key:zME") is None   # contract bịa -> loại
+
+
+def test_payer_dry_run_only_logs():
+    room, state = [], {}
+    res = t.run_tclk_payer(lambda s: {"messages": [{"text": x} for x in room]},
+                           lambda r, x: room.append(x) or True,
+                           lambda ns, k, v: True, state=state, my_did="did:key:zME",
+                           job_context="/kv/myns/job1", now_ms=1_000_000, dry_run=True)
+    assert res["posted"] == 0 and room == []                     # DRY: không post
+    assert state.get("tclk_my_offers", {}) == {}
+
+
+def test_payer_full_5step_paper_deal_roundtrip():
+    """5 bước: OFFER(mình) -> ACCEPT(worker) -> LOCK(mình ghi paper) -> REVEAL(worker) -> SETTLE(mình).
+    Worker mô phỏng dùng CHÍNH make_accept/make_reveal của vai payee -> chứng minh 2 vai khớp."""
+    me, worker, now = "did:key:zME", "did:key:zWORKER", 1_000_000
+    room, kv, state = [], {}, {}
+    fetch = lambda s: {"messages": [{"text": x} for x in room]}
+    post = lambda r, x: room.append(x) or True
+    kv_set = lambda ns, k, v: kv.__setitem__((ns, k), v) or True
+
+    # BƯỚC 1 — payer đăng offer
+    res = t.run_tclk_payer(fetch, post, kv_set, state=state, my_did=me,
+                           job_context="/kv/myns/job1", now_ms=now, dry_run=False)
+    assert res["posted"] == 1
+    oid = next(iter(state["tclk_my_offers"]))
+    offer = state["tclk_my_offers"][oid]["fields"]
+
+    # BƯỚC 2 — worker accept (dùng make_accept của payee)
+    accept_frame, preimage, statement = t.make_accept(offer, worker)
+    room.append(t.encode_frame(accept_frame))
+    contract = accept_frame["contract"]
+
+    # BƯỚC 3 — payer thấy accept -> LOCK (ghi paper record + lock frame)
+    res = t.run_tclk_payer(fetch, post, kv_set, state=state, my_did=me,
+                           job_context="/kv/myns/job1", now_ms=now, dry_run=False)
+    assert res["accepted"] == 1 and res["locked"] == 1
+    pn = t.paper_note(contract)
+    dec = t.decode_paper_record(kv[(pn["ns"], pn["key"])])
+    assert t.verify_paper_lock(dec, "hash", statement, offer["refundAfterMs"])   # payee sẽ qua cổng
+
+    # BƯỚC 4 — worker reveal (claim) bằng make_reveal của payee
+    room.append(t.encode_frame(t.make_reveal(contract, preimage, worker)))
+
+    # BƯỚC 5 — payer thấy reveal -> verify preimage -> SETTLE
+    res = t.run_tclk_payer(fetch, post, kv_set, state=state, my_did=me,
+                           job_context="/kv/myns/job1", now_ms=now, dry_run=False)
+    assert res["settled"] == 1
+    assert state["tclk_my_offers"][oid]["status"] == "settled"   # deal 5 bước HOÀN TẤT
