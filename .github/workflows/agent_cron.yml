@@ -87,6 +87,11 @@ jobs:
           # (FLOP_TCLK_DRY_RUN=off). Đặt FLOP_TCLK_COMPLETE_DRY_RUN=off mới thực sự reveal.
           FLOP_TCLK_COMPLETE_ENABLED: ${{ vars.FLOP_TCLK_COMPLETE_ENABLED }}
           FLOP_TCLK_COMPLETE_DRY_RUN: ${{ vars.FLOP_TCLK_COMPLETE_DRY_RUN }}
+          # Vai PAYER (tự đăng offer) — DEMO đóng trọn 1 deal paper. Mặc định TẮT; bật
+          # FLOP_TCLK_OFFER_ENABLED=on (dry-run tới FLOP_TCLK_OFFER_DRY_RUN=off). Chỉ paper.
+          FLOP_TCLK_OFFER_ENABLED: ${{ vars.FLOP_TCLK_OFFER_ENABLED }}
+          FLOP_TCLK_OFFER_DRY_RUN: ${{ vars.FLOP_TCLK_OFFER_DRY_RUN }}
+          FLOP_TCLK_OFFER_JOB: ${{ vars.FLOP_TCLK_OFFER_JOB }}
           # Câu hỏi nhập tay khi Run workflow (bỏ qua khi chạy theo cron)
           ASK: ${{ github.event.inputs.ask }}
         run: python agent_cron.py
