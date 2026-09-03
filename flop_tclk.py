@@ -209,14 +209,34 @@ def select_offers(messages, accepted_set, my_did, now_ms, allow_rails,
     return picked
 
 
+# Dấu hiệu job đòi MEDIA (video/ảnh) — agent chỉ-text KHÔNG làm được. Từ khoá mạnh để tránh
+# chặn nhầm job text (vd "post or article" không dính; "short video"/"9:16"/"image" thì dính).
+_MEDIA_HINTS = (
+    "video", "mp4", "mov", "webm", "reel", "9:16", "4:5", "16:9", "h264", "aac",
+    "1080", "720", "image", "photo", "picture", "png", "jpg", "jpeg", "gif",
+    "illustration", "thumbnail", "logo", "banner", "poster", "animation", "render",
+    "tiktok", "youtube", "instagram",
+)
+
+
+def is_media_job(spec: str) -> bool:
+    """True nếu spec job đòi media (video/ảnh) -> bỏ NGAY ở bước accept (không đợi SKIP lúc làm).
+    None/rỗng -> False (không rõ thì không chặn; SKIP lúc hoàn tất vẫn là lưới an toàn cuối)."""
+    if not spec:
+        return False
+    low = spec.lower()
+    return any(h in low for h in _MEDIA_HINTS)
+
+
 # ── Worker (DRY-RUN mặc định) ────────────────────────────────────────────────
 def run_tclk_payee(fetch_fn, post_fn, state, *, my_did, allow_rails,
                    min_claim_window_ms, min_refund_gap_ms, max_per_run=2,
-                   dry_run=True, now_ms=None, log=print):
+                   dry_run=True, now_ms=None, job_spec_fn=None, log=print):
     """Quét tclk-offers, chọn offer đáng nhận, dựng `accept`.
-      fetch_fn(since)  -> data JSON như /r/tclk-offers?format=json
-      post_fn(text)    -> bool (chỉ gọi khi dry_run=False, và CHỈ để post `accept`)
-      state            -> dùng 'tclk_cursor' (con trỏ) + 'tclk_accepted' (id đã nhận)
+      fetch_fn(since)   -> data JSON như /r/tclk-offers?format=json
+      post_fn(text)     -> bool (chỉ gọi khi dry_run=False, và CHỈ để post `accept`)
+      job_spec_fn(ctx)  -> str|None đọc job-spec ở job.context; job đòi MEDIA -> bỏ (chỉ nhận text)
+      state             -> dùng 'tclk_cursor' (con trỏ) + 'tclk_accepted' (id đã nhận)
     AN TOÀN: KHÔNG bao giờ tự `lock`/`reveal`. reveal = CLAIM tiền -> luôn để người quyết.
     Trả {scanned, accepted:[ids], skipped, dry_run, cursor}."""
     import time
@@ -235,6 +255,19 @@ def run_tclk_payee(fetch_fn, post_fn, state, *, my_did, allow_rails,
     accepted, skipped = [], 0
     cursor = last or 0
     for seq, offer in picks:
+        # BỘ LỌC CHỈ-NHẬN-TEXT: nếu job có spec đòi media (video/ảnh) -> bỏ ngay, không accept.
+        job = offer.get("job") or {}
+        ctx = job.get("context")
+        if job_spec_fn and ctx:
+            try:
+                spec = job_spec_fn(ctx)
+            except Exception:
+                spec = None
+            if is_media_job(spec):
+                skipped += 1
+                cursor = max(cursor, seq)
+                log(f"[tclk] skip {offer.get('id','?')[:14]} — job cần media (không phải text), bỏ")
+                continue
         try:
             frame, preimage, statement = make_accept(offer, my_did)
             line = encode_frame(frame)

@@ -263,3 +263,38 @@ def test_complete_refuses_when_work_fails():
                               do_work_fn=lambda meta: None, state=state, my_did="zSELF",
                               now_ms=now, dry_run=False)
     assert res["revealed"] == [] and posts == []
+
+
+# ═══ Bộ lọc chỉ-nhận-job-text ══════════════════════════════════════════════════
+def test_is_media_job():
+    assert t.is_media_job("tiktok short video | duration <=90s; 9:16; h264/aac mp4") is True
+    assert t.is_media_job("ig post or short video | image 1080x1350") is True
+    assert t.is_media_job("x post or article | <=25000 chars") is False   # text -> không chặn
+    assert t.is_media_job("explain database isolation levels") is False
+    assert t.is_media_job("") is False and t.is_media_job(None) is False
+
+
+def test_run_payee_skips_media_job_at_accept():
+    now = REAL_OFFER["expiresMs"] - 5 * 60 * 1000
+    posts = []
+    state = {}
+    # job.context của REAL_OFFER trỏ tới spec; giả spec là VIDEO -> phải bỏ, không accept
+    res = t.run_tclk_payee(_fetch(REAL_OFFER), lambda x: posts.append(x) or True, state,
+                           my_did="zSELF", allow_rails=["paper"],
+                           min_claim_window_ms=60000, min_refund_gap_ms=60000,
+                           dry_run=False, now_ms=now,
+                           job_spec_fn=lambda ctx: "tiktok short video 9:16 mp4")
+    assert res["accepted"] == [] and res["skipped"] == 1
+    assert posts == []                                   # không post accept cho job media
+
+
+def test_run_payee_accepts_text_job_with_filter_on():
+    now = REAL_OFFER["expiresMs"] - 5 * 60 * 1000
+    posts = []
+    state = {}
+    res = t.run_tclk_payee(_fetch(REAL_OFFER), lambda x: posts.append(x) or True, state,
+                           my_did="zSELF", allow_rails=["paper"],
+                           min_claim_window_ms=60000, min_refund_gap_ms=60000,
+                           dry_run=False, now_ms=now,
+                           job_spec_fn=lambda ctx: "x post or article <=25000 chars")
+    assert res["accepted"] == [REAL_OFFER["id"]] and len(posts) == 1   # job text -> vẫn nhận
