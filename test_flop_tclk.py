@@ -289,6 +289,29 @@ def test_complete_refuses_when_work_fails():
     assert res["revealed"] == [] and posts == []
 
 
+def test_complete_prunes_secrets_on_expire_and_reveal():
+    """Chống phình: deal quá cửa sổ claim HOẶC đã reveal bị pop khỏi tclk_secrets. Deal đang
+    CHỜ (chưa lock) thì giữ lại. Nhờ vậy kho không tích rác + hết log lặp mỗi run."""
+    # hết hạn -> pop
+    contract, state, read_room, kv_get, now = _complete_env(past_claim=True)
+    t.run_tclk_complete(read_room, kv_get, lambda r, x: True, do_work_fn=lambda m: "x",
+                        state=state, my_did="zSELF", now_ms=now, dry_run=False)
+    assert contract not in state["tclk_secrets"]          # dead deal đã dọn
+
+    # đã reveal -> pop, nhưng vẫn nhớ ở tclk_completed để dedup
+    contract, state, read_room, kv_get, now = _complete_env()
+    t.run_tclk_complete(read_room, kv_get, lambda r, x: True, do_work_fn=lambda m: "d",
+                        state=state, my_did="zSELF", now_ms=now, dry_run=False)
+    assert contract not in state["tclk_secrets"]
+    assert contract in state["tclk_completed"]
+
+    # đang CHỜ (chưa lock) -> KHÔNG pop (còn phải theo dõi)
+    contract, state, read_room, kv_get, now = _complete_env(lock_present=False)
+    t.run_tclk_complete(read_room, kv_get, lambda r, x: True, do_work_fn=lambda m: "d",
+                        state=state, my_did="zSELF", now_ms=now, dry_run=False)
+    assert contract in state["tclk_secrets"]
+
+
 # ═══ Bộ lọc chỉ-nhận-job-text ══════════════════════════════════════════════════
 def test_is_media_job():
     assert t.is_media_job("tiktok short video | duration <=90s; 9:16; h264/aac mp4") is True

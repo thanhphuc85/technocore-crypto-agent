@@ -416,8 +416,9 @@ def run_tclk_complete(read_room_fn, kv_get_fn, post_fn, do_work_fn, state, *, my
       kv_get_fn(ns, key)   -> str|None (đã strip banner)
       post_fn(room, text)  -> bool (deliverable + reveal; chỉ khi dry_run=False)
       do_work_fn(meta)     -> str|None (None = không làm được -> KHÔNG reveal)
-    state: 'tclk_secrets' (đã accept) + 'tclk_completed' (đã reveal). Trả
-    {revealed, waiting, expired, dry_run}.
+    state: 'tclk_secrets' (đã accept) + 'tclk_completed' (đã reveal). Deal đã reveal HOẶC quá
+    cửa sổ claim bị POP khỏi 'tclk_secrets' -> kho chỉ giữ deal đang chờ (chống phình + hết
+    log lặp). Trả {revealed, waiting, expired, dry_run}.
 
     `offers_room` = room lock/reveal thực sự diễn ra. Spec gốc bảo deal DỜI sang room riêng
     theo contract (deal_room()), NHƯNG trên technocore.chat room cap thường ĐẦY -> POST tạo
@@ -435,8 +436,9 @@ def run_tclk_complete(read_room_fn, kv_get_fn, post_fn, do_work_fn, state, *, my
             continue
         if now_ms >= meta.get("claimByMs", 0):           # (1) còn cửa sổ claim an toàn
             expired += 1
+            secrets.pop(contract, None)                  # deal CHẾT (hết cửa sổ) -> dọn kho ngay,
             log("[tclk] " + contract[:14] + " quá cửa sổ claim -> bỏ (không reveal muộn)")
-            continue
+            continue                                     # khỏi quét + log lại mỗi run (chống phình)
         try:
             room = offers_room                           # lock/reveal ở lại room offers (room cap
             data = read_room_fn(room)                     # đầy -> deal room mới không tạo được)
@@ -466,6 +468,7 @@ def run_tclk_complete(read_room_fn, kv_get_fn, post_fn, do_work_fn, state, *, my
             if post_fn(room, encode_frame(reveal)):
                 revealed.append(contract)
                 done.add(contract)
+                secrets.pop(contract, None)              # đã reveal -> dọn kho secret (dedup ở tclk_completed)
                 log("[tclk] REVEAL posted " + contract[:14] + " — deal HOÀN TẤT (claim " + amt + ")")
         except Exception as e:
             log("[tclk] complete lỗi " + contract[:14] + ": " + str(e)[:80])
