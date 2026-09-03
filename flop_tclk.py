@@ -574,18 +574,24 @@ def run_tclk_payer(fetch_fn, post_fn, kv_set_ns_fn, state, *, my_did, job_contex
     for oid, o in list(offers.items()):
         if o.get("status") == "settled":
             continue
-        if now_ms >= o.get("refundAfterMs", 0):          # quá hạn hoàn -> bỏ (demo: không refund)
-            offers.pop(oid, None)
-            log("[tclk-payer] " + oid[:14] + " quá refundAfterMs -> bỏ")
-            continue
-        if o.get("status") == "offered":                 # chờ worker accept
-            acc = find_accept_for_offer(msgs, o["fields"], my_did)
+        if o.get("status") == "offered":                 # (a) KIỂM accept TRƯỚC (kẻo bỏ nhầm offer
+            acc = find_accept_for_offer(msgs, o["fields"], my_did)   #     vừa accept sát giờ hết hạn)
             if acc:
                 o.update(status="accepted", contract=acc["contract"],
                          statement=acc["statement"], payee_did=acc["from"])
                 accepted += 1
                 log("[tclk-payer] ACCEPT thấy " + acc["contract"][:14] + " từ "
                     + str(acc["from"])[:16] + " -> LOCK")
+        # (b) Offer VẪN chưa accept mà hết hạn hiển thị -> bỏ để post TƯƠI (giữ offer sống trên board;
+        #     đợi refundAfterMs thì board trống lâu, worker không có gì để accept).
+        if o.get("status") == "offered" and now_ms >= o.get("fields", {}).get("expiresMs", 0):
+            offers.pop(oid, None)
+            log("[tclk-payer] offer " + oid[:14] + " hết hạn hiển thị, chưa ai accept -> post mới")
+            continue
+        if now_ms >= o.get("refundAfterMs", 0):          # đã accept/lock mà quá hạn hoàn -> bỏ
+            offers.pop(oid, None)
+            log("[tclk-payer] " + oid[:14] + " quá refundAfterMs -> bỏ")
+            continue
         if o.get("status") == "accepted" and not dry_run:   # LOCK: ghi paper record + post lock frame
             rec = make_paper_locked_record(o["statement"], o["refundAfterMs"])
             pn = paper_note(o["contract"])

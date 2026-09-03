@@ -436,3 +436,21 @@ def test_payer_full_5step_paper_deal_roundtrip():
                            job_context="/kv/myns/job1", now_ms=now, dry_run=False)
     assert res["settled"] == 1
     assert state["tclk_my_offers"][oid]["status"] == "settled"   # deal 5 bước HOÀN TẤT
+
+
+def test_payer_reposts_when_offer_expires_unaccepted():
+    """Bug fix: offer chưa ai accept mà hết hạn hiển thị -> bỏ + post offer MỚI ngay (giữ offer
+    sống trên board; trước đây đợi refundAfterMs nên board trống lâu, không ai accept được)."""
+    me, now = "did:key:zME", 1_000_000
+    room, state = [], {}
+    fetch = lambda s: {"messages": [{"text": x} for x in room]}
+    post = lambda r, x: room.append(x) or True
+    kv_set = lambda ns, k, v: True
+    t.run_tclk_payer(fetch, post, kv_set, state=state, my_did=me, job_context="/kv/n/k",
+                     now_ms=now, dry_run=False)
+    oid1 = next(iter(state["tclk_my_offers"]))
+    exp = state["tclk_my_offers"][oid1]["fields"]["expiresMs"]
+    res = t.run_tclk_payer(fetch, post, kv_set, state=state, my_did=me, job_context="/kv/n/k",
+                           now_ms=exp + 1, dry_run=False)     # sau khi offer cũ hết hạn
+    assert oid1 not in state["tclk_my_offers"]                # offer cũ đã bỏ
+    assert res["posted"] == 1 and len(state["tclk_my_offers"]) == 1   # thay bằng offer tươi
