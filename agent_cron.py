@@ -307,6 +307,12 @@ TCLK_RAILS = [r.strip().lower() for r in (
 TCLK_MAX_PER_RUN = int(_env_float("FLOP_TCLK_MAX_PER_RUN", 2))
 TCLK_MIN_CLAIM_WINDOW_MS = int(_env_float("FLOP_TCLK_MIN_CLAIM_WINDOW_MS", 5 * 60 * 1000))
 TCLK_MIN_REFUND_GAP_MS = int(_env_float("FLOP_TCLK_MIN_REFUND_GAP_MS", 5 * 60 * 1000))
+# VÒNG HOÀN TẤT (reveal=claim) — GATED RIÊNG, dry-run mặc định. Chỉ chạy trên deal đã accept
+# live. reveal chỉ khi payer đã lock + rail xác nhận + làm được việc (guard trong flop_tclk).
+TCLK_COMPLETE_ENABLED = os.environ.get("FLOP_TCLK_COMPLETE_ENABLED", "").strip().lower() in (
+    "1", "true", "on", "yes")
+TCLK_COMPLETE_DRY_RUN = os.environ.get("FLOP_TCLK_COMPLETE_DRY_RUN", "").strip().lower() not in (
+    "0", "false", "off", "no")
 
 # --- LLM giọng điệu (persona) theo NGỮ CẢNH ---
 # Lớp AN TOÀN là hằng số, KHÔNG đổi theo tone: untrusted, không lộ key, 1 câu ngắn.
@@ -714,6 +720,43 @@ def kv_get(key: str):
         return lines[-1].strip() if lines else None
     except requests.RequestException:
         return None
+
+
+def kv_get_ns(ns: str, key: str):
+    """Như kv_get nhưng cho namespace BẤT KỲ (dùng đọc paper-record + job-spec của tclk)."""
+    try:
+        r = requests.get(f"{BASE_URL}/kv/{ns}/{key}", headers={"User-Agent": UA}, timeout=10)
+        if r.status_code != 200:
+            return None
+        lines = [ln for ln in r.text.splitlines() if ln.strip() and not ln.startswith("!!")]
+        return lines[-1].strip() if lines else None
+    except requests.RequestException:
+        return None
+
+
+def tclk_do_work(meta: dict):
+    """Làm việc cho 1 deal tclk: đọc job-spec (KV note ở job.context) rồi sinh deliverable bằng
+    LLM (cùng lớp guard như kibble). Trả None khi: không có provider / không có spec / model SKIP
+    / bị guard chặn -> caller KHÔNG reveal (giữ thiện chí, chỉ claim khi thật sự làm được)."""
+    if not _active_provider():
+        return None
+    job = meta.get("job") or {}
+    m = re.match(r"^/kv/([^/]+)/([^/]+)$", (job.get("context") or ""))
+    spec = kv_get_ns(m.group(1), m.group(2)) if m else None
+    if not spec:
+        return None                              # không biết phải làm gì -> không reveal
+    prompt = isolate_for_llm(f"[job {job.get('id', '')}] {spec}")
+    try:
+        raw, provider = _provider_reply(prompt, KIBBLE_SYSTEM, KIBBLE_TEMPERATURE)
+    except Exception as e:
+        print(f"[tclk] work failed | {e}")
+        return None
+    text = guard_output(" ".join((raw or "").split()).strip())
+    if not text or (len(text) <= 40 and text.upper().startswith("SKIP")):
+        return None
+    text = text[:KIBBLE_MAX_CHARS]
+    _meter_flop(f"{provider} tclk-work", event_id=meta.get("offer_id") or "tclk")
+    return text
 
 
 # --- Heartbeat phối hợp runner CHÍNH/PHỤ (xem RUNNER_ROLE) ---
@@ -2081,6 +2124,30 @@ def main():
             tclk_status = "error"
             print(f"[tclk] bỏ qua ({str(e)[:100]})")
 
+    # 3a4) (Tùy chọn, GATED RIÊNG, dry-run mặc định) Chạy vòng hoàn tất tclk — logic + mọi guard
+    #      nằm trong flop_tclk.run_tclk_complete. Bọc kín, cùng health-guard đường ghi.
+    tclk_done_status = "off"
+    if TCLK_COMPLETE_ENABLED and not TCLK_COMPLETE_DRY_RUN and posts_degraded():
+        tclk_done_status = "skip-outage"
+    elif TCLK_COMPLETE_ENABLED:
+        try:
+            import flop_tclk
+            cs = flop_tclk.run_tclk_complete(
+                read_room_fn=lambda room: fetch_messages(None, room=room),
+                kv_get_fn=kv_get_ns,
+                post_fn=lambda room, text: post_message(private_key, did, text, room=room),
+                do_work_fn=tclk_do_work,
+                state=state, my_did=did, now_ms=now * 1000,
+                dry_run=TCLK_COMPLETE_DRY_RUN,
+            )
+            save_state({"tclk_secrets": state.get("tclk_secrets", {}),
+                        "tclk_completed": state.get("tclk_completed", [])})
+            mode = "dry" if TCLK_COMPLETE_DRY_RUN else "live"
+            tclk_done_status = f"{mode} {len(cs['revealed'])}rev/{cs['waiting']}wait/{cs['expired']}exp"
+        except Exception as e:
+            tclk_done_status = "error"
+            print(f"[tclk] complete bỏ qua ({str(e)[:100]})")
+
     # 3b) (Tùy chọn, GATED) Công khai tiến độ MỞ KHÓA MAINNET 3:1 vào KV note `unlock`
     #     để ai cũng audit được (GET /kv/<ns>/unlock). Mặc định TẮT (FLOP_PUBLISH_UNLOCK)
     #     -> agent không đổi hành vi. Bọc kín: lỗi bị nuốt, không làm sập run.
@@ -2113,14 +2180,14 @@ def main():
         f"- digest: **{digest_status}**",
         f"- recap: **{recap_status}**",
         f"- kibble: **{kibble_status}**",
-        f"- tclk: **{tclk_status}**",
+        f"- tclk: **{tclk_status}** · complete: **{tclk_done_status}**",
         f"- replies: **{replies}** · proactive: **{proactive}**",
         f"- technocore.chat 200s: **{_server_ok_count}**",
     ]
     print(f"[run] telemetry={tele_status} manifest={manifest_status} "
           f"digest={digest_status} recap={recap_status} kibble={kibble_status} "
-          f"tclk={tclk_status} replies={replies} proactive={proactive} "
-          f"server200s={_server_ok_count}")
+          f"tclk={tclk_status} tclk_done={tclk_done_status} replies={replies} "
+          f"proactive={proactive} server200s={_server_ok_count}")
 
     if _server_ok_count == 0:
         summary.append("- ⚠️ **Không call nào tới technocore.chat thành công "

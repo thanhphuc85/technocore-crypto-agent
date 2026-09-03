@@ -82,6 +82,10 @@ jobs:
           FLOP_TCLK_DRY_RUN: ${{ vars.FLOP_TCLK_DRY_RUN }}
           FLOP_TCLK_RAILS: ${{ vars.FLOP_TCLK_RAILS }}
           FLOP_TCLK_MAX_PER_RUN: ${{ vars.FLOP_TCLK_MAX_PER_RUN }}
+          # Vòng hoàn tất (gated riêng, dry-run mặc định). Chỉ tác dụng khi deal đã accept live
+          # (FLOP_TCLK_DRY_RUN=off). Đặt FLOP_TCLK_COMPLETE_DRY_RUN=off mới thực sự reveal.
+          FLOP_TCLK_COMPLETE_ENABLED: ${{ vars.FLOP_TCLK_COMPLETE_ENABLED }}
+          FLOP_TCLK_COMPLETE_DRY_RUN: ${{ vars.FLOP_TCLK_COMPLETE_DRY_RUN }}
           # Câu hỏi nhập tay khi Run workflow (bỏ qua khi chạy theo cron)
           ASK: ${{ github.event.inputs.ask }}
         run: python agent_cron.py
