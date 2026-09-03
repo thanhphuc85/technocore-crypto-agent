@@ -291,6 +291,23 @@ KIBBLE_SYSTEM = (
     "Plain text, no markdown, no preamble."
 )
 
+# --- (tclk/1) Vai PAYEE trên board deal-making /r/tclk-offers (HTLC/PTLC cho agent).
+#     PHÁT HIỆN offer (payer trả tiền) + dựng frame `accept` đúng chuẩn. Mặc định TẮT; khi bật
+#     thì DRY-RUN (chỉ log accept, không post) cho tới FLOP_TCLK_DRY_RUN=off. Logic ở flop_tclk.py.
+#     AN TOÀN: module CHỈ discover+accept — KHÔNG BAO GIỜ tự lock/reveal (reveal=claim tiền).
+#     Alpha/testnet/chưa audit (theo spec Flop Labs) -> không dùng cho giá trị thật.
+TCLK_ENABLED = os.environ.get("FLOP_TCLK_ENABLED", "").strip().lower() in (
+    "1", "true", "on", "yes")
+TCLK_DRY_RUN = os.environ.get("FLOP_TCLK_DRY_RUN", "").strip().lower() not in (
+    "0", "false", "off", "no")            # dry-run mặc định BẬT (an toàn)
+TCLK_ROOM = os.environ.get("FLOP_TCLK_ROOM", "").strip() or "tclk-offers"
+TCLK_RAILS = [r.strip().lower() for r in (
+    os.environ.get("FLOP_TCLK_RAILS", "").strip() or "flop-htlc,x402,paper"
+    ).split(",") if r.strip()]            # rail mình sẵn sàng settle (rỗng-như-chưa-set -> default)
+TCLK_MAX_PER_RUN = int(_env_float("FLOP_TCLK_MAX_PER_RUN", 2))
+TCLK_MIN_CLAIM_WINDOW_MS = int(_env_float("FLOP_TCLK_MIN_CLAIM_WINDOW_MS", 5 * 60 * 1000))
+TCLK_MIN_REFUND_GAP_MS = int(_env_float("FLOP_TCLK_MIN_REFUND_GAP_MS", 5 * 60 * 1000))
+
 # --- LLM giọng điệu (persona) theo NGỮ CẢNH ---
 # Lớp AN TOÀN là hằng số, KHÔNG đổi theo tone: untrusted, không lộ key, 1 câu ngắn.
 LLM_SAFETY = (
@@ -2033,6 +2050,37 @@ def main():
             kibble_status = "error"
             print(f"[kibble] bỏ qua ({str(e)[:100]})")
 
+    # 3a3) (Tùy chọn, GATED) tclk/1 payee — PHÁT HIỆN offer trên /r/tclk-offers + dựng `accept`.
+    #      Mặc định TẮT; khi bật thì DRY-RUN (chỉ log). CHỈ discover+accept, KHÔNG lock/reveal.
+    #      Cùng health-guard như kibble: đường ghi lỗi -> bỏ qua (accept là 1 POST). Bọc kín.
+    tclk_status = "off"
+    if TCLK_ENABLED and not TCLK_DRY_RUN and posts_degraded():
+        tclk_status = "skip-outage"
+        print(f"[tclk] bỏ qua — đường ghi lỗi (post ok={_post_ok_count} fail={_post_fail_count}).")
+    elif TCLK_ENABLED:
+        try:
+            import flop_tclk
+            ts = flop_tclk.run_tclk_payee(
+                fetch_fn=lambda since: fetch_messages(since, room=TCLK_ROOM),
+                post_fn=lambda text: post_message(private_key, did, text, room=TCLK_ROOM),
+                state=state,
+                my_did=did,
+                allow_rails=TCLK_RAILS,
+                min_claim_window_ms=TCLK_MIN_CLAIM_WINDOW_MS,
+                min_refund_gap_ms=TCLK_MIN_REFUND_GAP_MS,
+                max_per_run=TCLK_MAX_PER_RUN,
+                dry_run=TCLK_DRY_RUN,
+                now_ms=now * 1000,
+            )
+            save_state({"tclk_cursor": state.get("tclk_cursor"),
+                        "tclk_accepted": state.get("tclk_accepted", []),
+                        "tclk_secrets": state.get("tclk_secrets", {})})
+            mode = "dry" if TCLK_DRY_RUN else "live"
+            tclk_status = f"{mode} {len(ts['accepted'])}acc/{ts['skipped']}skip/{ts['scanned']}scan"
+        except Exception as e:
+            tclk_status = "error"
+            print(f"[tclk] bỏ qua ({str(e)[:100]})")
+
     # 3b) (Tùy chọn, GATED) Công khai tiến độ MỞ KHÓA MAINNET 3:1 vào KV note `unlock`
     #     để ai cũng audit được (GET /kv/<ns>/unlock). Mặc định TẮT (FLOP_PUBLISH_UNLOCK)
     #     -> agent không đổi hành vi. Bọc kín: lỗi bị nuốt, không làm sập run.
@@ -2065,12 +2113,14 @@ def main():
         f"- digest: **{digest_status}**",
         f"- recap: **{recap_status}**",
         f"- kibble: **{kibble_status}**",
+        f"- tclk: **{tclk_status}**",
         f"- replies: **{replies}** · proactive: **{proactive}**",
         f"- technocore.chat 200s: **{_server_ok_count}**",
     ]
     print(f"[run] telemetry={tele_status} manifest={manifest_status} "
           f"digest={digest_status} recap={recap_status} kibble={kibble_status} "
-          f"replies={replies} proactive={proactive} server200s={_server_ok_count}")
+          f"tclk={tclk_status} replies={replies} proactive={proactive} "
+          f"server200s={_server_ok_count}")
 
     if _server_ok_count == 0:
         summary.append("- ⚠️ **Không call nào tới technocore.chat thành công "

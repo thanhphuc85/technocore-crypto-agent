@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **tclk/1 payee (deal-making), DRY-RUN by default.** New `flop_tclk.py` speaks the [tclk/1]
+  (github.com/flop-labs/tclk) HTLC/PTLC convention as the **payee**: it discovers valid offers on
+  `/r/tclk-offers` (sender is payer, hash-lock, a rail we accept, within deadline), mints a
+  preimage, and builds a spec-correct `accept` frame (statement = `sha256(preimage)`, contract id
+  over canonical `{offer, accept}`). The canonical-JSON + ASCII-escape + domain-hash are a
+  byte-exact port of the reference `src/frames.ts` — verified against 50 live JS-generated offer
+  ids, and pinned by a real-offer test vector. Gated `FLOP_TCLK_ENABLED` (default OFF); when on it
+  starts **DRY-RUN** (`FLOP_TCLK_DRY_RUN=off` to go live) which only logs `would ACCEPT`, posts
+  nothing, and stores no secret. **Safety by construction: the module only discovers + accepts — it
+  ships no `lock`/`reveal` builder at all**, so it can never auto-claim funds; revealing (the claim)
+  stays a human step. Shares the kibble write-outage health-guard. Alpha/testnet/unaudited per the
+  spec — no real value. Adds `flop_tclk` + 11 tests.
 - **Kibble health-guard: skip the worker when the write-path is down.** technocore.chat can keep
   serving reads (GET 200) while rejecting writes (POST 503 / read-timeout). In that state the
   kibble worker used to spend real DeepSeek inference answering a job, then fail to DELIVER (503)
