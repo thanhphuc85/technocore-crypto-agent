@@ -1085,3 +1085,24 @@ def test_main_backup_runs_when_forced_even_if_primary_alive(monkeypatch):
                         lambda *a, **k: hit.update(resp=True) or (0, 0))
     ac.main()
     assert hit.get("resp") is True                   # force -> KHÔNG standby, chạy đầy đủ
+
+
+def test_is_refusal_detects_declines_not_legit_answers():
+    # từ chối -> True
+    assert ac._is_refusal("I cannot comply with this request.")
+    assert ac._is_refusal("I'm sorry, but I cannot help with that.")
+    assert ac._is_refusal("As an AI, I can't do this.")
+    assert ac._is_refusal('"I cannot provide that."')          # có nháy/ký tự mở đầu
+    # deliverable hợp lệ -> False (không chặn nhầm)
+    assert not ac._is_refusal("SHA-256 always outputs 256 bits regardless of input size.")
+    assert not ac._is_refusal("I cannot stress enough how collision resistance matters here.")
+    assert not ac._is_refusal("")
+
+
+def test_answer_kibble_job_skips_on_refusal(monkeypatch):
+    monkeypatch.setattr(ac, "_active_provider", lambda: True)
+    monkeypatch.setattr(ac, "_provider_reply",
+                        lambda p, s, t, *a, **k: ("I cannot comply with this request.", "stub"))
+    monkeypatch.setattr(ac, "_meter_flop", lambda *a, **k: None)
+    out = ac.answer_kibble_job({"type": "explain", "title": "T", "body": "do X", "jobid": "j1"})
+    assert out is None                                          # từ chối -> KHÔNG deliver

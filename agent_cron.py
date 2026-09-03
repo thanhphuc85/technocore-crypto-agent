@@ -803,8 +803,8 @@ def tclk_do_work(meta: dict):
         print(f"[tclk] work failed | {e}")
         return None
     text = guard_output(" ".join((raw or "").split()).strip())
-    if not text or (len(text) <= 40 and text.upper().startswith("SKIP")):
-        return None
+    if not text or (len(text) <= 40 and text.upper().startswith("SKIP")) or _is_refusal(text):
+        return None                              # rỗng / SKIP / TỪ CHỐI -> không làm được -> KHÔNG reveal
     text = text[:KIBBLE_MAX_CHARS]
     _meter_flop(f"{provider} tclk-work", event_id=meta.get("offer_id") or "tclk")
     return text
@@ -927,6 +927,28 @@ def guard_output(text: str):
         print("[guard] output blocked: prompt/delimiter leak")
         return None
     return text
+
+
+# Mẫu mở đầu câu TỪ CHỐI của model — không phải deliverable thật. Chỉ khớp ở ĐẦU câu (sau khi bỏ
+# dấu nháy/gạch), tránh chặn nhầm câu trả lời hợp lệ có chứa mấy cụm này ở giữa. Dùng cho việc
+# kibble/tclk: từ chối -> KHÔNG deliver/reveal (không claim khi thực sự không làm được).
+_REFUSAL_MARKERS = (
+    "i cannot comply", "i can't comply", "i cannot fulfill", "i can't fulfill",
+    "i cannot help", "i can't help", "i cannot assist", "i can't assist",
+    "i cannot provide", "i can't provide", "i cannot create", "i can't create",
+    "i cannot generate", "i can't generate", "i cannot complete", "i can't complete",
+    "i'm unable to", "i am unable to", "i won't be able", "i will not be able",
+    "i'm sorry, but i cannot", "i'm sorry, but i can't", "i'm sorry, i cannot",
+    "i'm sorry, i can't", "i apologize, but i cannot", "i apologize, but i can't",
+    "sorry, i cannot", "sorry, i can't", "unable to comply", "unable to assist",
+    "as an ai", "as a language model",
+)
+
+
+def _is_refusal(text: str) -> bool:
+    """True nếu output là lời TỪ CHỐI của model (không phải deliverable) -> caller KHÔNG claim."""
+    low = " ".join((text or "").split()).lower().lstrip("\"'*-—•.() ")
+    return any(low.startswith(m) for m in _REFUSAL_MARKERS)
 
 
 def safe_nick(nick: str) -> str:
@@ -1270,6 +1292,9 @@ def answer_kibble_job(job: dict):
     # (vd 'Skip lists are a data structure...', 'Skip connections in ResNets...').
     if len(text) <= 40 and text.upper().startswith("SKIP"):
         print(f"[kibble:{provider}] skip {job.get('jobid')} — model declined (SKIP)")
+        return None
+    if _is_refusal(text):                        # model TỪ CHỐI (vd "I cannot comply...") -> không claim
+        print(f"[kibble:{provider}] skip {job.get('jobid')} — model từ chối (refusal)")
         return None
     text = text[:KIBBLE_MAX_CHARS]
     _meter_flop(f"{provider} kibble:{jtype}", event_id=job.get("jobid"))
