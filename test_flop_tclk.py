@@ -252,13 +252,26 @@ def test_complete_uses_offers_room_not_deal_room():
     assert t.deal_room(contract) not in seen_read + seen_post  # TUYỆT ĐỐI không dùng deal room
 
 
-def test_complete_waits_when_no_lock():
-    contract, state, read_room, kv_get, now = _complete_env(lock_present=False)
+def test_complete_waits_when_kv_not_locked():
+    # CỔNG = paper KV record: rail CHƯA ghi locked -> chờ (dù có/không có frame)
+    contract, state, read_room, kv_get, now = _complete_env(paper_ok=False)
     posts = []
     res = t.run_tclk_complete(read_room, kv_get, lambda r, x: posts.append(x) or True,
                               do_work_fn=lambda meta: "x", state=state, my_did="zSELF",
                               now_ms=now, dry_run=False)
     assert res["revealed"] == [] and res["waiting"] == 1 and posts == []
+
+
+def test_complete_reveals_via_kv_without_frame():
+    # PR B: lock FRAME đã cuộn khỏi cửa sổ (room KHÔNG có frame) nhưng paper KV record XÁC NHẬN
+    # locked -> VẪN reveal. KV là cổng, không phụ thuộc frame -> bắt được lock dù nhịp chạy thưa.
+    contract, state, read_room, kv_get, now = _complete_env(lock_present=False)
+    posts = []
+    res = t.run_tclk_complete(read_room, kv_get, lambda r, x: posts.append(x) or True,
+                              do_work_fn=lambda meta: "d", state=state, my_did="zSELF",
+                              now_ms=now, dry_run=False)
+    assert res["revealed"] == [contract] and res["waiting"] == 0
+    assert len(posts) == 2                               # deliver + reveal vẫn xảy ra
 
 
 def test_complete_refuses_when_rail_not_confirmed():
@@ -305,8 +318,8 @@ def test_complete_prunes_secrets_on_expire_and_reveal():
     assert contract not in state["tclk_secrets"]
     assert contract in state["tclk_completed"]
 
-    # đang CHỜ (chưa lock) -> KHÔNG pop (còn phải theo dõi)
-    contract, state, read_room, kv_get, now = _complete_env(lock_present=False)
+    # đang CHỜ (KV chưa xác nhận lock) -> KHÔNG pop (còn phải theo dõi)
+    contract, state, read_room, kv_get, now = _complete_env(paper_ok=False)
     t.run_tclk_complete(read_room, kv_get, lambda r, x: True, do_work_fn=lambda m: "d",
                         state=state, my_did="zSELF", now_ms=now, dry_run=False)
     assert contract in state["tclk_secrets"]
