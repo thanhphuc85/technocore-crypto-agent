@@ -454,3 +454,24 @@ def test_payer_reposts_when_offer_expires_unaccepted():
                            now_ms=exp + 1, dry_run=False)     # sau khi offer cũ hết hạn
     assert oid1 not in state["tclk_my_offers"]                # offer cũ đã bỏ
     assert res["posted"] == 1 and len(state["tclk_my_offers"]) == 1   # thay bằng offer tươi
+
+
+def test_complete_drops_stale_unlocked_accept():
+    """Deal chờ đã CŨ mà payer chưa lock -> POP (chống phình + run nhanh: mỗi deal chờ = 1 read
+    KV/run, 195 deal = run 6' -> chồng nhịp). Deal MỚI chưa lock -> vẫn giữ chờ."""
+    stmt = "0x" + "c" * 64
+    c_stale, c_fresh = "0x" + "1" * 64, "0x" + "2" * 64
+    now = 100 * 60 * 1000
+    base = {"preimage": "0x" + "e" * 64, "statement": stmt, "payer_did": "zP",
+            "amount": "1", "asset": "PAPER", "claimByMs": now + 60 * 60 * 1000,
+            "refundAfterMs": now + 120 * 60 * 1000}
+    state = {"tclk_secrets": {
+        c_stale: {**base, "accepted_ms": now - 40 * 60 * 1000},   # accept 40' trước -> stale
+        c_fresh: {**base, "accepted_ms": now - 5 * 60 * 1000},    # accept 5' trước -> còn chờ
+    }}
+    res = t.run_tclk_complete(lambda room: {"messages": []}, lambda ns, key: None,
+                              lambda r, x: True, do_work_fn=lambda m: "d", state=state,
+                              my_did="zSELF", now_ms=now, dry_run=False, stale_wait_ms=30 * 60 * 1000)
+    assert res["stale"] == 1 and res["waiting"] == 1
+    assert c_stale not in state["tclk_secrets"]                  # cũ + chưa lock -> bỏ
+    assert c_fresh in state["tclk_secrets"]                      # mới -> giữ chờ

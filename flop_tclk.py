@@ -410,7 +410,8 @@ def find_payer_lock(messages, contract: str, payer_did: str):
 
 
 def run_tclk_complete(read_room_fn, kv_get_fn, post_fn, do_work_fn, state, *, my_did,
-                      offers_room="tclk-offers", now_ms=None, dry_run=True, max_per_run=2, log=print):
+                      offers_room="tclk-offers", stale_wait_ms=30 * 60 * 1000,
+                      now_ms=None, dry_run=True, max_per_run=2, log=print):
     """Hoàn tất deal đã accept: chờ payer lock -> verify rail -> làm việc -> reveal.
       read_room_fn(room)   -> data JSON /r/<room> (đọc 1 lần: lock frame chỉ để LOG)
       kv_get_fn(ns, key)   -> str|None (đã strip banner) — CỔNG lock thật (paper KV record)
@@ -436,7 +437,7 @@ def run_tclk_complete(read_room_fn, kv_get_fn, post_fn, do_work_fn, state, *, my
     now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
     secrets = state.get("tclk_secrets", {})
     done = set(state.get("tclk_completed", []))
-    revealed, waiting, expired = [], 0, 0
+    revealed, waiting, expired, stale = [], 0, 0, 0
     # Đọc room offers MỘT LẦN (không phải mỗi contract): lock FRAME chỉ để LOG, KHÔNG phải cổng.
     # Frame cuộn khỏi cửa sổ 200 tin (~15') là chuyện thường -> nếu bắt frame làm điều kiện thì
     # nhịp chạy thưa sẽ MISS mọi lock. Escrow THẬT của rail paper = paper KV record (bền, theo
@@ -455,7 +456,14 @@ def run_tclk_complete(read_room_fn, kv_get_fn, post_fn, do_work_fn, state, *, my
             pn = paper_note(contract)                    # (2) CỔNG: rail XÁC NHẬN lock qua KV record
             rec = decode_paper_record(kv_get_fn(pn["ns"], pn["key"]) or "")   # (bền, không tin frame)
             if not verify_paper_lock(rec, "hash", meta.get("statement"), meta.get("refundAfterMs")):
-                waiting += 1                             # payer chưa lock (rail chưa ghi) -> chờ
+                # payer chưa lock. Payer lock SỚM (ngay sau accept) hoặc KHÔNG bao giờ; deal chờ đã
+                # CŨ mà chưa lock -> coi như payer bỏ -> POP để tập chờ nhỏ lại (mỗi deal chờ tốn 1
+                # read KV/run; 195 deal = run 6' -> chồng nhịp cron 5' -> đua state). Còn mới -> chờ.
+                if now_ms - meta.get("accepted_ms", now_ms) > stale_wait_ms:
+                    secrets.pop(contract, None)
+                    stale += 1
+                else:
+                    waiting += 1
                 continue
             has_frame = find_payer_lock(room_msgs, contract, meta.get("payer_did")) is not None
             deliverable = do_work_fn(meta) if do_work_fn else None   # (3) làm THẬT; không được -> bỏ
@@ -481,7 +489,8 @@ def run_tclk_complete(read_room_fn, kv_get_fn, post_fn, do_work_fn, state, *, my
             continue
     if not dry_run:
         state["tclk_completed"] = list(done)[-200:]
-    return {"revealed": revealed, "waiting": waiting, "expired": expired, "dry_run": dry_run}
+    return {"revealed": revealed, "waiting": waiting, "expired": expired, "stale": stale,
+            "dry_run": dry_run}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
