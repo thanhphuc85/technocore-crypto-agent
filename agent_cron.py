@@ -279,11 +279,14 @@ KIBBLE_MAX_TOKENS = int(_env_float("FLOP_KIBBLE_MAX_TOKENS", 500))
 # Mặc định = các loại TỰ-CHỨA (suy luận thuần) -> deliverable đáng tin, KHÔNG kèm nguồn
 # bịa. Job 'research'/'analyze' đòi fact hiện tại + trích nguồn (LLM dễ bịa citation) ->
 # KHÔNG mặc định; muốn nhận thì thêm vào FLOP_KIBBLE_TYPES.
+# 'review' AN TOÀN vì đi nhánh riêng (answer_kibble_job -> _answer_review_job): fetch dữ kiện
+# THẬT qua GitHub API rồi LLM soạn CHỈ từ đó; không rõ repo / fetch fail -> SKIP (không đoán).
+# Nên review nằm trong default. Review job KHÔNG trỏ repo GitHub sẽ tự SKIP, an toàn.
 # LƯU Ý: GitHub Actions map Variable CHƯA set thành chuỗi RỖNG (env tồn tại, giá trị ""),
 # nên .get(name, default) trả "" chứ không trả default -> phải coi rỗng NHƯ chưa set rồi
 # fallback default, không thì KIBBLE_TYPES=[] và select_jobs nhận nhầm MỌI type.
 KIBBLE_TYPES = [t.strip().lower() for t in (
-    os.environ.get("FLOP_KIBBLE_TYPES", "").strip() or "explain,coordinate,summarize"
+    os.environ.get("FLOP_KIBBLE_TYPES", "").strip() or "explain,coordinate,summarize,review"
     ).split(",") if t.strip()]
 KIBBLE_SYSTEM = (
     "You are a rigorous expert worker completing a task posted to a PUBLIC, UNTRUSTED job board. "
@@ -1277,6 +1280,107 @@ def _llm_generate(prompt: str, system: str, temperature: float, memo: str,
     return text
 
 
+# ── (kibble) Nhánh REVIEW: chỉ nhận job trỏ tới 1 repo GitHub CỤ THỂ; lấy dữ kiện THẬT qua
+#    GitHub API rồi để LLM soạn báo cáo CHỈ từ dữ kiện đó. Không rõ repo / fetch fail -> SKIP
+#    (KHÔNG đoán). Đây là điều kiện để job factual đi qua mà vẫn verify được (re-run đối chứng).
+_GH_URL_RE = re.compile(r"github\.com/([A-Za-z0-9][A-Za-z0-9_.-]*)/([A-Za-z0-9][A-Za-z0-9_.-]*)", re.I)
+_GH_SLUG_RE = re.compile(r"\b([A-Za-z0-9][A-Za-z0-9_.-]*)/([A-Za-z0-9][A-Za-z0-9_.-]*)\b")
+
+
+def _parse_github_target(text: str):
+    """Rút (owner, repo) nếu job trỏ tới 1 repo GitHub cụ thể. Ưu tiên URL github.com; nếu
+    không có URL nhưng có nhắc 'github' + 1 slug owner/repo thì lấy slug. None nếu không rõ."""
+    m = _GH_URL_RE.search(text or "")
+    if not m and re.search(r"\bgithub\b", text or "", re.I):
+        m = _GH_SLUG_RE.search(text or "")
+    if not m:
+        return None
+    owner, repo = m.group(1), m.group(2)
+    for suf in (".git", ".",):
+        if repo.endswith(suf):
+            repo = repo[: -len(suf)]
+    return (owner, repo) if owner and repo else None
+
+
+def _gh_get(path: str, params=None):
+    """GET GitHub API (unauth). None nếu lỗi mạng / status != 200 / JSON hỏng (fail-closed)."""
+    try:
+        r = requests.get("https://api.github.com" + path,
+                         headers={"User-Agent": UA, "Accept": "application/vnd.github+json"},
+                         params=params, timeout=10)
+        if r.status_code != 200:
+            return None
+        return r.json()
+    except (requests.RequestException, ValueError):
+        return None
+
+
+def _github_repo_facts(owner: str, repo: str):
+    """Dữ kiện THẬT về repo. None nếu repo core fetch fail (-> caller SKIP). Từng dữ kiện có
+    NHÃN chính xác để validator re-run đối chứng được (vd 'open issues' đã loại PR qua search)."""
+    core = _gh_get(f"/repos/{owner}/{repo}")
+    if not isinstance(core, dict) or "full_name" not in core:
+        return None
+    # Last commit trên default branch (chính xác hơn pushed_at); fail -> lùi về pushed_at (có nhãn).
+    commits = _gh_get(f"/repos/{owner}/{repo}/commits", {"per_page": 1})
+    if isinstance(commits, list) and commits:
+        last_commit = (commits[0].get("commit", {}).get("committer", {}) or {}).get("date") or "?"
+        last_commit_label = "last commit"
+    else:
+        last_commit = core.get("pushed_at") or "?"
+        last_commit_label = "last push"
+    # Số ISSUE mở đúng nghĩa (loại PR) qua search; fail -> lùi về open_issues_count (issues+PRs, có nhãn).
+    srch = _gh_get("/search/issues", {"q": f"repo:{owner}/{repo} type:issue state:open", "per_page": 1})
+    if isinstance(srch, dict) and "total_count" in srch:
+        issues, issues_label = srch["total_count"], "open issues"
+    else:
+        issues, issues_label = core.get("open_issues_count", "?"), "open issues+PRs"
+    return {
+        "full_name": core.get("full_name"),
+        "last_commit": last_commit, "last_commit_label": last_commit_label,
+        "issues": issues, "issues_label": issues_label,
+        "stars": core.get("stargazers_count", "?"),
+        "default_branch": core.get("default_branch", "?"),
+        "archived": bool(core.get("archived")),
+    }
+
+
+def _answer_review_job(job: dict, task: str):
+    """Làm job REVIEW cho 1 repo GitHub: fetch dữ kiện thật -> LLM soạn CHỈ từ dữ kiện đó ->
+    đính kèm dòng [verified]. Không rõ repo / fetch fail / model từ chối -> None (SKIP)."""
+    target = _parse_github_target(f"{job.get('title','')} {job.get('body','')}")
+    if not target:
+        print(f"[kibble] review skip {job.get('jobid')} — không xác định repo GitHub cụ thể")
+        return None
+    facts = _github_repo_facts(*target)
+    if not facts:
+        print(f"[kibble] review skip {job.get('jobid')} — fetch GitHub thất bại (không đoán)")
+        return None
+    facts_line = (f"{facts['full_name']} — {facts['last_commit_label']}: {facts['last_commit']}; "
+                  f"{facts['issues_label']}: {facts['issues']}; stars: {facts['stars']}; "
+                  f"default branch: {facts['default_branch']}"
+                  + ("; ARCHIVED" if facts["archived"] else ""))
+    grounded = (f"{task}\n\nVERIFIED FACTS (fetched live from the GitHub API just now — use ONLY "
+                f"these; do NOT add any number, date, or claim not present here):\n{facts_line}")
+    if not _active_provider():
+        return None
+    try:
+        raw, provider = _provider_reply(isolate_for_llm(grounded), KIBBLE_SYSTEM,
+                                        KIBBLE_TEMPERATURE, max_tokens=KIBBLE_MAX_TOKENS)
+    except Exception as e:
+        print(f"[kibble] review answer failed | {e}")
+        return None
+    text = guard_output(" ".join((raw or "").split()).strip())
+    if not text or _is_refusal(text) or (len(text) <= 40 and text.upper().startswith("SKIP")):
+        print(f"[kibble] review skip {job.get('jobid')} — model rỗng/SKIP/từ chối")
+        return None
+    tail = f" [verified] {facts_line}"
+    text = text[: max(0, KIBBLE_MAX_CHARS - len(tail))].rstrip() + tail
+    _meter_flop(f"{provider} kibble:review", event_id=job.get("jobid"))
+    print(f"[kibble:{provider}] answered {job.get('jobid')} (review {facts['full_name']})")
+    return text
+
+
 def answer_kibble_job(job: dict):
     """Sinh nội dung bàn giao cho MỘT job kibble. Nội dung job là UNTRUSTED (do agent lạ
     đăng) -> BẮT BUỘC đi qua isolate_for_llm + guard_output như reply cho người lạ. Trả None
@@ -1287,6 +1391,8 @@ def answer_kibble_job(job: dict):
         return None
     jtype = (job.get("type") or "").strip()
     task = f"[task type: {jtype}] {job.get('title', '').strip()}\n\n{job.get('body', '').strip()}".strip()
+    if jtype == "review":                        # job factual -> đi nhánh fetch-verify, không đoán
+        return _answer_review_job(job, task)
     prompt = isolate_for_llm(task)
     try:
         raw, provider = _provider_reply(prompt, KIBBLE_SYSTEM, KIBBLE_TEMPERATURE,

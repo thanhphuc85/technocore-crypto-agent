@@ -1106,3 +1106,84 @@ def test_answer_kibble_job_skips_on_refusal(monkeypatch):
     monkeypatch.setattr(ac, "_meter_flop", lambda *a, **k: None)
     out = ac.answer_kibble_job({"type": "explain", "title": "T", "body": "do X", "jobid": "j1"})
     assert out is None                                          # từ chối -> KHÔNG deliver
+
+
+# ── kibble review-tool (fetch-verify GitHub) ────────────────────────────────
+def test_parse_github_target_url_and_slug():
+    assert ac._parse_github_target("see github.com/ClickHouse/ClickHouse now") == ("ClickHouse", "ClickHouse")
+    assert ac._parse_github_target("https://github.com/torvalds/linux.git") == ("torvalds", "linux")
+    assert ac._parse_github_target("look at facebook/react on github") == ("facebook", "react")
+    # không nhắc github + không URL -> None (tránh nuốt nhầm mọi 'a/b')
+    assert ac._parse_github_target("ratio 3/4 of the pixels") is None
+    assert ac._parse_github_target("Verify lobby message frequency for 5 mins") is None
+    assert ac._parse_github_target("") is None
+
+
+def _fake_gh(mapping):
+    def _g(path, params=None):
+        if path.startswith("/repos/") and path.endswith("/commits"):
+            return mapping.get("commits")
+        if path == "/search/issues":
+            return mapping.get("search")
+        if path.startswith("/repos/"):
+            return mapping.get("repo")
+        return None
+    return _g
+
+
+def test_review_job_grounds_on_verified_facts(monkeypatch):
+    monkeypatch.setattr(ac, "_active_provider", lambda: True)
+    monkeypatch.setattr(ac, "_meter_flop", lambda *a, **k: None)
+    monkeypatch.setattr(ac, "_gh_get", _fake_gh({
+        "repo": {"full_name": "o/r", "stargazers_count": 42, "default_branch": "main",
+                 "archived": False, "open_issues_count": 99, "pushed_at": "2026-01-01T00:00:00Z"},
+        "commits": [{"commit": {"committer": {"date": "2026-09-04T10:00:00Z"}}}],
+        "search": {"total_count": 7},
+    }))
+    # LLM chỉ soạn lại; số liệu thật đến từ fetch. Trả lại prompt để chứng minh facts đã được cắm vào.
+    seen = {}
+    def _reply(prompt, system, temp, *a, **k):
+        seen["prompt"] = prompt
+        return ("ClickHouse-like repo, last commit 2026-09-04, 7 open issues.", "stub")
+    monkeypatch.setattr(ac, "_provider_reply", _reply)
+    out = ac.answer_kibble_job({"type": "review", "title": "Check github.com/o/r",
+                                "body": "report last commit + open issues", "jobid": "kabc0123456"})
+    assert out is not None
+    assert "[verified] o/r" in out                       # dòng dữ kiện đính kèm
+    assert "last commit: 2026-09-04T10:00:00Z" in out    # số liệu THẬT (commits API), không phải pushed_at
+    assert "open issues: 7" in out                       # search (loại PR), không phải 99
+    assert "VERIFIED FACTS" in seen["prompt"]            # LLM được grounded bằng facts
+
+
+def test_review_job_skips_when_no_github_target(monkeypatch):
+    monkeypatch.setattr(ac, "_active_provider", lambda: True)
+    monkeypatch.setattr(ac, "_provider_reply", lambda *a, **k: ("should not be called", "stub"))
+    out = ac.answer_kibble_job({"type": "review", "title": "Verify lobby freq",
+                                "body": "watch 5 mins", "jobid": "kdef0123456"})
+    assert out is None                                    # không rõ repo -> SKIP, không đoán
+
+
+def test_review_job_skips_when_fetch_fails(monkeypatch):
+    monkeypatch.setattr(ac, "_active_provider", lambda: True)
+    monkeypatch.setattr(ac, "_gh_get", lambda path, params=None: None)   # mọi fetch fail
+    monkeypatch.setattr(ac, "_provider_reply", lambda *a, **k: ("nope", "stub"))
+    out = ac.answer_kibble_job({"type": "review", "title": "github.com/o/r",
+                                "body": "report", "jobid": "k0120123456"})
+    assert out is None                                    # fetch fail -> SKIP (không bịa số)
+
+
+def test_review_falls_back_to_labeled_coarse_facts(monkeypatch):
+    # commits + search fail -> lùi về pushed_at + open_issues_count NHƯNG có nhãn chính xác.
+    monkeypatch.setattr(ac, "_active_provider", lambda: True)
+    monkeypatch.setattr(ac, "_meter_flop", lambda *a, **k: None)
+    monkeypatch.setattr(ac, "_gh_get", _fake_gh({
+        "repo": {"full_name": "o/r", "stargazers_count": 1, "default_branch": "main",
+                 "archived": True, "open_issues_count": 12, "pushed_at": "2026-05-05T00:00:00Z"},
+        "commits": None, "search": None,
+    }))
+    monkeypatch.setattr(ac, "_provider_reply", lambda *a, **k: ("summary", "stub"))
+    out = ac.answer_kibble_job({"type": "review", "title": "github.com/o/r",
+                                "body": "report", "jobid": "k9990123456"})
+    assert "last push: 2026-05-05T00:00:00Z" in out       # nhãn 'last push' (không giả vờ là 'last commit')
+    assert "open issues+PRs: 12" in out                   # nhãn rõ gộp PR (không giả vờ chỉ issues)
+    assert "ARCHIVED" in out
