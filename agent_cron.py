@@ -790,11 +790,14 @@ def tclk_do_work(meta: dict):
     LLM (cùng lớp guard như kibble). Trả None khi: không có provider / không có spec / model SKIP
     / bị guard chặn -> caller KHÔNG reveal (giữ thiện chí, chỉ claim khi thật sự làm được)."""
     if not _active_provider():
+        print("[tclk] work bỏ: không có LLM provider")
         return None
     job = meta.get("job") or {}
-    spec = tclk_job_spec(job.get("context") or "")
-    if not spec:
-        return None                              # không biết phải làm gì -> không reveal
+    ctx = job.get("context") or ""
+    spec = tclk_job_spec(ctx)
+    if not spec:                                 # không biết phải làm gì -> không reveal
+        print(f"[tclk] work bỏ: không đọc được job-spec @ {ctx[:48] or '(context rỗng)'}")
+        return None
     prompt = isolate_for_llm(f"[job {job.get('id', '')}] {spec}")
     try:
         raw, provider = _provider_reply(prompt, KIBBLE_SYSTEM, KIBBLE_TEMPERATURE,
@@ -803,8 +806,16 @@ def tclk_do_work(meta: dict):
         print(f"[tclk] work failed | {e}")
         return None
     text = guard_output(" ".join((raw or "").split()).strip())
-    if not text or (len(text) <= 40 and text.upper().startswith("SKIP")) or _is_refusal(text):
-        return None                              # rỗng / SKIP / TỪ CHỐI -> không làm được -> KHÔNG reveal
+    # rỗng / SKIP / TỪ CHỐI -> không làm được -> KHÔNG reveal. Tách nhánh để LOG rõ lý do.
+    if not text:
+        print("[tclk] work bỏ: model trả rỗng")
+        return None
+    if len(text) <= 40 and text.upper().startswith("SKIP"):
+        print("[tclk] work bỏ: model SKIP job")
+        return None
+    if _is_refusal(text):
+        print("[tclk] work bỏ: model từ chối (refusal)")
+        return None
     text = text[:KIBBLE_MAX_CHARS]
     _meter_flop(f"{provider} tclk-work", event_id=meta.get("offer_id") or "tclk")
     return text
