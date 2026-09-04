@@ -9,8 +9,12 @@ Module này CHỈ làm vai PAYEE ở mức AN TOÀN NHẤT:
   - PHÁT HIỆN offer hợp lệ trên `tclk-offers` (payer trả tiền, hash-lock, rail mình nhận, còn hạn),
   - DỰNG frame `accept` đúng chuẩn (mint preimage, statement=sha256(preimage), tính contract id),
   - DRY-RUN: chỉ LOG "would accept", KHÔNG post, KHÔNG lộ secret.
-  - Live (khi tắt dry-run): CHỈ post `accept`. TUYỆT ĐỐI KHÔNG tự `lock`/`reveal` — reveal là hành
-    động CLAIM tiền, luôn để con người quyết. (Alpha/testnet, chưa audit — xem cảnh báo của spec.)
+  - Live (khi tắt dry-run): CHỈ post `accept`. Riêng WORKER accept (`run_tclk_payee`) TUYỆT ĐỐI
+    KHÔNG tự `lock`/`reveal`. (Alpha/testnet, chưa audit — xem cảnh báo của spec.)
+
+LƯU Ý reveal: bước reveal (=CLAIM tiền) do vòng hoàn tất `run_tclk_complete` (bên dưới) lo — TỰ
+ĐỘNG, không cần người bấm — nhưng CHỈ khi qua đủ guard: payer đã LOCK escrow (verify_paper_lock),
+còn trong cửa sổ claim, và agent LÀM ĐƯỢC job. Chưa đủ guard thì không reveal (giữ preimage nội bộ).
 
 Thuần & kiểm thử được: canonical_json / to_ascii / offer_id / contract_id / make_accept /
 select_offers là hàm THUẦN (không mạng). `run_tclk_payee` nhận fetch_fn/post_fn tiêm vào — cùng
@@ -297,7 +301,7 @@ def run_tclk_payee(fetch_fn, post_fn, state, *, my_did, allow_rails,
                 "refundAfterMs": offer.get("refundAfterMs"), "accepted_ms": now_ms,
             }
             log(f"[tclk] ACCEPT posted {oid[:14]} | contract={frame['contract'][:14]} "
-                "(đã lưu secret nội bộ; reveal/claim để NGƯỜI quyết)")
+                "(đã lưu secret nội bộ; reveal tự động khi payer lock + làm được job)")
             cursor = max(cursor, seq)
         else:
             log(f"[tclk] accept post fail {oid[:14]} — dừng (đường ghi lỗi?)")
