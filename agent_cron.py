@@ -2253,7 +2253,8 @@ def main():
             save_state({"tclk_secrets": state.get("tclk_secrets", {}),
                         "tclk_completed": state.get("tclk_completed", [])})
             mode = "dry" if TCLK_COMPLETE_DRY_RUN else "live"
-            tclk_done_status = f"{mode} {len(cs['revealed'])}rev/{cs['waiting']}wait/{cs['expired']}exp"
+            tclk_done_status = (f"{mode} {len(cs['revealed'])}rev/{cs['waiting']}wait/"
+                                f"{cs['expired']}exp/{cs.get('stale', 0)}stale")
         except Exception as e:
             tclk_done_status = "error"
             print(f"[tclk] complete bỏ qua ({str(e)[:100]})")
