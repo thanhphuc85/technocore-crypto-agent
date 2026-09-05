@@ -92,6 +92,13 @@ jobs:
           FLOP_TCLK_OFFER_ENABLED: ${{ vars.FLOP_TCLK_OFFER_ENABLED }}
           FLOP_TCLK_OFFER_DRY_RUN: ${{ vars.FLOP_TCLK_OFFER_DRY_RUN }}
           FLOP_TCLK_OFFER_JOB: ${{ vars.FLOP_TCLK_OFFER_JOB }}
+          # Metering sổ cái FLOP (mặc định TẮT). Đo mỗi inference thật vào token_ledger.json (bền
+          # qua KV). SIMULATION cho tới TESTNET_ENABLED=true. ORGANIC_ONLY / MAX_SPENDS_PER_HOUR /
+          # INFERENCE_COST là các van chống-sybil + đơn giá (tùy chọn).
+          FLOP_METER_ENABLED: ${{ vars.FLOP_METER_ENABLED }}
+          FLOP_ORGANIC_ONLY: ${{ vars.FLOP_ORGANIC_ONLY }}
+          FLOP_INFERENCE_COST: ${{ vars.FLOP_INFERENCE_COST }}
+          FLOP_MAX_SPENDS_PER_HOUR: ${{ vars.FLOP_MAX_SPENDS_PER_HOUR }}
           # Câu hỏi nhập tay khi Run workflow (bỏ qua khi chạy theo cron)
           ASK: ${{ github.event.inputs.ask }}
         run: python agent_cron.py
