@@ -1236,3 +1236,42 @@ def test_review_skips_when_name_has_no_exact_match(monkeypatch):
     out = ac.answer_kibble_job({"type": "review", "title": "status",
                                 "body": "Check Frobnicator's GitHub please", "jobid": "kbbb0123456"})
     assert out is None
+
+
+# ── sổ cái token FLOP bền qua KV (metering đo được, không mất mỗi run) ──────────
+def test_persist_ledger_caps_entries_but_keeps_balance(tmp_path, monkeypatch):
+    import token_manager as tm
+    p = str(tmp_path / "led.json")
+    monkeypatch.setenv("TOKEN_LEDGER_FILE", p)
+    tm.save_ledger({"balances": {"FLOP": "-0.6"},
+                    "entries": [{"kind": "spend", "token": "FLOP", "amount": "0.001",
+                                 "ts": "2026-01-01T00:00:00Z"} for _ in range(700)]})
+    sent = {}
+    monkeypatch.setattr(ac, "kv_set", lambda pk, did, k, v: sent.update({k: v}) or True)
+    ac.persist_ledger_to_kv("pk", "did")
+    payload = json.loads(sent["token_ledger"])
+    assert len(payload["entries"]) == ac.LEDGER_ENTRY_CAP        # bounded
+    assert payload["balances"] == {"FLOP": "-0.6"}               # tổng chạy KHÔNG mất khi cắt log
+
+
+def test_hydrate_ledger_takes_richer_kv(tmp_path, monkeypatch):
+    import token_manager as tm
+    p = str(tmp_path / "led.json")
+    monkeypatch.setenv("TOKEN_LEDGER_FILE", p)
+    tm.save_ledger({"balances": {}, "entries": []})              # local rỗng (runner Actions mới)
+    monkeypatch.setattr(ac, "kv_get", lambda k: json.dumps(
+        {"balances": {"FLOP": "-0.9"}, "entries": [{"kind": "spend", "token": "FLOP",
+                                                    "amount": "0.001", "ts": "x"}]}))
+    ac.hydrate_ledger_from_kv()
+    assert tm.check_balance() == "-0.9"                          # nhận bản KV đầy hơn
+
+
+def test_hydrate_ledger_keeps_richer_local(tmp_path, monkeypatch):
+    import token_manager as tm
+    p = str(tmp_path / "led.json")
+    monkeypatch.setenv("TOKEN_LEDGER_FILE", p)
+    tm.save_ledger({"balances": {"FLOP": "-5.0"}, "entries": []})  # local đã tích luỹ nhiều
+    monkeypatch.setattr(ac, "kv_get", lambda k: json.dumps(
+        {"balances": {"FLOP": "-0.1"}, "entries": []}))           # KV nghèo hơn
+    ac.hydrate_ledger_from_kv()
+    assert tm.check_balance() == "-5.0"                           # KHÔNG để KV nghèo ghi đè local đầy
