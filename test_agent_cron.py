@@ -1123,6 +1123,8 @@ def _fake_gh(mapping):
     def _g(path, params=None):
         if path.startswith("/repos/") and path.endswith("/commits"):
             return mapping.get("commits")
+        if path == "/search/repositories":
+            return mapping.get("search_repos")
         if path == "/search/issues":
             return mapping.get("search")
         if path.startswith("/repos/"):
@@ -1187,3 +1189,50 @@ def test_review_falls_back_to_labeled_coarse_facts(monkeypatch):
     assert "last push: 2026-05-05T00:00:00Z" in out       # nhãn 'last push' (không giả vờ là 'last commit')
     assert "open issues+PRs: 12" in out                   # nhãn rõ gộp PR (không giả vờ chỉ issues)
     assert "ARCHIVED" in out
+
+
+# ── resolver TÊN dự án -> repo (job board nêu "Check X's GitHub", không phải slug) ──
+def test_extract_project_name():
+    assert ac._extract_project_name("Check DuckDB's GitHub. Report last commit") == "DuckDB"
+    assert ac._extract_project_name("look at ClickHouse on GitHub") == "ClickHouse"
+    assert ac._extract_project_name("scan the ScyllaDB GitHub repo") == "ScyllaDB"
+    assert ac._extract_project_name("no mention of the tool here") is None   # không nhắc github
+    assert ac._extract_project_name("on GitHub yesterday") is None           # 'on' là stopword
+    # CỐ Ý rộng rãi: 'posted on GitHub' rút 'posted' — chốt an toàn là bước search khớp-tên
+    # chặt bên dưới (test_review_skips_when_name_has_no_exact_match), không phải ở đây.
+    assert ac._extract_project_name("posted on GitHub yesterday") == "posted"
+
+
+def test_review_resolves_project_name_via_search(monkeypatch):
+    # Job nêu TÊN ("DuckDB"), không slug -> resolve qua search rồi fetch facts.
+    monkeypatch.setattr(ac, "_active_provider", lambda: True)
+    monkeypatch.setattr(ac, "_meter_flop", lambda *a, **k: None)
+    monkeypatch.setattr(ac, "_gh_get", _fake_gh({
+        "search_repos": {"items": [
+            {"name": "duckdb-wasm", "full_name": "duckdb/duckdb-wasm"},   # gần đúng, KHÔNG khớp
+            {"name": "DuckDB", "full_name": "duckdb/duckdb"},             # khớp chính xác -> chọn
+        ]},
+        "repo": {"full_name": "duckdb/duckdb", "stargazers_count": 20000, "default_branch": "main",
+                 "archived": False, "open_issues_count": 300, "pushed_at": "2026-01-01T00:00:00Z"},
+        "commits": [{"commit": {"committer": {"date": "2026-09-05T00:00:00Z"}}}],
+        "search": {"total_count": 250},
+    }))
+    monkeypatch.setattr(ac, "_provider_reply", lambda *a, **k: ("DuckDB is actively maintained.", "stub"))
+    out = ac.answer_kibble_job({"type": "review", "title": "Is ScyllaDB still maintained?",
+                                "body": "Check DuckDB's GitHub. Report last commit + open issue count.",
+                                "jobid": "kaaa0123456"})
+    assert out is not None
+    assert "[verified] duckdb/duckdb" in out              # resolve tên -> đúng repo
+    assert "open issues: 250" in out                       # facts thật, không phải title (ScyllaDB)
+
+
+def test_review_skips_when_name_has_no_exact_match(monkeypatch):
+    # Search trả kết quả nhưng KHÔNG có repo nào tên khớp chính xác -> SKIP (không đoán bừa).
+    monkeypatch.setattr(ac, "_active_provider", lambda: True)
+    monkeypatch.setattr(ac, "_gh_get", _fake_gh({
+        "search_repos": {"items": [{"name": "something-else", "full_name": "x/something-else"}]},
+    }))
+    monkeypatch.setattr(ac, "_provider_reply", lambda *a, **k: ("nope", "stub"))
+    out = ac.answer_kibble_job({"type": "review", "title": "status",
+                                "body": "Check Frobnicator's GitHub please", "jobid": "kbbb0123456"})
+    assert out is None

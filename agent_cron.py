@@ -1345,10 +1345,56 @@ def _github_repo_facts(owner: str, repo: str):
     }
 
 
+# Tên dự án đứng NGAY TRƯỚC 'GitHub' trong job kiểu "Check DuckDB's GitHub" / "X on GitHub".
+# Board thật nêu TÊN dự án chứ hiếm khi nêu slug owner/repo -> cần resolve tên -> repo.
+_GH_NAME_RE = re.compile(r"([A-Za-z0-9][A-Za-z0-9.+\-]{1,40})(?:'s)?\s+(?:on\s+)?github\b", re.I)
+_GH_NAME_STOP = {"the", "a", "an", "this", "that", "on", "check", "review", "its", "your", "our"}
+
+
+def _extract_project_name(text: str):
+    """Rút TÊN dự án ngay trước 'GitHub'. None nếu không có / trúng từ nối vô nghĩa."""
+    m = _GH_NAME_RE.search(text or "")
+    if not m:
+        return None
+    name = m.group(1).strip(".'-")
+    return name if name and name.lower() not in _GH_NAME_STOP else None
+
+
+def _search_github_repo(name: str):
+    """Tên dự án -> (owner, repo) qua search API. CHỈ nhận khi repo name KHỚP CHÍNH XÁC tên
+    (chống chọn nhầm repo trùng tên); mơ hồ / fetch fail -> None (caller SKIP, không đoán)."""
+    data = _gh_get("/search/repositories",
+                   {"q": name, "sort": "stars", "order": "desc", "per_page": 5})
+    if not isinstance(data, dict):
+        return None
+    want = name.lower().replace(" ", "")
+    for item in (data.get("items") or []):
+        if (item.get("name") or "").lower().replace(" ", "") == want:
+            full = item.get("full_name") or ""
+            if "/" in full:
+                owner, repo = full.split("/", 1)
+                return (owner, repo)
+    return None
+
+
+def _resolve_github_repo(text: str):
+    """Xác định repo GitHub cho job review: ưu tiên slug/URL (thuần, không mạng); nếu không có
+    mà job NHẮC 'github' + nêu tên dự án -> resolve tên -> repo qua search (khớp tên chặt).
+    None -> SKIP (không đoán)."""
+    direct = _parse_github_target(text)
+    if direct:
+        return direct
+    if not re.search(r"\bgithub\b", text or "", re.I):
+        return None
+    name = _extract_project_name(text)
+    return _search_github_repo(name) if name else None
+
+
 def _answer_review_job(job: dict, task: str):
-    """Làm job REVIEW cho 1 repo GitHub: fetch dữ kiện thật -> LLM soạn CHỈ từ dữ kiện đó ->
-    đính kèm dòng [verified]. Không rõ repo / fetch fail / model từ chối -> None (SKIP)."""
-    target = _parse_github_target(f"{job.get('title','')} {job.get('body','')}")
+    """Làm job REVIEW cho 1 repo GitHub: xác định repo (slug/URL hoặc resolve TÊN dự án) ->
+    fetch dữ kiện thật -> LLM soạn CHỈ từ dữ kiện đó -> đính kèm dòng [verified]. Không rõ
+    repo / fetch fail / model từ chối -> None (SKIP)."""
+    target = _resolve_github_repo(f"{job.get('title','')} {job.get('body','')}")
     if not target:
         print(f"[kibble] review skip {job.get('jobid')} — không xác định repo GitHub cụ thể")
         return None
