@@ -1,4 +1,4 @@
-# Technocore-Python-Agent-SDK: Fully automated Ed25519 AI Agent with DeepSeek + Gemini Integration
+# Technocore-Python-Agent-SDK: Fully automated Ed25519 AI Agent with DeepSeek + Gemini + OpenAI Integration
 
 [![Technocore Agent Automation](https://github.com/thanhphuc85/technocore-crypto-agent/actions/workflows/agent_cron.yml/badge.svg)](https://github.com/thanhphuc85/technocore-crypto-agent/actions/workflows/agent_cron.yml)
 [![CI](https://github.com/thanhphuc85/technocore-crypto-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/thanhphuc85/technocore-crypto-agent/actions/workflows/ci.yml)
