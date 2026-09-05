@@ -887,6 +887,56 @@ def persist_durable_to_kv(private_key, did) -> None:
         kv_set(private_key, did, STATE_KV_KEY, json.dumps(payload, ensure_ascii=False))
 
 
+# --- Sổ cái token FLOP: BỀN qua KV (không thì runner Actions xoá file mỗi run -> mất tích luỹ) --
+LEDGER_KV_KEY = "token_ledger"
+LEDGER_ENTRY_CAP = 500
+
+
+def _ledger_spent_magnitude(led) -> float:
+    """|balance| gộp các token = tổng đã CHI (mock: spend làm balance âm). Thước tích luỹ
+    KHÔNG suy từ entries -> sống sót khi cắt log. Dùng để chọn bản ledger 'đầy' hơn khi hydrate."""
+    try:
+        bals = led.get("balances", {}) if isinstance(led, dict) else {}
+        return sum(abs(float(v)) for v in bals.values() if v not in (None, ""))
+    except Exception:
+        return 0.0
+
+
+def hydrate_ledger_from_kv() -> None:
+    """Kéo sổ cái token BỀN từ KV vào token_ledger.json TRƯỚC khi metering. Runner Actions xoá
+    file mỗi run -> không hydrate thì sổ luôn rỗng = mất tích luỹ. Lấy bản KV nếu nó tích luỹ
+    NHIỀU hơn (|balance| ≥ local) -> runner mới/cache mất không ghi đè bản đầy. Bọc kín."""
+    raw = kv_get(LEDGER_KV_KEY)
+    if not raw:
+        return
+    try:
+        remote = json.loads(raw)
+    except (ValueError, TypeError):
+        return
+    if not (isinstance(remote, dict) and isinstance(remote.get("balances"), dict)
+            and isinstance(remote.get("entries"), list)):
+        return
+    try:
+        import token_manager
+        if _ledger_spent_magnitude(remote) >= _ledger_spent_magnitude(token_manager.load_ledger()):
+            token_manager.save_ledger(remote)
+    except Exception as e:
+        print(f"[ledger] hydrate bỏ qua ({str(e)[:80]})")
+
+
+def persist_ledger_to_kv(private_key, did) -> None:
+    """Đẩy sổ cái token lên KV (nguồn bền chung mọi runner). Cắt entries còn LEDGER_ENTRY_CAP
+    gần nhất để BOUNDED — balances là tổng chạy (KHÔNG suy từ entries) nên cắt log KHÔNG sai số dư."""
+    try:
+        import token_manager
+        led = token_manager.load_ledger()
+        payload = {"balances": led.get("balances", {}),
+                   "entries": (led.get("entries", []) or [])[-LEDGER_ENTRY_CAP:]}
+        kv_set(private_key, did, LEDGER_KV_KEY, json.dumps(payload, ensure_ascii=False))
+    except Exception as e:
+        print(f"[ledger] persist bỏ qua ({str(e)[:80]})")
+
+
 # =========================================================================
 #  INPUT ISOLATION & GUARDRAILS
 #  Mọi dữ liệu từ phòng chat / KV / người lạ đều UNTRUSTED. Cô lập tại 1
@@ -2224,6 +2274,7 @@ def main():
     # Hydrate mốc cooldown/cursor BỀN từ KV -> chống re-post khi state cục bộ mất/lệch giữa runner
     # và đồng bộ cooldown giữa 2 runner. Đặt TRƯỚC mọi kiểm tra _due bên dưới.
     hydrate_durable_from_kv(state)
+    hydrate_ledger_from_kv()          # sổ cái token BỀN qua KV -> metering tích luỹ, không mất mỗi run
     now = int(time.time())
     # Run thủ công (workflow_dispatch) luôn phát để dễ kiểm chứng.
     force = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
@@ -2500,6 +2551,14 @@ def main():
     # Mirror mốc BỀN lên KV (chống mất khi cache Actions bị xoá + dùng chung nếu có runner phụ). Đặt SAU
     # kiểm tra outage để 1 lần kv_set thành công ở đây không che giấu outage thật.
     persist_durable_to_kv(private_key, did)
+    persist_ledger_to_kv(private_key, did)   # đẩy sổ cái token (metering) lên KV -> bền, đo được
+    try:                                     # telemetry: đo đóng góp inference tích luỹ (mock/testnet)
+        import token_manager
+        _st = token_manager.spend_stats()
+        print(f"[ledger] spent_total_mock={token_manager.check_balance()} "
+              f"spend_24h={_st['spend_count_24h']} spend_recent={_st['spend_count_total']}")
+    except Exception:
+        pass
 
     _write_summary(summary)
 
