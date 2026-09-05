@@ -522,10 +522,13 @@ def run_tclk_complete(read_room_fn, kv_get_fn, post_fn, do_work_fn, state, *, my
 #   OFFER (ta) -> ACCEPT (worker) -> LOCK ghi paper record (ta) -> REVEAL (worker) -> SETTLE (ta).
 # ═══════════════════════════════════════════════════════════════════════════════
 def make_offer(my_did: str, job_context: str, *, amount="1", asset="PAPER", rail="paper",
-               now_ms: int, expires_ms=20 * 60 * 1000, claim_window_ms=30 * 60 * 1000,
+               now_ms: int, expires_ms=8 * 60 * 1000, claim_window_ms=30 * 60 * 1000,
                refund_gap_ms=30 * 60 * 1000):
     """Dựng frame `offer` vai PAYER (hash-lock). job_context = '/kv/<ns>/<key>' trỏ tới spec việc
-    (worker đọc để làm). Deadline rộng để qua validate_deadlines của payee. Trả (frame, fields)."""
+    (worker đọc để làm). Deadline (claim/refund) rộng để qua validate_deadlines của payee.
+    expires_ms NGẮN (8') CỐ Ý: board offers cuộn ~200 tin/~15' -> offer 20' cũ bị đẩy khuất TRƯỚC
+    khi hết hạn, chẳng ai accept được. 8' -> payer re-post offer TƯƠI mỗi ~2 run -> luôn có offer
+    còn-hạn + hiển thị cho worker lạ nhặt (không đụng claim/refund window). Trả (frame, fields)."""
     fields = {
         "type": "offer", "from": my_did, "role": "payer", "amount": str(amount), "asset": asset,
         "lock": "hash", "rails": [rail],
