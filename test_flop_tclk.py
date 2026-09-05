@@ -188,13 +188,13 @@ def test_find_payer_lock():
 
 
 # --- worker completion: các nhánh an toàn -----------------------------------------
-def _complete_env(lock_present=True, paper_ok=True, past_claim=False):
+def _complete_env(lock_present=True, paper_ok=True, past_claim=False, rails=("paper",)):
     stmt = "0x" + "c" * 64
     contract = REAL_CONTRACT
     now = 1000
     meta = {"preimage": "0x" + "e" * 64, "statement": stmt, "payer_did": "zPAYER",
             "amount": "10", "asset": "PAPER", "claimByMs": 500 if past_claim else 5000,
-            "refundAfterMs": 9999, "job": {"proto": "a2a", "id": "task-1"}}
+            "refundAfterMs": 9999, "rails": list(rails), "job": {"proto": "a2a", "id": "task-1"}}
     state = {"tclk_secrets": {contract: meta}}
     lock = {"type": "lock", "from": "zPAYER", "contract": contract, "rail": "paper", "ref": contract}
     room_msgs = [{"text": "tclk1 " + t.to_ascii(t.canonical_json(lock))}] if lock_present else []
@@ -252,9 +252,9 @@ def test_complete_uses_offers_room_not_deal_room():
     assert t.deal_room(contract) not in seen_read + seen_post  # TUYỆT ĐỐI không dùng deal room
 
 
-def test_complete_waits_when_kv_not_locked():
-    # CỔNG = paper KV record: rail CHƯA ghi locked -> chờ (dù có/không có frame)
-    contract, state, read_room, kv_get, now = _complete_env(paper_ok=False)
+def test_complete_waits_when_no_lock_at_all():
+    # KHÔNG paper KV, KHÔNG lock frame -> chờ (chưa ai lock; cổng lai không có tín hiệu nào)
+    contract, state, read_room, kv_get, now = _complete_env(paper_ok=False, lock_present=False)
     posts = []
     res = t.run_tclk_complete(read_room, kv_get, lambda r, x: posts.append(x) or True,
                               do_work_fn=lambda meta: "x", state=state, my_did="zSELF",
@@ -274,14 +274,44 @@ def test_complete_reveals_via_kv_without_frame():
     assert len(posts) == 2                               # deliver + reveal vẫn xảy ra
 
 
-def test_complete_refuses_when_rail_not_confirmed():
-    # lock frame CÓ nhưng rail chưa xác nhận -> KHÔNG reveal (cổng an toàn)
-    contract, state, read_room, kv_get, now = _complete_env(paper_ok=False)
+def test_complete_frame_gate_only_for_paper_rail():
+    # Rail THẬT (flop-htlc): có lock frame ký nhưng KHÔNG có paper KV -> KHÔNG reveal. Cổng frame
+    # CHỈ áp rail paper (mô phỏng); rail thật đòi escrow fund thật -> tránh lộ preimage vô cớ.
+    contract, state, read_room, kv_get, now = _complete_env(paper_ok=False, lock_present=True,
+                                                            rails=("flop-htlc",))
     posts = []
     res = t.run_tclk_complete(read_room, kv_get, lambda r, x: posts.append(x) or True,
                               do_work_fn=lambda meta: "x", state=state, my_did="zSELF",
                               now_ms=now, dry_run=False)
     assert res["revealed"] == [] and res["waiting"] == 1 and posts == []
+
+
+def test_complete_reveals_via_frame_without_kv():
+    # UPGRADE ①: payer post lock FRAME (đã ký) nhưng KHÔNG ghi paper KV note (đúng thực tế board:
+    # 6/6 lock không có KV) -> VẪN reveal trên rail paper. Đây là cái mở khoá 0-reveal.
+    contract, state, read_room, kv_get, now = _complete_env(paper_ok=False, lock_present=True)
+    posts = []
+    res = t.run_tclk_complete(read_room, kv_get, lambda r, x: posts.append(x) or True,
+                              do_work_fn=lambda meta: "d", state=state, my_did="zSELF",
+                              now_ms=now, dry_run=False)
+    assert res["revealed"] == [contract] and len(posts) == 2
+    assert contract in state["tclk_completed"]
+
+
+def test_complete_frame_lock_remembered_in_state():
+    # 'lock_seen' BỀN: thấy frame 1 lần -> nhớ; lần sau frame cuộn khỏi cửa sổ vẫn coi là đã lock
+    # (vá đúng lý do #50 từng rời khỏi frame).
+    contract, state, read_room, kv_get, now = _complete_env(paper_ok=False, lock_present=True)
+    # run 1: có frame nhưng work fail -> chưa reveal, nhưng đã ghi lock_seen
+    t.run_tclk_complete(read_room, kv_get, lambda r, x: True, do_work_fn=lambda m: None,
+                        state=state, my_did="zSELF", now_ms=now, dry_run=False)
+    assert state["tclk_secrets"][contract].get("lock_seen") is True
+    # run 2: frame ĐÃ cuộn mất (room rỗng) + vẫn không KV -> nhờ nhớ lock, KHÔNG quay lại 'waiting'
+    posts = []
+    res = t.run_tclk_complete(lambda room: {"messages": []}, lambda ns, key: None,
+                              lambda r, x: posts.append(x) or True, do_work_fn=lambda m: "d",
+                              state=state, my_did="zSELF", now_ms=now, dry_run=False)
+    assert res["revealed"] == [contract] and res["waiting"] == 0 and len(posts) == 2
 
 
 def test_complete_refuses_past_claim_window():
@@ -318,8 +348,8 @@ def test_complete_prunes_secrets_on_expire_and_reveal():
     assert contract not in state["tclk_secrets"]
     assert contract in state["tclk_completed"]
 
-    # đang CHỜ (KV chưa xác nhận lock) -> KHÔNG pop (còn phải theo dõi)
-    contract, state, read_room, kv_get, now = _complete_env(paper_ok=False)
+    # đang CHỜ (không KV, không frame -> chưa lock) -> KHÔNG pop (còn phải theo dõi)
+    contract, state, read_room, kv_get, now = _complete_env(paper_ok=False, lock_present=False)
     t.run_tclk_complete(read_room, kv_get, lambda r, x: True, do_work_fn=lambda m: "d",
                         state=state, my_did="zSELF", now_ms=now, dry_run=False)
     assert contract in state["tclk_secrets"]
