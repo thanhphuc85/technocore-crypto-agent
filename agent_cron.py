@@ -2455,6 +2455,11 @@ def main():
     elif TCLK_COMPLETE_ENABLED:
         try:
             import flop_tclk
+            import flop_rail_x402
+            # Rail GIÁ-TRỊ (Phương án A): None khi FLOP_TCLK_X402_ENABLED tắt (mặc định) -> giữ paper.
+            # Khi bật + đã có HTLC contract: tiêm submit_fn (ký secp256k1 + gửi tx) / read_fn (eth_call)
+            # ở đây; chưa tiêm -> rail.configured()=False -> verify_lock False, deal chỉ CHỜ (an toàn).
+            value_rail = flop_rail_x402.build_rail(submit_fn=None, read_fn=None)  # TODO: wire EVM
             cs = flop_tclk.run_tclk_complete(
                 read_room_fn=lambda room: fetch_messages(None, room=room),
                 kv_get_fn=kv_get_ns,
@@ -2462,6 +2467,7 @@ def main():
                 do_work_fn=tclk_do_work,
                 state=state, my_did=did, now_ms=now * 1000,
                 offers_room=TCLK_ROOM,          # lock/reveal ở lại room offers (deal room cap đầy)
+                value_rail=value_rail,
                 dry_run=TCLK_COMPLETE_DRY_RUN,
             )
             save_state({"tclk_secrets": state.get("tclk_secrets", {}),
