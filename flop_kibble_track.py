@@ -6,12 +6,14 @@ KHÔNG thể đo baseline từ bên ngoài — DELIVER của ta thưa (≤2/run)
 ATTEST tới. Điểm quan sát tin cậy DUY NHẤT là chính agent: nó biết chính xác nó đã bàn
 giao job nào với nội dung gì.
 
-Cách quy kết chính xác (không nhầm sang worker khác): ATTEST mang `rh:<hash>` (16 hex =
-8 byte truncated) băm deliverable. Spec cách băm KHÔNG công khai, nên lúc bàn giao ta tính
-sẵn MỘT TẬP hash ứng viên (nhiều thuật toán × nhiều cách mã hoá). Khi một ATTEST cho jobid
-của ta có `rh` KHỚP một ứng viên -> chắc chắn là deliverable CỦA TA (useful/not), và recipe
-khớp LỘ RA thuật toán thật (các lần sau khớp thẳng). ATTEST không kèm `rh` -> chỉ khớp
-jobid = mơ hồ (nhiều worker/1 job) -> KHÔNG tính vào confirmed, đếm riêng.
+Cách quy kết: theo JOBID. /r/kibble khoá 1 job cho 1 worker (đo live: mọi job chỉ có đúng
+1 DELIVER), nên ATTEST cùng jobid CHẮC CHẮN nói về deliverable của ta — jobid là khoá không
+mơ hồ. Nhiều ATTEST/1 jobid -> lấy đa số phiếu useful/not; hoà -> chưa chốt (giữ pending).
+`rh:<hash16>` (nếu có) chỉ là tín hiệu CỘNG THÊM: khớp một ứng viên hash -> xác nhận danh
+tính + LỘ recipe băm thật. QUAN TRỌNG: board thật BỎ `rh` ở verdict 'useful' (chỉ 'not' mới
+kèm rh), nên KHÔNG được dùng rh làm cổng — làm vậy thì 'useful' không bao giờ chốt được (đó
+là bug cũ khiến useful_rate kẹt mãi ở n/a). Ta vẫn tính sẵn tập hash ứng viên (candidate_hashes)
+chỉ để học recipe khi rh tình cờ khớp.
 
 Thuần & test được: candidate_hashes / parse_attest_line / reconcile / summary là hàm THUẦN
 (không mạng). agent_cron lo phần đọc ATTEST + ghi state + publish KV note.
@@ -88,10 +90,13 @@ def record_deliveries(state: dict, items, now_ms: int) -> None:
 
 
 def reconcile(state: dict, messages, now_ms: int, expire_ms: int = 48 * 3600 * 1000) -> dict:
-    """Đối chiếu deliveries đang 'pending' với ATTEST trong `messages` (tại chỗ). Với mỗi
-    pending: nếu có ATTEST cùng jobid mà rh KHỚP một ứng viên -> status 'useful'/'not' +
-    ghi recipe khớp; ATTEST không rh cùng jobid -> đếm 'ambiguous' (KHÔNG chốt). Pending quá
-    hạn (không thấy attest) -> 'unattested'. Trả summary dict."""
+    """Đối chiếu deliveries đang 'pending' với ATTEST trong `messages` (tại chỗ), quy kết theo
+    JOBID. /r/kibble khoá 1 job cho 1 worker (đo live: 0 job có >1 DELIVER), nên ATTEST cùng
+    jobid CHẮC CHẮN nói về deliverable CỦA TA — jobid là khoá quy kết không mơ hồ. `rh` chỉ là
+    tín hiệu CỘNG THÊM (xác nhận danh tính + lộ recipe), KHÔNG phải cổng: board thật BỎ `rh` ở
+    verdict 'useful' (chỉ 'not' mới kèm rh), nên gate-theo-rh khiến 'useful' không bao giờ chốt
+    được. Nhiều ATTEST/1 jobid -> lấy đa số phiếu (useful vs not); HOÀ phiếu -> để 'pending'
+    (chưa ngã ngũ). Pending không thấy attest quá `expire_ms` -> 'unattested'. Trả summary dict."""
     attests = []
     for m in (messages or []):
         a = parse_attest_line(str((m or {}).get("text", "")))
@@ -101,31 +106,37 @@ def reconcile(state: dict, messages, now_ms: int, expire_ms: int = 48 * 3600 * 1
     for a in attests:
         by_job.setdefault(a["jobid"], []).append(a)
 
-    ambiguous = 0
+    unresolved = 0                               # có ATTEST nhưng hoà phiếu -> chưa chốt
     for d in state.get("kibble_deliveries", []):
         if not isinstance(d, dict) or d.get("status") != "pending":
             continue
-        cand_vals = set((d.get("cands") or {}).values())
-        matched = None
-        saw_jobid = False
-        for a in by_job.get(d.get("jobid"), []):
-            saw_jobid = True
+        job_atts = by_job.get(d.get("jobid"), [])
+        if not job_atts:                         # chưa thấy attest nào cho jobid này
+            if now_ms - d.get("ts", now_ms) > expire_ms:
+                d["status"] = "unattested"
+                d.pop("cands", None)
+            continue
+        # rh khớp ứng viên -> lộ recipe thật + đánh dấu xác nhận bằng rh (bonus, không bắt buộc)
+        cand = d.get("cands") or {}
+        cand_vals = set(cand.values())
+        for a in job_atts:
             if a["rh"] and a["rh"] in cand_vals:
-                matched = a
+                for recipe, h in cand.items():
+                    if h == a["rh"]:
+                        d["matched_recipe"] = recipe
+                        break
+                d["matched_by"] = "rh"
                 break
-        if matched:
-            d["status"] = "useful" if matched["verdict"].startswith("useful") else "not"
-            for recipe, h in (d.get("cands") or {}).items():
-                if h == matched["rh"]:
-                    d["matched_recipe"] = recipe
-                    break
-            d.pop("cands", None)                 # đã chốt -> bỏ tập hash cho gọn state
-        elif saw_jobid:
-            ambiguous += 1                       # có attest jobid nhưng không rh khớp -> mơ hồ
-        elif now_ms - d.get("ts", now_ms) > expire_ms:
-            d["status"] = "unattested"
-            d.pop("cands", None)
-    return summary(state, ambiguous_now=ambiguous)
+        # đa số phiếu trên MỌI attest của jobid (1 worker/job -> đều nói về ta)
+        useful_votes = sum(1 for a in job_atts if a["verdict"].startswith("useful"))
+        not_votes = sum(1 for a in job_atts if a["verdict"].startswith("not"))
+        if useful_votes == not_votes:            # hoà (kể cả 0-0: verdict lạ) -> chưa chốt
+            unresolved += 1
+            continue
+        d["status"] = "useful" if useful_votes > not_votes else "not"
+        d.setdefault("matched_by", "jobid")      # quy kết bằng jobid nếu rh không lộ recipe
+        d.pop("cands", None)                      # đã chốt -> bỏ tập hash cho gọn state
+    return summary(state, ambiguous_now=unresolved)
 
 
 def summary(state: dict, ambiguous_now: int = 0) -> dict:
