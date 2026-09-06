@@ -58,22 +58,52 @@ def test_reconcile_not_verdict():
     assert sm["not"] == 1 and sm["useful"] == 0 and sm["useful_rate"] == 0.0
 
 
-def test_reconcile_ambiguous_no_rh():
+def test_reconcile_useful_no_rh_confirms_by_jobid():
+    # board thật: verdict 'useful' KHÔNG kèm rh. 1 worker/job -> jobid đủ để chốt.
     st = {}
     kt.record_deliveries(st, [{"jobid": JID, "answer": BODY}], 1000)
-    msgs = [{"text": f"ATTEST v1 | {JID} | useful | some note without rh"}]
+    msgs = [{"text": f"ATTEST v1 | {JID} | useful | Comprehensive analysis, verified"}]
     sm = kt.reconcile(st, msgs, 2000)
-    # jobid khớp nhưng không rh -> KHÔNG chốt, đếm ambiguous, vẫn pending
-    assert sm["useful"] == 0 and sm["pending"] == 1 and sm["ambiguous_now"] == 1
+    assert sm["useful"] == 1 and sm["pending"] == 0 and sm["useful_rate"] == 1.0
+    assert st["kibble_deliveries"][0]["matched_by"] == "jobid"    # không rh -> quy kết bằng jobid
 
 
-def test_reconcile_rh_of_other_worker_not_ours():
+def test_reconcile_jobid_match_unknown_recipe():
+    # rh có mặt nhưng không khớp tập ứng viên (recipe lạ) -> vẫn là job CỦA TA (1 worker/job),
+    # chốt bằng jobid; recipe chưa lộ nên không set matched_recipe.
     st = {}
     kt.record_deliveries(st, [{"jobid": JID, "answer": BODY}], 1000)
-    msgs = [{"text": f"ATTEST v1 | {JID} | useful | rh:ffffffffffffffff | attesting someone else"}]
+    msgs = [{"text": f"ATTEST v1 | {JID} | not | rh:ffffffffffffffff | thin"}]
     sm = kt.reconcile(st, msgs, 2000)
-    # rh không khớp ứng viên nào của ta -> mơ hồ (là deliverable của worker khác), không tính useful
-    assert sm["useful"] == 0 and sm["pending"] == 1 and sm["ambiguous_now"] == 1
+    assert sm["not"] == 1 and sm["pending"] == 0
+    assert st["kibble_deliveries"][0]["matched_by"] == "jobid"
+    assert "matched_recipe" not in st["kibble_deliveries"][0]
+
+
+def test_reconcile_majority_vote():
+    # 2 'not' + 1 'useful' cho cùng jobid -> đa số 'not'.
+    st = {}
+    kt.record_deliveries(st, [{"jobid": JID, "answer": BODY}], 1000)
+    msgs = [
+        {"text": f"ATTEST v1 | {JID} | not | echoes the job"},
+        {"text": f"ATTEST v1 | {JID} | not | boilerplate only"},
+        {"text": f"ATTEST v1 | {JID} | useful | looks fine"},
+    ]
+    sm = kt.reconcile(st, msgs, 2000)
+    assert sm["not"] == 1 and sm["useful"] == 0
+
+
+def test_reconcile_tie_stays_pending():
+    # hoà phiếu 1-1 -> chưa ngã ngũ, giữ pending, đếm ambiguous_now.
+    st = {}
+    kt.record_deliveries(st, [{"jobid": JID, "answer": BODY}], 1000)
+    msgs = [
+        {"text": f"ATTEST v1 | {JID} | useful | good"},
+        {"text": f"ATTEST v1 | {JID} | not | bad"},
+    ]
+    sm = kt.reconcile(st, msgs, 2000)
+    assert sm["pending"] == 1 and sm["useful"] == 0 and sm["not"] == 0
+    assert sm["ambiguous_now"] == 1
 
 
 def test_reconcile_expire_unattested():
