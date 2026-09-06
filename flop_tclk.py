@@ -415,12 +415,15 @@ def find_payer_lock(messages, contract: str, payer_did: str):
 
 def run_tclk_complete(read_room_fn, kv_get_fn, post_fn, do_work_fn, state, *, my_did,
                       offers_room="tclk-offers", stale_wait_ms=30 * 60 * 1000,
-                      now_ms=None, dry_run=True, max_per_run=2, log=print):
+                      now_ms=None, dry_run=True, max_per_run=2, value_rail=None, log=print):
     """Hoàn tất deal đã accept: chờ payer lock -> verify rail -> làm việc -> reveal.
       read_room_fn(room)   -> data JSON /r/<room> (đọc 1 lần: lock frame chỉ để LOG)
       kv_get_fn(ns, key)   -> str|None (đã strip banner) — CỔNG lock thật (paper KV record)
       post_fn(room, text)  -> bool (deliverable + reveal; chỉ khi dry_run=False)
       do_work_fn(meta)     -> str|None (None = không làm được -> KHÔNG reveal)
+      value_rail           -> None (mặc định: đường paper) HOẶC 1 rail giá-trị (vd
+                              flop_rail_x402.X402HtlcRail) có .name/.verify_lock/.claim. Khi deal có
+                              rail này -> CỔNG là escrow on-chain thật + CLAIM tiền trước khi reveal.
     state: 'tclk_secrets' (đã accept) + 'tclk_completed' (đã reveal). Deal đã reveal HOẶC quá
     cửa sổ claim bị POP khỏi 'tclk_secrets' -> kho chỉ giữ deal đang chờ (chống phình + hết
     log lặp). Trả {revealed, waiting, expired, dry_run}.
@@ -461,31 +464,41 @@ def run_tclk_complete(read_room_fn, kv_get_fn, post_fn, do_work_fn, state, *, my
             log("[tclk] " + contract[:14] + " quá cửa sổ claim -> bỏ (không reveal muộn)")
             continue                                     # khỏi quét + log lại mỗi run (chống phình)
         try:
-            # (2) CỔNG LOCK LAI: chấp nhận (a) paper KV record verify được, HOẶC (b) lock FRAME đã
-            # KÝ của đúng payer/contract. Thực tế board: payer lạ chỉ post frame, KHÔNG ghi KV note
-            # (quan sát 6/6 lock không có KV) -> gate-chỉ-KV (#50) khiến ta MÙ. Frame CÓ chữ ký payer
-            # -> đáng tin hơn KV world-writable. Nhớ 'lock_seen' vào state: frame cuộn khỏi cửa sổ
-            # ~15' cũng không mất lock (lý do #50 rời khỏi frame — nay vá bằng cách ghi nhớ).
-            pn = paper_note(contract)
-            rec = decode_paper_record(kv_get_fn(pn["ns"], pn["key"]) or "")
-            kv_locked = verify_paper_lock(rec, "hash", meta.get("statement"), meta.get("refundAfterMs"))
-            # Cổng FRAME CHỈ áp rail 'paper' (mô phỏng): reveal theo frame ở đây vô hại vì escrow là
-            # nominal. KHÔNG áp rail thật -> tránh lộ preimage khi chưa có escrow thật đã fund.
-            paper_deal = "paper" in [str(r).lower() for r in (meta.get("rails") or [])]
-            if (paper_deal and not meta.get("lock_seen")
-                    and find_payer_lock(room_msgs, contract, meta.get("payer_did"))):
-                meta["lock_seen"] = True                  # payer đã lock (frame ký) -> nhớ BỀN
-            has_frame = bool(meta.get("lock_seen"))
-            if not (kv_locked or has_frame):
-                # payer chưa lock (không KV, không frame). Deal chờ đã CŨ -> POP để tập chờ nhỏ lại
-                # (mỗi deal chờ tốn 1 read KV/run); còn mới -> chờ.
+            rails_l = [str(r).lower() for r in (meta.get("rails") or [])]
+            use_rail = value_rail is not None and getattr(value_rail, "name", None) in rails_l
+            if use_rail:
+                # (2a) CỔNG GIÁ-TRỊ: escrow THẬT on-chain (đã fund, đúng hash/time/payee, chưa rút).
+                # KHÔNG dùng frame làm cổng cho rail thật — frame ≠ tiền đã khóa (lộ preimage rủi ro).
+                locked = value_rail.verify_lock(contract, meta.get("statement"),
+                                                meta.get("refundAfterMs"))
+                lock_src = value_rail.name if locked else ""
+            else:
+                # (2b) CỔNG LOCK LAI (paper): (a) paper KV record verify được, HOẶC (b) lock FRAME đã
+                # KÝ của đúng payer/contract. Board: payer lạ chỉ post frame, KHÔNG ghi KV note
+                # (6/6 lock không KV) -> gate-chỉ-KV khiến ta MÙ. Frame CÓ chữ ký payer -> đáng tin
+                # hơn KV world-writable; nhớ 'lock_seen' để frame cuộn khỏi cửa sổ ~15' cũng không mất.
+                pn = paper_note(contract)
+                rec = decode_paper_record(kv_get_fn(pn["ns"], pn["key"]) or "")
+                kv_locked = verify_paper_lock(rec, "hash", meta.get("statement"),
+                                              meta.get("refundAfterMs"))
+                # Cổng FRAME CHỈ áp rail 'paper' (nominal): reveal theo frame vô hại vì escrow không
+                # giá trị. Rail thật đi nhánh (2a) ở trên -> không bao giờ tin frame.
+                paper_deal = "paper" in rails_l
+                if (paper_deal and not meta.get("lock_seen")
+                        and find_payer_lock(room_msgs, contract, meta.get("payer_did"))):
+                    meta["lock_seen"] = True              # payer đã lock (frame ký) -> nhớ BỀN
+                has_frame = bool(meta.get("lock_seen"))
+                locked = bool(kv_locked or has_frame)
+                lock_src = "+".join(s for s, on in (("kv", kv_locked), ("frame", has_frame)) if on) or "?"
+            if not locked:
+                # payer chưa lock (không escrow/không frame). Deal chờ đã CŨ -> POP để tập chờ nhỏ lại;
+                # còn mới -> chờ.
                 if now_ms - meta.get("accepted_ms", now_ms) > stale_wait_ms:
                     secrets.pop(contract, None)
                     stale += 1
                 else:
                     waiting += 1
                 continue
-            lock_src = "+".join(s for s, on in (("kv", kv_locked), ("frame", has_frame)) if on) or "?"
             deliverable = do_work_fn(meta) if do_work_fn else None   # (3) làm THẬT; không được -> bỏ
             if not deliverable:
                 log("[tclk] " + contract[:14] + " không làm được job -> bỏ (KHÔNG reveal)")
@@ -493,17 +506,36 @@ def run_tclk_complete(read_room_fn, kv_get_fn, post_fn, do_work_fn, state, *, my
             reveal = make_reveal(contract, meta["preimage"], my_did)
             amt = str(meta.get("amount")) + " " + str(meta.get("asset"))
             if dry_run:
-                log("[tclk:DRY] would DELIVER + REVEAL " + contract[:14] + " | " + amt
+                extra = " + would CLAIM(" + value_rail.name + ")" if use_rail else ""
+                log("[tclk:DRY] would DELIVER + REVEAL" + extra + " " + contract[:14] + " | " + amt
                     + " | lock=" + lock_src + " (secret giữ nội bộ)")
                 revealed.append(contract)
                 continue
-            post_fn(offers_room, "[" + my_did[:12] + " deliver] " + deliverable)   # LIVE
-            if post_fn(offers_room, encode_frame(reveal)):
+            if use_rail:
+                # (4) RAIL GIÁ-TRỊ: CLAIM on-chain TRƯỚC (rút tiền về payee cố định), reveal SAU —
+                # preimage lộ công khai ở frame reveal, phải rút xong trước khi công bố (chống front-run).
+                cr = value_rail.claim(contract, meta["preimage"], now_ms=now_ms,
+                                      refund_after_ms=meta.get("refundAfterMs"), dry_run=False)
+                if cr.get("outcome") != "claimed":
+                    log("[tclk] " + contract[:14] + " " + value_rail.name + " claim chưa xong ("
+                        + str(cr.get("outcome")) + ") -> KHÔNG post reveal, giữ deal chờ vòng sau")
+                    waiting += 1
+                    continue
+                post_fn(offers_room, "[" + my_did[:12] + " deliver] " + deliverable)
+                post_fn(offers_room, encode_frame(reveal))
                 revealed.append(contract)
                 done.add(contract)
-                secrets.pop(contract, None)              # đã reveal -> dọn kho secret (dedup ở tclk_completed)
-                log("[tclk] REVEAL posted " + contract[:14] + " — deal HOÀN TẤT (claim " + amt
-                    + ", lock=" + lock_src + ")")
+                secrets.pop(contract, None)
+                log("[tclk] CLAIM+REVEAL " + contract[:14] + " — deal HOÀN TẤT (rút " + amt
+                    + " tx=" + str(cr.get("tx"))[:14] + ")")
+            else:
+                post_fn(offers_room, "[" + my_did[:12] + " deliver] " + deliverable)   # LIVE (paper)
+                if post_fn(offers_room, encode_frame(reveal)):
+                    revealed.append(contract)
+                    done.add(contract)
+                    secrets.pop(contract, None)          # đã reveal -> dọn kho secret (dedup ở tclk_completed)
+                    log("[tclk] REVEAL posted " + contract[:14] + " — deal HOÀN TẤT (claim " + amt
+                        + ", lock=" + lock_src + ")")
         except Exception as e:
             log("[tclk] complete lỗi " + contract[:14] + ": " + str(e)[:80])
             continue

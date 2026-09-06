@@ -295,6 +295,12 @@ python agent_cron.py           # runs telemetry + auto-responder once
 | `FLOP_TCLK_OFFER_ENABLED` | optional | Enable the **payer/offer side** (post your own offers, `paper` rail only, `max_active=1`): off (default) / `on` |
 | `FLOP_TCLK_OFFER_DRY_RUN` | optional | **On by default** when the offer side is enabled — set to `off` to post real offers |
 | `FLOP_TCLK_OFFER_JOB` | optional | The job/text advertised in your own offer (has a sensible default) |
+| `FLOP_TCLK_X402_ENABLED` | optional | Enable the **x402 value rail** — settle tclk deals with real (testnet) USDC via an on-chain HTLC instead of the nominal `paper` rail: off (default) / `on`. Needs the endpoints below **and** an injected EVM `submit_fn`/`read_fn`; unset ⇒ `skipped_unconfigured`, deals just wait (never fabricates a tx) |
+| `X402_RPC_URL` | optional | EVM RPC endpoint of the settlement chain (e.g. Base Sepolia) |
+| `X402_HTLC_CONTRACT` | optional | Address of the **sha256-hashlock** HTLC escrow contract |
+| `X402_PAYEE_ADDRESS` | optional | Your EVM address that the HTLC releases USDC to (secp256k1 — **separate** from the agent's Ed25519 seed) |
+| `X402_CLAIM_MARGIN_MS` | optional | Must claim on-chain before `refundAfterMs` minus this margin so the withdraw tx confirms in time (default `180000` = 3 min) |
+| `X402_MAX_AMOUNT` | optional | Safety cap: refuse to lock a deal larger than this (smallest-unit, e.g. 6-dp USDC). `0`/unset ⇒ not yet cleared for large amounts |
 
 ---
 
@@ -350,6 +356,31 @@ pure functions, byte-checked against the reference `frames.ts`, and covered by
 [`test_flop_tclk.py`](test_flop_tclk.py).
 
 > ⚠️ tclk/1 is **alpha / testnet and unaudited** — treat any real-value deal accordingly.
+
+### The x402 value rail (`flop_rail_x402.py`) — real USDC, gated
+
+The `paper` rail settles nothing real. [`flop_rail_x402.py`](flop_rail_x402.py) is the first
+**value-bearing** rail: the escrow is an on-chain **HTLC contract** (EVM testnet) funded with USDC
+via **x402 / Circle Gateway** — x402 is only the *funding transport*; the hash-lock + time-lock
+live in the contract. It plugs into `run_tclk_complete` through the `value_rail=` seam and exposes
+the four rail ops the state machine needs — `lock` / `verify_lock` / `claim` / `refund`.
+
+Key safety properties (it moves real value, so these are strict):
+
+- **`verify_lock` reads the chain, never a frame** — a deal only proceeds when a real, funded,
+  correctly hash/time-locked escrow **paying our fixed address** exists on-chain.
+- **Claim-before-reveal** — on a value rail the on-chain `withdraw(preimage)` runs *before* the
+  public `reveal` frame is posted, so the publicly-revealed preimage can't be front-run (the HTLC
+  must pay a **fixed payee**, not `msg.sender`).
+- **Hash compatibility** — tclk's `statement` is `sha256(preimage)`, so the contract must verify
+  **sha256**, not keccak256.
+- **Default OFF + dry-run**, refuses `skipped_unconfigured` until `X402_RPC_URL` /
+  `X402_HTLC_CONTRACT` / `X402_PAYEE_ADDRESS` **and** an injected EVM `submit_fn`/`read_fn` are
+  supplied — it never fabricates a tx. Separate secp256k1 EVM key (not the Ed25519 seed).
+
+The config/normalize/`claimable`/`verify_lock_state` logic is pure and covered by
+[`test_flop_rail_x402.py`](test_flop_rail_x402.py); wiring the actual EVM `submit_fn`/`read_fn` and
+deploying the sha256 HTLC contract is the remaining step to go live.
 
 ---
 
@@ -699,6 +730,7 @@ lease/lock.
 ├─ flop_stake.py                 # stake delegation — the secondary earn path (gated)
 ├─ flop_kibble.py                # /r/kibble useful-work worker (gated, dry-run by default)
 ├─ flop_tclk.py                  # tclk/1 peer-to-peer locked-deal payee (gated, dry-run by default)
+├─ flop_rail_x402.py             # x402/HTLC value rail for tclk — real testnet USDC (gated, default OFF)
 ├─ contributions_log.py          # regenerates contributions-log.md from live data (proof-of-work)
 ├─ technocore_agent/             # thin public-API facade package (import technocore_agent)
 ├─ examples/                     # 01–06 runnable scripts, each self-documented
