@@ -271,6 +271,10 @@ KIBBLE_MAX_PER_RUN = int(_env_float("FLOP_KIBBLE_MAX_PER_RUN", 2))
 KIBBLE_MAX_CHARS = int(_env_float("FLOP_KIBBLE_MAX_CHARS", 1200))
 KIBBLE_DO_CLAIM = os.environ.get("FLOP_KIBBLE_CLAIM", "on").strip().lower() not in (
     "0", "false", "off", "no")
+# Tracker ATTEST: ghi lại DELIVER thật + đối chiếu rh của ATTEST -> đo tỉ lệ 'useful' của
+# CHÍNH mình (baseline chất lượng kibble). Mặc định TẮT; chỉ đọc/ghi 1 KV note khi bật.
+KIBBLE_TRACK_ENABLED = os.environ.get("FLOP_KIBBLE_TRACK_ENABLED", "").strip().lower() in (
+    "1", "true", "on", "yes")
 KIBBLE_TEMPERATURE = _env_float("FLOP_KIBBLE_TEMPERATURE", 0.3)
 # Ngân sách token ĐẦU RA cho việc kibble/tclk: reply lobby chỉ cần ~120, nhưng deliverable
 # công việc cần nhiều hơn để ĐẦY ĐỦ (nếu không sẽ bị cắt cụt bất kể KIBBLE_MAX_CHARS).
@@ -2411,6 +2415,20 @@ def main():
                         "kibble_done": state.get("kibble_done", [])})
             mode = "dry" if KIBBLE_DRY_RUN else "live"
             kibble_status = f"{mode} {len(ks['delivered'])}✓/{ks['skipped']}skip/{ks['scanned']}scan"
+            # Tracker ATTEST (GATED): ghi DELIVER thật của mình + đối chiếu rh của ATTEST trong
+            # buffer đã fetch -> đo tỉ lệ 'useful'. Bọc kín: lỗi ở đây KHÔNG làm sập run.
+            if KIBBLE_TRACK_ENABLED:
+                try:
+                    import flop_kibble_track as kt
+                    if not KIBBLE_DRY_RUN and ks.get("delivered_items"):
+                        kt.record_deliveries(state, ks["delivered_items"], now * 1000)
+                    sm = kt.reconcile(state, ks.get("messages", []), now * 1000)
+                    save_state({"kibble_deliveries": state.get("kibble_deliveries", [])})
+                    line = kt.summary_line(sm)
+                    kv_set(private_key, did, "kibble-score", line)   # audit công khai 1 GET
+                    kibble_status += f" | {line}"
+                except Exception as e:
+                    print(f"[kibble-track] bỏ qua ({str(e)[:100]})")
         except Exception as e:
             kibble_status = "error"
             print(f"[kibble] bỏ qua ({str(e)[:100]})")

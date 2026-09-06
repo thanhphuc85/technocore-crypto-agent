@@ -283,6 +283,7 @@ python agent_cron.py           # runs telemetry + auto-responder once
 | `FLOP_KIBBLE_MAX_PER_RUN` | optional | Cap on jobs delivered per run (default `2`) — anti-spam |
 | `FLOP_KIBBLE_CLAIM` | optional | Post a `CLAIM` before each `DELIVER`: `on` (default) / `off` |
 | `FLOP_KIBBLE_MAX_CHARS` | optional | Max length of a deliverable (default `1200`) |
+| `FLOP_KIBBLE_TRACK_ENABLED` | optional | Record each real DELIVER and reconcile it against incoming `ATTEST rh:` hashes to measure the agent's own **useful-rate** — published to KV note `/kv/<ns>/kibble-score`: off (default) / `on` |
 | `FLOP_TCLK_ENABLED` | optional | Enable the **tclk/1 payee** — watch `tclk-offers` and post a signed `accept` for valid HTLC offers: off (default) / `on` |
 | `FLOP_TCLK_DRY_RUN` | optional | **On by default when the payee is enabled** — logs `would accept …`, posts nothing, never reveals a secret. Set to `off` to go live |
 | `FLOP_TCLK_ROOM` | optional | Offers/coordination room (default `tclk-offers`) |
@@ -326,6 +327,20 @@ FLOP_KIBBLE_DRY_RUN=off         # flip to live once the dry-run output looks rig
 ```
 Protocol parsing/selection/formatting are pure functions covered by
 [`test_flop_kibble.py`](test_flop_kibble.py).
+
+### Measuring your own useful-rate (`flop_kibble_track.py`, gated)
+
+The board only exposes a short rolling buffer (no history pagination), so you **can't** measure
+your ATTEST outcomes from outside — your sparse deliveries scroll away before the attestations
+arrive. The reliable vantage point is the agent itself: it knows exactly what it delivered.
+
+With `FLOP_KIBBLE_TRACK_ENABLED=on`, each real `DELIVER` is recorded and reconciled against
+incoming `ATTEST rh:<hash>` lines, publishing a `useful_rate` to KV note `/kv/<ns>/kibble-score`.
+Attribution is exact: the `rh` scheme isn't published, so at deliver time the tracker precomputes a
+**set of candidate hashes** (several algorithms × encodings) of its own deliverable; an `ATTEST`
+whose `rh` matches one is provably **ours** (and the matching recipe reveals the real algorithm),
+while an `rh` that matches none is another worker's answer for the same job — counted as ambiguous,
+never as ours. Pure logic covered by [`test_flop_kibble_track.py`](test_flop_kibble_track.py).
 
 ---
 
@@ -729,6 +744,7 @@ lease/lock.
 ├─ flop_session.py               # inference sessions — the primary 3:1 earn path (gated)
 ├─ flop_stake.py                 # stake delegation — the secondary earn path (gated)
 ├─ flop_kibble.py                # /r/kibble useful-work worker (gated, dry-run by default)
+├─ flop_kibble_track.py          # measures the agent's own kibble ATTEST useful-rate (gated)
 ├─ flop_tclk.py                  # tclk/1 peer-to-peer locked-deal payee (gated, dry-run by default)
 ├─ flop_rail_x402.py             # x402/HTLC value rail for tclk — real testnet USDC (gated, default OFF)
 ├─ contributions_log.py          # regenerates contributions-log.md from live data (proof-of-work)

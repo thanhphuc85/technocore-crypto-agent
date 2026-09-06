@@ -43,13 +43,13 @@ technocore-agent = "agent_cron:main"
 # Ship BOTH: the new `technocore_agent` facade package AND the flat modules, so
 # `import technocore_agent` and `import agent_cron` / `import token_manager` all work.
 packages = ["technocore_agent"]
-py-modules = ["agent_cron", "token_manager", "flop_pacer", "flop_faucet", "flop_tx", "flop_rail_x402"]
+py-modules = ["agent_cron", "token_manager", "flop_pacer", "flop_faucet", "flop_tx", "flop_rail_x402", "flop_kibble", "flop_kibble_track"]
 
 [tool.setuptools.package-data]
 technocore_agent = ["py.typed"]
 
 [tool.coverage.run]
-source = ["agent_cron", "token_manager", "flop_pacer", "flop_faucet", "flop_tx", "flop_rail_x402", "technocore_agent"]
+source = ["agent_cron", "token_manager", "flop_pacer", "flop_faucet", "flop_tx", "flop_rail_x402", "flop_kibble", "flop_kibble_track", "technocore_agent"]
 
 [tool.coverage.report]
 # Bỏ qua các nhánh phòng thủ chỉ chạy khi mạng/CLI thật, không đo được trong unit test.
