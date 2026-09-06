@@ -193,6 +193,7 @@ def run_kibble_worker(fetch_fn, answer_fn, post_fn, state, *,
                        my_did=state.get("kibble_did"))
 
     delivered, committed, skipped = [], [], 0
+    delivered_items = []          # {jobid, answer} cho các DELIVER THẬT (dùng cho tracker ATTEST)
     for job in jobs:
         jobid = job["jobid"]
         answer = answer_fn(job)
@@ -226,6 +227,7 @@ def run_kibble_worker(fetch_fn, answer_fn, post_fn, state, *,
         if ok:
             delivered.append(jobid)
             committed.append(jobid)       # CHỈ deliver THẬT mới vào sổ done
+            delivered_items.append({"jobid": jobid, "answer": answer})
 
     # Persist: cursor luôn tiến; done chỉ ghi các deliver THẬT, chặn kích thước (giữ mới nhất).
     if new_cursor:
@@ -235,4 +237,6 @@ def run_kibble_worker(fetch_fn, answer_fn, post_fn, state, *,
         state["kibble_done"] = merged[-DONE_CAP:]
 
     return {"scanned": len(messages), "delivered": delivered,
+            "delivered_items": delivered_items,   # {jobid,answer} của DELIVER thật (tracker)
+            "messages": messages,                 # buffer đã fetch (reconcile ATTEST, khỏi fetch lại)
             "skipped": skipped, "dry_run": dry_run, "cursor": state.get("kibble_cursor")}
