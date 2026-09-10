@@ -1,11 +1,16 @@
 """
-flop_session.py — Mua suy luận từ thợ đào FLOP: ĐƯỜNG EARN AIRDROP CHÍNH (3:1).
+flop_session.py — Mua suy luận từ thợ đào FLOP: đường "spend-to-earn" (mặc định 3:1 — CHƯA CHỐT).
 
 Theo bản nháp FLOP (intro.flop.network/agent.html, 27/08/2026): một tác nhân đăng YÊU CẦU
 PHIÊN vào mempool với 5 trường — [hash trọng số mô hình · độ trễ tối đa · số FLOPs · cờ bảo
 mật · phí]. Một thợ đào nhận, mở kết nối riêng, chạy inference, trả về PoUI (Proof of Useful
 Inference). Tác nhân có thể KHIẾU NẠI (dispute) nếu sai; nếu đúng thì THANH TOÁN bằng FLOP.
 Airdrop = pro-rata theo FLOP chi cho inference (mỗi 3 FLOP phí -> mở khóa 1 FLOP).
+
+TRUNG THỰC VỀ NGUỒN: cả "đây là đường earn CHÍNH" lẫn tỉ lệ 3:1 đều từ teaser + agent.html
+draft, KHÔNG được Yellow Paper (flop.finance/intro/yellowpaper/) xác nhận — Appendix E còn để
+ngỏ liệu spend-to-unlock có ship và điểm quy đổi có sublinear (2× chi CHƯA chắc trả 2×). Đừng
+volume-farm dựa trên giả định này; cơ chế thắng rõ hơn ở near-term là MINER, mà repo này không ở.
 
 Đây là SCAFFOLD (chưa có testnet FLOP). Phần thanh toán đi qua token_manager.spend() nên khi
 TESTNET_ENABLED=true + endpoint thật thì mỗi phiên đã chốt sẽ tự tích lũy mở khóa 3:1. Ở

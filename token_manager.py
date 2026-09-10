@@ -86,7 +86,13 @@ def endpoint_url() -> str:
 def unlock_ratio() -> Decimal:
     """Tỉ lệ mở khóa mainnet: mỗi `ratio` FLOP chi THẬT trên testnet mở khóa 1 FLOP
     mainnet (mainnet = tổng_testnet_đã_chi / ratio). Mặc định 3 (FLOP_UNLOCK_RATIO);
-    giá trị sai/không dương -> 3."""
+    giá trị sai/không dương -> 3.
+
+    NGUỒN / TRUNG THỰC: con số 3:1 lấy từ TEASER + bản nháp agent.html (intro.flop.network,
+    27/08/2026). Yellow Paper (flop.finance/intro/yellowpaper/) KHÔNG xác nhận cơ chế này —
+    Appendix E còn để ngỏ "liệu spend-to-unlock có ship" và "dạng sublinear của điểm quy đổi".
+    Vì vậy ĐỪNG coi 3 là luật đã chốt; nó chỉ là mặc định có thể chỉnh, giữ ở đây để khi FLOP
+    công bố công thức thật thì đổi 1 env (hoặc bỏ hẳn) mà không phải sửa logic."""
     raw = os.environ.get("FLOP_UNLOCK_RATIO", "").strip()
     d = _parse_amount(raw) if raw else None
     return d if (d is not None and d > 0) else Decimal(3)
@@ -195,8 +201,10 @@ def credit(amount, token: str = None, memo: str = "faucet credit", path: str = N
             "balance_after": new_bal, "reason": "credited"}
 
 
-# --- Kế toán MỞ KHÓA MAINNET (3:1) ------------------------------------------------
+# --- Kế toán MỞ KHÓA MAINNET (mặc định 3:1 — GIẢ ĐỊNH TỪ TEASER, CHƯA CHỐT) --------
 # Mỗi `unlock_ratio` FLOP chi THẬT trên testnet (spent_onchain) mở khóa 1 FLOP mainnet.
+# LƯU Ý: tỉ lệ 3:1 là giả định từ teaser/agent.html; Yellow Paper chưa xác nhận (Appendix E
+# để ngỏ). Xem docstring unlock_ratio(). Đây là hạch toán nội bộ, không phải cam kết của FLOP.
 # Chi MÔ PHỎNG (spent_simulated) KHÔNG tính -> chống "farm" mở khóa bằng tiền giả.
 # Đây chỉ là HẠCH TOÁN quyền; claim FLOP thật là hành động tài chính, đi qua seam
 # gated claim_mainnet_unlock() (từ chối cho tới khi có cơ chế + endpoint thật).
