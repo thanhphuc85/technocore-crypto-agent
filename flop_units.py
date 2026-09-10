@@ -1,35 +1,34 @@
 """
-flop_units.py — Đơn vị công việc tham chiếu của FLOP: Effective-FLOPs (F_eff) -> G_n.
+flop_units.py — "bare heuristic" F_eff/G_n của FLOP: CHỈ để SANITY-CHECK, KHÔNG phải giá billed.
 
-Theo Yellow Paper (flop.finance/intro/yellowpaper/, §4.1–§4.2): FLOP KHÔNG tính phí theo
-số phép tính vật lý mà theo một đơn vị công-việc-tham-chiếu tất định:
+Đối chiếu nguồn CHÍNH THỨC (github.com/flop-labs/yellowpaper, yellowpaper.md §4.1–§4.2):
 
-    F_eff ≈ 2 · P_active · N  +  2 · n_layer · n_ctx · d_attn      (§4.2, heuristic "bare")
+    F_eff ≈ 2 · P_active · N  +  2 · n_layer · n_ctx · d_attn      (§4.2, dòng 714)
     G_n   =  floor(F_eff / 1e9)                                    (§4.1 R4.1)
+    per-token/per-layer: QKV 6d², attn output 2d², FFN 16d²        (§4.2, dòng 717)
 
-  · P_active = số tham số hoạt động của mô hình
-  · N        = số token SINH ra
-  · n_layer  = số lớp transformer
-  · n_ctx    = độ dài ngữ cảnh/prompt
-  · d_attn   ≈ hidden dimension (d_model) — số hạng attention theo ngữ cảnh
+  · P_active = tham số HOẠT ĐỘNG (MoE-aware) · N = token SINH ra · n_layer = số lớp
+  · n_ctx = độ dài ngữ cảnh · d_attn ≈ hidden dim (d_model)
 
-Neo hiệu chuẩn (quote §4.2): "Llama-3-8B → 16, Llama-3-70B → 140 G_n/token". Khớp đúng
-phần dense 2·P/1e9 (2·8e9/1e9 = 16 ; 2·70e9/1e9 = 140) -> "G_n/token" chính là số hạng dense,
-còn attention là phần CỘNG THÊM theo n_ctx.
+⚠️ VAI TRÒ ĐÚNG (đọc kỹ — đây là chỗ dễ hiểu sai):
+  Yellow Paper nói THẲNG công thức trên là "a **sanity check only** (R4.3), never a billed
+  amount" (dòng 711). R4.2: G_n tính phí BẮT BUỘC qua primitive tất định `hp_poui::flop_meter`
+  (mirror Python: `tee-bridge/inference/attestor/flop_meter.py`), *"not derived from bare 2·P·N"*.
+  Bare 2·P·N sai ~2–3× (bỏ quadratic attention, embedding/unembed, LayerNorm/softmax).
 
-TRUNG THỰC VỀ ĐỘ CHÍNH XÁC (đọc kỹ):
-  · Phần DENSE (2·P·N) là neo CỨNG, tái tạo đúng hai giá trị Yellow Paper pin -> tin được.
-  · Số hạng ATTENTION là heuristic "bare" của §4.2; công thức chi tiết (d_attn, phân rã
-    QKV/FFN) có thể khác ở spec cuối. Bộ đo QUYỀN UY là `hp_poui::flop_meter` (§4.2 R4.2) —
-    file NÀY KHÔNG tái hiện nó byte-exact. Vì vậy G_n ở đây là ƯỚC LƯỢNG để TỰ-ĐO và định
-    lượng phí khi lập kế hoạch, KHÔNG phải giá trị SETTLEMENT. Khi FLOP mở testnet + công bố
-    flop_meter tham chiếu -> thay lõi bằng số của nó (giữ nguyên API).
+  ⇒ File này CHỈ dùng để: (a) SANITY-CHECK tripwire (R4.3, `check_tripwire`), và (b) ước lượng
+     thô công suất khi lập kế hoạch. TUYỆT ĐỐI KHÔNG dùng làm G_n tính phí/settlement, và KHÔNG
+     nối vào `meter_inference` như con số billed — làm vậy là VI PHẠM R4.2. Khi FLOP công bố
+     `flop_meter` tham chiếu -> nạp nó làm bộ đo thật (giữ nguyên API ở đây cho tripwire).
 
-Quy tắc số học (§4.1 R4.4): dùng SỐ NGUYÊN; floor CHỈ MỘT LẦN ở phép chia; KHÔNG làm tròn
-hay clamp ở các bước trung gian. Tái dùng KV-cache KHÔNG được chiết khấu G_n đã chốt (R4.5).
+Neo KAT (§4.2 dòng 707/720 — pin theo op-count model ĐẦY ĐỦ, không phải bare heuristic):
+  Llama-3-8B → 16 · DeepSeek-V3 → 74 · Llama-3-70B → 140 G_n/token. Bare heuristic TRÙNG các
+  giá trị này vì ở 1 token phần dense (2·P) áp đảo (DeepSeek-V3 MoE: 37B active -> 2·37e9/1e9 = 74).
 
-Đây là THƯ VIỆN THUẦN, không có tác dụng phụ, không tự chạy gì ở tầng agent (nên vốn đã
-"gated": chưa file nào gọi nó -> hành vi 24/7 không đổi). Chạy thử: python flop_units.py
+Quy tắc số học (§4.1 R4.4): SỐ NGUYÊN; floor CHỈ MỘT LẦN ở phép chia; không làm tròn/clamp
+trung gian. KV-cache KHÔNG chiết khấu G_n (R4.5).
+
+THƯ VIỆN THUẦN, không tác dụng phụ, chưa file nào gọi -> agent 24/7 không đổi. python flop_units.py
 """
 
 import os
@@ -48,6 +47,8 @@ ModelSpec = namedtuple("ModelSpec", ["active_params", "n_layers", "d_model"])
 MODELS = {
     "llama-3-8b":  ModelSpec(active_params=8_000_000_000,  n_layers=32, d_model=4096),
     "llama-3-70b": ModelSpec(active_params=70_000_000_000, n_layers=80, d_model=8192),
+    # DeepSeek-V3: MoE 671B tổng / 37B ACTIVE per token -> neo KAT 74 (= 2·37e9/1e9).
+    "deepseek-v3": ModelSpec(active_params=37_000_000_000, n_layers=61, d_model=7168),
 }
 
 
@@ -110,7 +111,8 @@ def f_eff(active_params: int, tokens_generated: int, *, n_layers: int = 0,
 
 def g_n(active_params: int, tokens_generated: int, *, n_layers: int = 0,
         n_ctx: int = 0, d_attn: int = 0, include_attention: bool = True) -> int:
-    """Đơn vị tính phí G_n = floor(F_eff / 1e9). Floor MỘT LẦN duy nhất, ở đây (R4.4)."""
+    """G_n (bare heuristic) = floor(F_eff / 1e9). Floor MỘT LẦN duy nhất (R4.4). ĐÂY LÀ
+    SANITY-CHECK, KHÔNG phải G_n tính phí — billed G_n đi qua hp_poui::flop_meter (R4.2)."""
     return f_eff(active_params, tokens_generated, n_layers=n_layers, n_ctx=n_ctx,
                  d_attn=d_attn, include_attention=include_attention) // GIGA
 
@@ -171,12 +173,12 @@ def check_tripwire(gn: int, latency_ms, ceiling_gflops=None) -> dict:
 
 
 if __name__ == "__main__":
-    print("flop_units.py — Effective-FLOPs / G_n (ước lượng tự-đo, không phải settlement)\n")
+    print("flop_units.py — bare heuristic F_eff/G_n (SANITY-CHECK R4.3, KHÔNG phải billed)\n")
 
-    for name in ("llama-3-8b", "llama-3-70b"):
+    pins = {"llama-3-8b": 16, "deepseek-v3": 74, "llama-3-70b": 140}
+    for name, pin in pins.items():
         per_tok = g_n_per_token(model_spec(name).active_params)
-        print(f"{name:12s} dense G_n/token = {per_tok}  (Yellow Paper pin: "
-              f"{'16' if name.endswith('8b') else '140'})")
+        print(f"{name:12s} dense G_n/token = {per_tok}  (KAT pin: {pin})")
 
     print()
     # Ví dụ 1 phiên: sinh 200 token với ngữ cảnh 8192 trên Llama-3-8B.

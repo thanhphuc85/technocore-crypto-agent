@@ -10,11 +10,14 @@ import flop_units as u
 def test_pinned_gn_per_token():
     assert u.g_n_per_token(8_000_000_000) == 16
     assert u.g_n_per_token(70_000_000_000) == 140
+    # DeepSeek-V3: MoE 37B active -> KAT 74 (xác minh dùng ACTIVE params, không phải tổng 671B)
+    assert u.g_n_per_token(37_000_000_000) == 74
 
 
 def test_pinned_via_model_registry():
-    # dense per-token = phần Yellow Paper pin
+    # dense per-token = neo KAT (§4.2); cả ba neo chính thức
     assert u.g_n_for_model("llama-3-8b", 1, include_attention=False) == 16
+    assert u.g_n_for_model("deepseek-v3", 1, include_attention=False) == 74
     assert u.g_n_for_model("llama-3-70b", 1, include_attention=False) == 140
 
 
