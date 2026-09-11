@@ -2524,6 +2524,44 @@ def main():
             tclk_offer_status = "error"
             print(f"[tclk-payer] bỏ qua ({str(e)[:100]})")
 
+    # 3a6) (Tùy chọn, GATED) VOTER cho contest sonnet-1 của FLOP Labs (technocore-sonnet-challange).
+    #      Mặc định TẮT (SONNET_VOTER_ENABLED) -> agent không đổi hành vi. Khi bật:
+    #        - đăng ký voter 1 LẦN (idempotent qua state['sonnet_registered']);
+    #        - CHỈ bỏ phiếu khi có SONNET_BALLOT_ENTRY tường minh (không vote bừa), và chỉ POST
+    #          lại khi entry đổi so với lần trước (đổi phiếu được tới D). Logic + guard ở sonnet_voter.
+    #      register/ballot là POST -> cùng health-guard đường ghi như kibble/tclk. Bọc kín.
+    sonnet_status = "off"
+    _sonnet_on = os.environ.get("SONNET_VOTER_ENABLED", "").strip().lower() in ("1", "true", "on", "yes")
+    if _sonnet_on and posts_degraded():
+        sonnet_status = "skip-outage"
+        print(f"[sonnet] bỏ qua — đường ghi lỗi (post ok={_post_ok_count} fail={_post_fail_count}).")
+    elif _sonnet_on:
+        try:
+            import sonnet_voter
+            if not state.get("sonnet_registered"):
+                r = sonnet_voter.register_voter(private_key, did, post_fn=post_message)
+                reg = r.get("outcome")
+                if reg == "registered":
+                    state["sonnet_registered"] = True
+                    save_state({"sonnet_registered": True})
+            else:
+                reg = "already"
+            entry = sonnet_voter.preferred_entry()
+            if not entry:
+                vote = "no_choice"
+            elif entry == state.get("sonnet_voted_entry"):
+                vote = "voted-cached"
+            else:
+                b = sonnet_voter.cast_ballot(private_key, did, entry_id=entry, post_fn=post_message)
+                vote = b.get("outcome")
+                if vote == "voted":
+                    state["sonnet_voted_entry"] = entry
+                    save_state({"sonnet_voted_entry": entry})
+            sonnet_status = f"reg:{reg} vote:{vote}"
+        except Exception as e:
+            sonnet_status = "error"
+            print(f"[sonnet] bỏ qua ({str(e)[:100]})")
+
     # 3b) (Tùy chọn, GATED) Công khai tiến độ MỞ KHÓA MAINNET 3:1 vào KV note `unlock`
     #     để ai cũng audit được (GET /kv/<ns>/unlock). Mặc định TẮT (FLOP_PUBLISH_UNLOCK)
     #     -> agent không đổi hành vi. Bọc kín: lỗi bị nuốt, không làm sập run.
@@ -2557,12 +2595,14 @@ def main():
         f"- recap: **{recap_status}**",
         f"- kibble: **{kibble_status}**",
         f"- tclk: **{tclk_status}** · complete: **{tclk_done_status}**",
+        f"- sonnet: **{sonnet_status}**",
         f"- replies: **{replies}** · proactive: **{proactive}**",
         f"- technocore.chat 200s: **{_server_ok_count}**",
     ]
     print(f"[run] telemetry={tele_status} manifest={manifest_status} "
           f"digest={digest_status} recap={recap_status} kibble={kibble_status} "
-          f"tclk={tclk_status} tclk_done={tclk_done_status} tclk_offer={tclk_offer_status} replies={replies} "
+          f"tclk={tclk_status} tclk_done={tclk_done_status} tclk_offer={tclk_offer_status} "
+          f"sonnet={sonnet_status} replies={replies} "
           f"proactive={proactive} server200s={_server_ok_count}")
 
     if _server_ok_count == 0:
