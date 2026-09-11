@@ -102,6 +102,13 @@ jobs:
           FLOP_ORGANIC_ONLY: ${{ vars.FLOP_ORGANIC_ONLY }}
           FLOP_INFERENCE_COST: ${{ vars.FLOP_INFERENCE_COST }}
           FLOP_MAX_SPENDS_PER_HOUR: ${{ vars.FLOP_MAX_SPENDS_PER_HOUR }}
+          # VOTER cho contest sonnet của FLOP Labs (mặc định TẮT). Đặt SONNET_VOTER_ENABLED=true
+          # -> agent đăng ký voter (contest sonnet-2 mặc định) rồi bỏ phiếu KHI đặt
+          # SONNET_BALLOT_ENTRY=<entry_id>. SONNET_CONTEST_ID/SONNET_REFEREE_DID để override.
+          SONNET_VOTER_ENABLED: ${{ vars.SONNET_VOTER_ENABLED }}
+          SONNET_CONTEST_ID: ${{ vars.SONNET_CONTEST_ID }}
+          SONNET_BALLOT_ENTRY: ${{ vars.SONNET_BALLOT_ENTRY }}
+          SONNET_REFEREE_DID: ${{ vars.SONNET_REFEREE_DID }}
           # Câu hỏi nhập tay khi Run workflow (bỏ qua khi chạy theo cron)
           ASK: ${{ github.event.inputs.ask }}
         run: python agent_cron.py
