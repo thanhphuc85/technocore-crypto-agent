@@ -39,10 +39,14 @@ except Exception:  # pragma: no cover
     fetch_messages = None
 
 
-DEFAULT_CONTEST = "sonnet-1"
-REG_ROOM = "mb-sonnet-1-registration"
-VOTES_ROOM = "mb-sonnet-1-votes"
-SUBMISSIONS_ROOM = "mb-sonnet-1-submissions"
+# sonnet-1 BỊ BỎ (room rules bị nhiễm message trước khi referee claim -> vĩnh viễn vô chủ).
+# Contest THẬT là sonnet-2 (LAUNCH.md, github.com/flop-labs/technocore-sonnet-challenge).
+DEFAULT_CONTEST = "sonnet-2"
+
+# Referee DID pin trong LAUNCH.md — TRUST ANCHOR. Chỉ receipt ký bởi DID này mới là receipt thật;
+# TUYỆT ĐỐI không suy referee từ ai post trong room (sonnet-1 chết vì một client pin nhầm DID giả
+# từ room vô chủ). Override khi FLOP đổi qua SONNET_REFEREE_DID.
+DEFAULT_REFEREE_DID = "did:key:z6MkowHQwsx9xr84WbWN3YCnKutyBnBXkT1ChKY4uEAAMzte"
 
 
 # --- Cấu hình (đọc LIVE) -----------------------------------------------------------
@@ -54,6 +58,23 @@ def voter_enabled() -> bool:
 
 def contest_id() -> str:
     return os.environ.get("SONNET_CONTEST_ID", "").strip() or DEFAULT_CONTEST
+
+
+def referee_did() -> str:
+    return os.environ.get("SONNET_REFEREE_DID", "").strip() or DEFAULT_REFEREE_DID
+
+
+# Rooms suy theo contest_id (đổi contest là đổi hết room — không hardcode sonnet-1 nữa).
+def reg_room() -> str:
+    return f"mb-{contest_id()}-registration"
+
+
+def votes_room() -> str:
+    return f"mb-{contest_id()}-votes"
+
+
+def submissions_room() -> str:
+    return f"mb-{contest_id()}-submissions"
 
 
 def preferred_entry() -> str:
@@ -94,7 +115,7 @@ def build_prestart_evidence(did: str) -> str:
     chứng DID tồn tại trước S. Tùy chọn: chỉ cần nếu chưa có record archive cũ."""
     if not (did and str(did).strip()):
         raise ValueError("did không được rỗng")
-    return (f"sonnet-1 pre-start identity evidence: signed by {did}, an Ed25519 key active in "
+    return (f"{contest_id()} pre-start identity evidence: signed by {did}, an Ed25519 key active in "
             f"Technocore archive records prior to opening S (2026-09-11T12:00:00Z). This signed "
             f"archive record is the pre-S existence proof for this did:key.")
 
@@ -142,7 +163,7 @@ def fetch_entries() -> dict:
     if fetch_messages is None:
         return {"ok": False, "outcome": "skipped_unconfigured",
                 "reason": "chưa có fetch_messages (agent_cron chưa import được)"}
-    data = fetch_messages(since=0, room=SUBMISSIONS_ROOM)
+    data = fetch_messages(since=0, room=submissions_room())
     if not data:
         return {"ok": False, "outcome": "fetch_failed", "reason": "không đọc được room submissions"}
     return {"ok": True, "outcome": "ok", "entries": parse_submissions(data.get("messages", [])),
@@ -184,9 +205,10 @@ def register_voter(private_key=None, did: str = None, *, post_fn=None, log=print
         return {"outcome": "skipped_unconfigured",
                 "reason": "thiếu post_fn/agent_cron hoặc thiếu did/private_key -> không gửi"}
     text = build_register()
-    ok = sender(private_key, did, text, REG_ROOM)
-    log(f"[sonnet] register voter -> r/{REG_ROOM} | ok={ok}")
-    return {"outcome": "registered" if ok else "post_failed", "room": REG_ROOM, "text": text}
+    room = reg_room()
+    ok = sender(private_key, did, text, room)
+    log(f"[sonnet] register voter -> r/{room} | ok={ok}")
+    return {"outcome": "registered" if ok else "post_failed", "room": room, "text": text}
 
 
 def cast_ballot(private_key=None, did: str = None, entry_id: str = None, *,
@@ -205,9 +227,10 @@ def cast_ballot(private_key=None, did: str = None, entry_id: str = None, *,
                 "reason": "chưa có entry được chỉ định (đặt SONNET_BALLOT_ENTRY hoặc truyền entry_id) "
                           "-> không bỏ phiếu bừa"}
     text = build_ballot(did, chosen)
-    ok = sender(private_key, did, text, VOTES_ROOM)
-    log(f"[sonnet] ballot -> r/{VOTES_ROOM} | entry={chosen} | ok={ok}")
-    return {"outcome": "voted" if ok else "post_failed", "entry_id": chosen, "room": VOTES_ROOM, "text": text}
+    room = votes_room()
+    ok = sender(private_key, did, text, room)
+    log(f"[sonnet] ballot -> r/{room} | entry={chosen} | ok={ok}")
+    return {"outcome": "voted" if ok else "post_failed", "entry_id": chosen, "room": room, "text": text}
 
 
 if __name__ == "__main__":
