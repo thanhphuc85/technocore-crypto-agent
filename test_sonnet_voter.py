@@ -33,9 +33,30 @@ def test_build_register_is_voter_without_x(monkeypatch):
     o = _obj(sv.build_register("register-1"))
     assert o["type"] == "sonnet.register.v1"
     assert o["role"] == "voter"
-    assert o["contest_id"] == "sonnet-1"
+    assert o["contest_id"] == "sonnet-2"     # sonnet-1 bị bỏ; contest thật là sonnet-2
     assert "x_account_url" not in o          # voter KHÔNG kèm X
     assert o["request_id"] == "register-1"
+
+
+def test_default_contest_is_sonnet_2(monkeypatch):
+    monkeypatch.delenv("SONNET_CONTEST_ID", raising=False)
+    assert sv.contest_id() == "sonnet-2"
+    assert sv.reg_room() == "mb-sonnet-2-registration"
+    assert sv.votes_room() == "mb-sonnet-2-votes"
+    assert sv.submissions_room() == "mb-sonnet-2-submissions"
+
+
+def test_rooms_follow_contest_id(monkeypatch):
+    monkeypatch.setenv("SONNET_CONTEST_ID", "sonnet-3")
+    assert sv.reg_room() == "mb-sonnet-3-registration"
+    assert sv.votes_room() == "mb-sonnet-3-votes"
+
+
+def test_referee_did_pinned(monkeypatch):
+    monkeypatch.delenv("SONNET_REFEREE_DID", raising=False)
+    assert sv.referee_did() == "did:key:z6MkowHQwsx9xr84WbWN3YCnKutyBnBXkT1ChKY4uEAAMzte"
+    monkeypatch.setenv("SONNET_REFEREE_DID", "did:key:z6MkOTHER")
+    assert sv.referee_did() == "did:key:z6MkOTHER"
 
 
 def test_build_ballot(monkeypatch):
@@ -85,13 +106,13 @@ def test_parse_submissions_filters(monkeypatch):
     monkeypatch.delenv("SONNET_CONTEST_ID", raising=False)
     msgs = [
         {"from": "did:a", "seq": 1, "ts": "t", "text": json.dumps(
-            {"type": "sonnet.submit.v1", "contest_id": "sonnet-1", "game_id": "a",
-             "poem_room": "d-sonnet-1-team-a", "poem_sha256": "hash", "x_post_ids": ["1"]})},
+            {"type": "sonnet.submit.v1", "contest_id": "sonnet-2", "game_id": "a",
+             "poem_room": "d-sonnet-2-team-a", "poem_sha256": "hash", "x_post_ids": ["1"]})},
         {"from": "did:b", "seq": 2, "ts": "t", "text": "not json"},
         {"from": "did:c", "seq": 3, "ts": "t", "text": json.dumps(
-            {"type": "sonnet.word.v1", "contest_id": "sonnet-1"})},          # sai type
+            {"type": "sonnet.word.v1", "contest_id": "sonnet-2"})},          # sai type
         {"from": "did:d", "seq": 4, "ts": "t", "text": json.dumps(
-            {"type": "sonnet.submit.v1", "contest_id": "sonnet-2"})},        # sai contest
+            {"type": "sonnet.submit.v1", "contest_id": "sonnet-1"})},        # sai contest (đã bỏ)
     ]
     got = sv.parse_submissions(msgs)
     assert len(got) == 1 and got[0]["game_id"] == "a" and got[0]["poem_sha256"] == "hash"
@@ -143,7 +164,7 @@ def test_cast_ballot_votes_when_chosen(monkeypatch):
     out = sv.cast_ballot(private_key="k", did="did:key:z6MkX", entry_id="e9",
                          post_fn=fake_post)
     assert out["outcome"] == "voted" and out["entry_id"] == "e9"
-    assert sent["room"] == sv.VOTES_ROOM
+    assert sent["room"] == sv.votes_room()
     assert _obj(sent["text"])["entry_id"] == "e9"
 
 
