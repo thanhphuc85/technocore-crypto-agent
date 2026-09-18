@@ -27,6 +27,11 @@ Ba thứ dưới đây phải **hoàn toàn của riêng bạn**, không copy t�
 | Ví nhận FLOP | (ví của bạn) | Airdrop chấm theo ví; chung ví = gom về một mối |
 | API key LLM | `*_API_KEY` | Nên tách để chi phí & hành vi độc lập |
 
+> **Lưới an toàn (từ bản này trở đi):** kể cả khi bạn QUÊN điền `AGENT_NAME`/`KV_NS`, code
+> sẽ **tự dẫn xuất danh tính riêng từ khoá của bạn** (`agent-<slug>`) thay vì mượn danh tính
+> agent tham chiếu — nên fork không còn vô tình tự liên kết như sybil. Đây chỉ là lưới đỡ:
+> vẫn nên đặt `AGENT_NAME`/`KV_NS` riêng để có tên đẹp, dễ nhận và ổn định.
+
 ---
 
 ## Các bước
