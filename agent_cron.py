@@ -10,6 +10,43 @@ from urllib.parse import quote
 import requests
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+# --- did:key Ed25519 (đặt SỚM để khối branding bên dưới dẫn xuất được DID từ khóa) ---
+MULTICODEC_ED25519 = b"\xed\x01"
+B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+
+def multibase_b58(raw: bytes) -> str:
+    n = int.from_bytes(raw, "big")
+    out = ""
+    while n:
+        n, rem = divmod(n, 58)
+        out = B58[rem] + out
+    pad = 0
+    for b in raw:
+        if b == 0:
+            pad += 1
+        else:
+            break
+    return "1" * pad + out
+
+
+def did_of(private_key: Ed25519PrivateKey) -> str:
+    pubkey = private_key.public_key().public_bytes_raw()
+    mb = "z" + multibase_b58(MULTICODEC_ED25519 + pubkey)
+    return "did:key:" + mb
+
+
+def did_from_seed_hex(seed_hex: str) -> str:
+    """DID dẫn xuất từ seed hex; trả '' nếu seed trống/không hợp lệ (KHÔNG raise)
+    -> dùng an toàn ở top-level để nhận diện chủ sở hữu."""
+    try:
+        seed = bytes.fromhex((seed_hex or "").strip())
+    except ValueError:
+        return ""
+    if len(seed) != 32:
+        return ""
+    return did_of(Ed25519PrivateKey.from_private_bytes(seed))
+
 # --- Reachability: đếm số call TỚI technocore.chat trả về thành công trong 1 run.
 # = 0 ở cuối run nghĩa là server không truy cập được (outage toàn phần) -> run nên
 # ĐỎ để lộ ra, thay vì xanh âm thầm. Chỉ đếm host chính, KHÔNG đếm CoinGecko/Binance.
@@ -62,11 +99,39 @@ def _write_summary(lines) -> None:
 ROOM = os.environ.get("AGENT_ROOM", "").strip() or "lobby"
 BASE_URL = "https://technocore.chat"
 
+# --- Nhận diện CHỦ SỞ HỮU (agent tham chiếu) -------------------------------------------
+# Danh tính tham chiếu CHỈ được dùng làm mặc định khi instance ĐÚNG LÀ của chủ. Tín hiệu:
+#   (1) khóa đang chạy dẫn xuất ra đúng OWNER_DID (bằng chứng mạnh nhất), HOẶC
+#   (2) đang chạy trong repo GỐC trên GitHub Actions (GITHUB_REPOSITORY == OWNER_REPO)
+#       -> để CI/test của bản gốc giữ nguyên "NguyenVuLV"/"nguyenvulv" dù không nạp khóa.
+# Fork (khóa khác + repo khác) sẽ KHÔNG BAO GIỜ tự nhặt danh tính chủ: nếu để trống tên,
+# code dẫn xuất tên/namespace DUY NHẤT từ khóa của CHÍNH fork -> tránh va chạm KV_NS = sybil.
+OWNER_DID = "did:key:z6MkiCxCfTP6gHmWrJvPgF4UtxYL4upzry6hTAs6g1ni2C8g"
+OWNER_REPO = "thanhphuc85/technocore-crypto-agent"
+MY_DID = did_from_seed_hex(os.environ.get("AGENT_PRIVATE_KEY", ""))
+IS_OWNER = (MY_DID == OWNER_DID) or (
+    os.environ.get("GITHUB_REPOSITORY", "").strip() == OWNER_REPO
+)
+
+
+def _fork_slug() -> str:
+    """Slug DUY NHẤT theo khóa của fork (dùng khi fork để trống AGENT_NAME) — KHÔNG
+    mượn danh tính chủ. Không có khóa hợp lệ -> 'unconfigured' (nhắc fork cấu hình)."""
+    mb = MY_DID.split("did:key:")[-1].lower()
+    return mb[-12:] if mb else "unconfigured"
+
+
 # --- Agent branding (ĐỌC TỪ ENV để fork/template tự đổi tên; default = reference agent) ---
-# Đặt AGENT_NAME / HANDLE / KV_NS qua env hoặc GitHub Actions Variables. Bỏ trống -> giữ
-# nguyên danh tính agent tham chiếu, nên bản gốc chạy y hệt như cũ.
-AGENT_NAME = os.environ.get("AGENT_NAME", "").strip() or "NguyenVuLV"
-# HANDLE mặc định = "@" + tên viết thường, bỏ khoảng trắng (khớp "@nguyenvulv" cũ).
+# Đặt AGENT_NAME / HANDLE / KV_NS qua env hoặc GitHub Actions Variables. Bỏ trống + LÀ CHỦ
+# -> giữ nguyên danh tính tham chiếu; bỏ trống + LÀ FORK -> dẫn xuất danh tính riêng.
+_name_env = os.environ.get("AGENT_NAME", "").strip()
+if _name_env:
+    AGENT_NAME = _name_env
+elif IS_OWNER:
+    AGENT_NAME = "NguyenVuLV"
+else:
+    AGENT_NAME = f"agent-{_fork_slug()}"   # fork để trống tên -> danh tính riêng, không đụng chủ
+# HANDLE mặc định = "@" + tên viết thường, bỏ khoảng trắng (khớp "@nguyenvulv" cũ khi là chủ).
 HANDLE = os.environ.get("HANDLE", "").strip() or f"@{AGENT_NAME.lower().replace(' ', '')}"
 
 # KV namespace phải khớp ^[a-z0-9][a-z0-9_-]{0,47}$ (server 400 nếu sai) -> validate,
@@ -87,7 +152,7 @@ elif _kv_ns_env:
     KV_NS = _sanitize_ns(_kv_ns_env)
     print(f"[config] KV_NS={_kv_ns_env!r} không hợp lệ, dùng {KV_NS!r}")
 else:
-    KV_NS = _sanitize_ns(AGENT_NAME)  # default: suy ra từ AGENT_NAME -> "nguyenvulv"
+    KV_NS = _sanitize_ns(AGENT_NAME)  # suy ra từ AGENT_NAME: chủ -> "nguyenvulv", fork -> "agent-<slug>"
 # Thử lane KÝ khi ghi KV (mặc định TẮT). Theo API technocore.chat, namespace thường
 # là world-writable (KHÔNG có tùy chọn ký); ký KV chỉ dành cho namespace quản trị phòng
 # room-owners/room-allow (canonical "<ns>|d-<room>|<nonce>|<value>"), agent này không dùng.
@@ -113,9 +178,14 @@ def _env_float(name: str, default: float) -> float:
         return float(default)
 
 
-REPO_URL = os.environ.get(
-    "REPO_URL", "https://github.com/thanhphuc85/technocore-crypto-agent"
-).strip()
+# REPO_URL: ưu tiên env; nếu trống thì suy ra từ repo đang chạy (GITHUB_REPOSITORY) để FORK
+# tự giới thiệu đúng nguồn của mình; chỉ khi cả hai đều trống mới về repo tham chiếu.
+_gh_repo = os.environ.get("GITHUB_REPOSITORY", "").strip()
+REPO_URL = (
+    os.environ.get("REPO_URL", "").strip()
+    or (f"https://github.com/{_gh_repo}" if _gh_repo else "")
+    or f"https://github.com/{OWNER_REPO}"
+)
 # Room để đăng "contribution manifest" (đây là tool gì, giúp ai, link, DID).
 # Mặc định = ROOM (theo AGENT_ROOM). MẸO CHIẾN LƯỢC: khi agent chạy trong ROOM RIÊNG
 # (AGENT_ROOM đã đặt), giữ MANIFEST_ROOM=lobby để VẪN quảng bá SDK import-được ra room
@@ -396,31 +466,6 @@ def load_private_key() -> Ed25519PrivateKey:
     if len(seed) != 32:                  # 32-byte seed = đúng 64 ký tự hex (0-9a-f)
         raise ValueError("AGENT_PRIVATE_KEY phải là 64 ký tự hex (32-byte Ed25519 seed)")
     return Ed25519PrivateKey.from_private_bytes(seed)
-
-
-MULTICODEC_ED25519 = b"\xed\x01"
-B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
-
-
-def multibase_b58(raw: bytes) -> str:
-    n = int.from_bytes(raw, "big")
-    out = ""
-    while n:
-        n, rem = divmod(n, 58)
-        out = B58[rem] + out
-    pad = 0
-    for b in raw:
-        if b == 0:
-            pad += 1
-        else:
-            break
-    return "1" * pad + out
-
-
-def did_of(private_key: Ed25519PrivateKey) -> str:
-    pubkey = private_key.public_key().public_bytes_raw()
-    mb = "z" + multibase_b58(MULTICODEC_ED25519 + pubkey)
-    return "did:key:" + mb
 
 
 def sign_message(private_key: Ed25519PrivateKey, message: str) -> str:

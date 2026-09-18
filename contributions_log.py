@@ -26,12 +26,42 @@ from datetime import datetime, timezone
 import requests
 
 BASE_URL = "https://technocore.chat"
-# Branding đọc từ env (khớp agent_cron) -> fork tự sinh proof-of-work theo danh tính riêng.
-# Bỏ trống -> giữ nguyên danh tính agent tham chiếu.
-AGENT = os.environ.get("AGENT_NAME", "").strip() or "NguyenVuLV"
+
+# --- Branding đọc từ env (khớp agent_cron) -> fork tự sinh proof-of-work theo danh tính RIÊNG.
+# QUAN TRỌNG (chống sybil / chống mạo danh): workflow này KHÔNG nạp danh tính, nên trước đây
+# fork chạy nó sẽ đóng dấu tên/DID/KV_NS của CHỦ vào file commit của chính fork = mạo danh +
+# tự liên kết. Nay danh tính tham chiếu CHỈ dùng khi instance ĐÚNG LÀ của chủ:
+#   (1) khóa dẫn xuất ra OWNER_DID, HOẶC (2) đang chạy trong repo GỐC (GITHUB_REPOSITORY).
+# Fork -> dẫn xuất danh tính riêng từ khóa của mình, KHÔNG BAO GIỜ nhặt danh tính chủ.
+OWNER_DID = "did:key:z6MkiCxCfTP6gHmWrJvPgF4UtxYL4upzry6hTAs6g1ni2C8g"
+OWNER_REPO = "thanhphuc85/technocore-crypto-agent"
+try:
+    from agent_cron import did_from_seed_hex as _did_from_seed
+except Exception:                                   # import mềm: thiếu dep -> không crash
+    def _did_from_seed(_seed):
+        return ""
+
+_gh_repo = os.environ.get("GITHUB_REPOSITORY", "").strip()
+_my_did = _did_from_seed(os.environ.get("AGENT_PRIVATE_KEY", ""))
+IS_OWNER = (_my_did == OWNER_DID) or (_gh_repo == OWNER_REPO)
+
+# DID: env > khóa dẫn xuất > (CHỈ khi là chủ) DID tham chiếu > '' (fork chưa cấu hình danh tính).
+DID = os.environ.get("AGENT_DID", "").strip() or _my_did or (OWNER_DID if IS_OWNER else "")
+
+_name_env = os.environ.get("AGENT_NAME", "").strip()
+if _name_env:
+    AGENT = _name_env
+elif IS_OWNER:
+    AGENT = "NguyenVuLV"
+else:                                               # fork để trống -> tên duy nhất theo khóa
+    AGENT = "agent-" + ((DID.split("did:key:")[-1].lower()[-12:]) or "unconfigured")
+
 KV_NS = os.environ.get("KV_NS", "").strip() or re.sub(r"[^a-z0-9_-]", "-", AGENT.lower()).lstrip("-_") or "agent"
-DID = os.environ.get("AGENT_DID", "").strip() or "did:key:z6MkiCxCfTP6gHmWrJvPgF4UtxYL4upzry6hTAs6g1ni2C8g"
-REPO = os.environ.get("REPO_URL", "").strip() or "https://github.com/thanhphuc85/technocore-crypto-agent"
+REPO = (
+    os.environ.get("REPO_URL", "").strip()
+    or (f"https://github.com/{_gh_repo}" if _gh_repo else "")
+    or f"https://github.com/{OWNER_REPO}"
+)
 UA = {"User-Agent": f"{AGENT}-Agent/2.0"}
 OUT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "contributions-log.md")
 ECOSYSTEM_RECORDS = 11                    # bảng hạ tầng & hệ sinh thái chung

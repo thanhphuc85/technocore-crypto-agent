@@ -234,7 +234,9 @@ def cast_ballot(private_key=None, did: str = None, entry_id: str = None, *,
 
 
 if __name__ == "__main__":
-    DID = "did:key:z6MkiCxCfTP6gHmWrJvPgF4UtxYL4upzry6hTAs6g1ni2C8g"
+    # DID MẪU (giả) chỉ để in demo — KHÔNG dùng DID thật của chủ để tránh rò rỉ/mạo danh.
+    # Khi chạy thật, `cast_ballot(private_key, did, ...)` nhận DID do agent_cron dẫn xuất từ khóa.
+    DID = "did:key:z6MkSAMPLEvoterDIDforOfflineDemoOnly000000000000"
     print("sonnet_voter.py — demo offline (không gửi gì)\n")
     print("register :", build_register("register-voter-demo"))
     print("ballot   :", build_ballot(DID, "entry-XYZ", "ballot-demo"))

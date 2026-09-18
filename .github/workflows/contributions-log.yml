@@ -36,6 +36,13 @@ jobs:
       - name: Regenerate &amp; commit (race-proof)
         env:
           GH_TOKEN: ${{ github.token }}     # cho `gh pr list` đếm PR đã merge
+          # Danh tính đọc từ Repo Variables (khớp agent_cron) -> FORK tự đóng dấu danh tính
+          # RIÊNG vào log của mình. Bỏ trống + là repo gốc -> giữ danh tính tham chiếu; bỏ
+          # trống + là fork -> code dẫn xuất danh tính riêng (không mượn danh tính chủ).
+          AGENT_NAME: ${{ vars.AGENT_NAME }}
+          AGENT_DID: ${{ vars.AGENT_DID }}
+          KV_NS: ${{ vars.KV_NS }}
+          REPO_URL: ${{ vars.REPO_URL }}
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
