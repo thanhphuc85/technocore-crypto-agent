@@ -43,8 +43,9 @@ Env (đọc & diễn giải ở agent_cron, không ở đây):
   FLOP_KIBBLE_REQUEST_INTERVAL_HOURS  giãn cách tối thiểu giữa 2 lần đăng (mặc định 12).
   FLOP_KIBBLE_REQUEST_MAX_PER_RUN     số JOB đăng mỗi lần tới hạn (mặc định 1).
   FLOP_KIBBLE_REQUEST_TYPE            type mặc định cho JOB đăng (mặc định 'explain').
-  FLOP_KIBBLE_REQUEST_QUESTIONS      pool câu hỏi THẬT 'title::body' phân tách '|'
-                        (rỗng -> dùng pool default nhỏ; NÊN đặt câu hỏi thật của bạn).
+  FLOP_KIBBLE_REQUEST_QUESTIONS      pool câu hỏi THẬT 'title::body' phân tách '|'.
+                        KHÔNG có default trong code (chống fork đăng trùng văn bản = sybil):
+                        rỗng -> requester KHÔNG đăng gì. Mỗi operator PHẢI tự đặt câu hỏi của mình.
 """
 
 import re

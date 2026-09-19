@@ -222,3 +222,14 @@ def test_requester_live_post_fail_not_recorded():
                                 dry_run=False, log=lambda *_: None, gen=lambda: "kcccccccccc")
     assert rs["posted"] == []
     assert st.get("kibble_requested", []) == []              # post fail -> KHÔNG ghi
+
+
+def test_requester_empty_pool_posts_nothing():
+    # Pool rỗng (fork chưa đặt câu hỏi riêng) -> KHÔNG đăng gì (chống trùng văn bản = sybil).
+    posts = []
+    st = {}
+    rs = k.run_kibble_requester(post_fn=lambda t: posts.append(t) or True,
+                                state=st, questions=[], dry_run=False,
+                                log=lambda *_: None, gen=lambda: "kdddddddddd")
+    assert posts == [] and rs["posted"] == [] and rs["would_post"] == []
+    assert "kibble_requested" not in st

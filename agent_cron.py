@@ -387,22 +387,14 @@ KIBBLE_REQ_DRY_RUN = os.environ.get("FLOP_KIBBLE_REQUESTER_DRY_RUN", "").strip()
 KIBBLE_REQ_INTERVAL_H = _env_float("FLOP_KIBBLE_REQUEST_INTERVAL_HOURS", 12)
 KIBBLE_REQ_TYPE = os.environ.get("FLOP_KIBBLE_REQUEST_TYPE", "").strip().lower() or "explain"
 KIBBLE_REQ_MAX = int(_env_float("FLOP_KIBBLE_REQUEST_MAX_PER_RUN", 1))
-# Pool default NHỎ, evergreen — câu hỏi THẬT mời câu trả lời có chất, KHÔNG lặp lại nội dung
-# telemetry. NÊN thay bằng câu hỏi thật của bạn qua FLOP_KIBBLE_REQUEST_QUESTIONS ('title::body'
-# phân tách '|'). Giữ ngắn gọn, tự-chứa (type 'explain').
-_KIBBLE_REQ_DEFAULT = [
-    {"title": "Single price oracle — failure modes?",
-     "body": "What are the main failure modes of relying on ONE price feed (e.g. CoinGecko) "
-             "for market telemetry, and which mitigations (median-of-sources, staleness checks, "
-             "sanity bounds) actually matter in practice? Give concrete criteria."},
-    {"title": "Detecting boilerplate vs genuine work on a job board",
-     "body": "What observable signals best separate a GENUINE useful-work deliverable from "
-             "boilerplate filler on an open agent job board? List checkable heuristics, not vibes."},
-    {"title": "Primary/backup runner without double-acting",
-     "body": "What heartbeat + failover pattern lets a primary and a backup agent runner share one "
-             "identity so the backup only acts when the primary is truly down (no double-post)? "
-             "Describe the exact liveness check and its timing."},
-]
+# CHỐNG SYBIL (cùng triết lý bỏ default-chung như PR #72): KHÔNG ship pool câu hỏi mặc định
+# trong code. Nếu có pool default, mọi FORK bật requester mà chưa đặt Variable riêng sẽ đăng
+# ĐÚNG CÙNG các câu -> văn bản trùng nhau qua nhiều DID = "copied boilerplate / shared_texts"
+# mà census radar gắn cờ. Để RỖNG -> mỗi operator (kể cả fork) PHẢI tự cấp câu hỏi THẬT của
+# mình qua FLOP_KIBBLE_REQUEST_QUESTIONS ('title::body' phân tách '|'); chưa đặt -> requester
+# KHÔNG đăng gì (no-op, xem call-site). Ví dụ mẫu (KHÔNG dùng làm default, chỉ để tham khảo):
+#   "Single price oracle - failure modes?::What are the failure modes of relying on ONE price feed..."
+_KIBBLE_REQ_DEFAULT = []          # cố ý rỗng — không có pool dùng-chung để fork không đụng nhau
 
 
 def _parse_req_questions(raw):
@@ -2529,7 +2521,13 @@ def main():
     #       -> tích reply-distance. Mặc định TẮT + DRY-RUN. Cùng health-guard (đăng job là 1 POST).
     #       Chỉ đóng cổng thời gian khi đăng/would-post thành công. Bọc kín: lỗi KHÔNG làm sập run.
     kibble_req_status = "off"
-    if KIBBLE_REQ_ENABLED and not KIBBLE_REQ_DRY_RUN and posts_degraded():
+    if KIBBLE_REQ_ENABLED and not KIBBLE_REQ_QUESTIONS:
+        # Bật nhưng CHƯA cấu hình câu hỏi riêng -> KHÔNG đăng (chống fork đăng trùng văn bản =
+        # sybil). Mỗi operator phải đặt FLOP_KIBBLE_REQUEST_QUESTIONS của CHÍNH MÌNH.
+        kibble_req_status = "no-questions"
+        print("[kibble-req] enabled nhưng FLOP_KIBBLE_REQUEST_QUESTIONS rỗng — đặt câu hỏi THẬT "
+              "của riêng bạn ('title::body|...'); KHÔNG đăng gì để tránh trùng nội dung với fork khác.")
+    elif KIBBLE_REQ_ENABLED and not KIBBLE_REQ_DRY_RUN and posts_degraded():
         kibble_req_status = "skip-outage"
     elif KIBBLE_REQ_ENABLED and _due(state, "last_kibble_request", KIBBLE_REQ_INTERVAL_H, now):
         try:
