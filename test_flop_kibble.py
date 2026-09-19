@@ -155,3 +155,70 @@ def test_run_does_not_redo_done_job():
         state=state, allow_types=["explain"], dry_run=False, log=lambda *_: None,
     )
     assert posts == []                                  # đã done -> không làm lại
+
+
+# --- REQUESTER (vai đăng JOB) -----------------------------------------------------
+
+def test_format_job_roundtrips():
+    txt = k.format_job("kaaaaaaaaaa", "Explain", "  Tides  ", "Explain\nocean   tides")
+    assert txt == "JOB v1 | kaaaaaaaaaa | explain | Tides | Explain ocean tides"
+    # đăng ra phải parse LẠI được đúng như một JOB hợp lệ
+    p = k.parse_kibble_msg(txt)
+    assert p == {"verb": "JOB", "jobid": "kaaaaaaaaaa", "type": "explain",
+                 "title": "Tides", "body": "Explain ocean tides"}
+
+
+def test_gen_jobid_is_valid():
+    jid = k.gen_jobid(rand=lambda n: bytes(range(n)))   # tất định
+    assert k._looks_like_jobid(jid)                     # 'k'+10hex
+    assert jid == "k0001020304"
+
+
+def test_pick_request_rotates():
+    qs = [{"title": "A", "body": "a"}, {"title": "B", "body": "b"}]
+    st = {}
+    q, nidx = k.pick_request(qs, st); assert q["title"] == "A" and nidx == 1
+    st["kibble_req_idx"] = nidx
+    q, nidx = k.pick_request(qs, st); assert q["title"] == "B" and nidx == 0
+    # str và tuple cũng chuẩn hoá được
+    q, _ = k.pick_request(["just a string"], {}); assert q == {"title": "just a string", "body": "just a string"}
+    q, _ = k.pick_request([("T", "B", "summarize")], {}); assert q["type"] == "summarize"
+    assert k.pick_request([], {}) == (None, 0)          # pool rỗng -> None
+
+
+def test_requester_dry_run_posts_nothing_but_rotates():
+    posts = []
+    st = {}
+    qs = [{"title": "Q1", "body": "b1"}, {"title": "Q2", "body": "b2"}]
+    rs = k.run_kibble_requester(post_fn=lambda t: posts.append(t) or True,
+                                state=st, questions=qs, max_per_run=1,
+                                dry_run=True, log=lambda *_: None,
+                                gen=lambda: "kaaaaaaaaaa")
+    assert posts == []                                  # DRY: không đăng thật
+    assert rs["would_post"] == ["kaaaaaaaaaa"] and rs["posted"] == []
+    assert st["kibble_req_idx"] == 1                    # con trỏ vẫn xoay
+    assert "kibble_requested" not in st                 # dry KHÔNG ghi requested
+
+
+def test_requester_live_posts_and_records():
+    posts = []
+    st = {}
+    qs = [{"title": "Q1", "body": "b1"}]
+    rs = k.run_kibble_requester(post_fn=lambda t: posts.append(t) or True,
+                                state=st, questions=qs, jtype_default="explain",
+                                max_per_run=1, dry_run=False, log=lambda *_: None,
+                                gen=lambda: "kbbbbbbbbbb")
+    assert len(posts) == 1
+    p = k.parse_kibble_msg(posts[0])
+    assert p and p["verb"] == "JOB" and p["jobid"] == "kbbbbbbbbbb" and p["title"] == "Q1"
+    assert rs["posted"] == ["kbbbbbbbbbb"]
+    assert st["kibble_requested"] == ["kbbbbbbbbbb"]    # live ghi vào sổ requested
+
+
+def test_requester_live_post_fail_not_recorded():
+    st = {}
+    rs = k.run_kibble_requester(post_fn=lambda t: False,     # server từ chối
+                                state=st, questions=[{"title": "Q", "body": "b"}],
+                                dry_run=False, log=lambda *_: None, gen=lambda: "kcccccccccc")
+    assert rs["posted"] == []
+    assert st.get("kibble_requested", []) == []              # post fail -> KHÔNG ghi

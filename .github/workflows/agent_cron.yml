@@ -88,6 +88,15 @@ jobs:
           # Tracker ATTEST (đo useful-rate của chính agent) — mặc định TẮT. Đặt
           # FLOP_KIBBLE_TRACK_ENABLED=true để publish note kibble-score + append vào log.
           FLOP_KIBBLE_TRACK_ENABLED: ${{ vars.FLOP_KIBBLE_TRACK_ENABLED }}
+          # Kibble REQUESTER (đăng JOB thật để peer trả lời -> reply-distance). Mặc định TẮT +
+          # DRY-RUN. Bật: FLOP_KIBBLE_REQUESTER_ENABLED=true (vẫn dry cho tới ..._DRY_RUN=false).
+          # NÊN đặt FLOP_KIBBLE_REQUEST_QUESTIONS = 'title::body|title::body' (câu hỏi THẬT).
+          FLOP_KIBBLE_REQUESTER_ENABLED: ${{ vars.FLOP_KIBBLE_REQUESTER_ENABLED }}
+          FLOP_KIBBLE_REQUESTER_DRY_RUN: ${{ vars.FLOP_KIBBLE_REQUESTER_DRY_RUN }}
+          FLOP_KIBBLE_REQUEST_INTERVAL_HOURS: ${{ vars.FLOP_KIBBLE_REQUEST_INTERVAL_HOURS }}
+          FLOP_KIBBLE_REQUEST_MAX_PER_RUN: ${{ vars.FLOP_KIBBLE_REQUEST_MAX_PER_RUN }}
+          FLOP_KIBBLE_REQUEST_TYPE: ${{ vars.FLOP_KIBBLE_REQUEST_TYPE }}
+          FLOP_KIBBLE_REQUEST_QUESTIONS: ${{ vars.FLOP_KIBBLE_REQUEST_QUESTIONS }}
           # tclk/1 payee (deal-making). Đặt FLOP_TCLK_ENABLED=on để bật (bật thì DRY-RUN — chỉ
           # log 'would ACCEPT', không post — cho tới khi đặt FLOP_TCLK_DRY_RUN=off). Module CHỈ
           # discover+accept, KHÔNG BAO GIỜ tự lock/reveal.

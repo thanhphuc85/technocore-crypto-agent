@@ -8,8 +8,10 @@ Board chạy một protocol dòng-đơn, phân tách bằng " | ":
     ATTEST  v1 | <jobid> | useful  | rh:<hash> | <ghi chú thẩm định>   (vai attestor)
     WITNESS v1 | <jobid> | <hash>                                       (vai witness)
 
-Module này CHỈ đóng vai **worker**: đọc JOB -> (tùy chọn) CLAIM -> DELIVER. Vai
-ATTEST/WITNESS cần result-hash theo spec riêng, KHÔNG làm ở đây.
+Module này đóng 2 vai: **worker** (đọc JOB -> tùy chọn CLAIM -> DELIVER) và **requester**
+(ĐĂNG JOB thật để peer trả lời -> tích reply-distance; xem run_kibble_requester, mặc định
+TẮT + DRY-RUN, gated ở agent_cron). Vai ATTEST/WITNESS cần result-hash theo spec riêng,
+KHÔNG làm ở đây.
 
 Vì sao đáng làm (theo STRATEGY.md): airdrop trả pro-rata theo inference spend +
 "various prizes" (chất lượng/useful-work). Board hiện đầy deliverable RÁC ("Completed
@@ -35,6 +37,14 @@ Env (đọc & diễn giải ở agent_cron, không ở đây):
                         thêm research/analyze nếu muốn nhận job cần trích nguồn).
   FLOP_KIBBLE_MAX_PER_RUN  trần số job xử lý mỗi lần chạy (mặc định 2).
   FLOP_KIBBLE_CLAIM     có gửi CLAIM trước DELIVER không (mặc định on).
+  --- REQUESTER (vai đăng JOB, mặc định TẮT) ---
+  FLOP_KIBBLE_REQUESTER_ENABLED  bật requester (mặc định TẮT).
+  FLOP_KIBBLE_REQUESTER_DRY_RUN  mặc định BẬT: chỉ log 'would post'. Đặt off để đăng thật.
+  FLOP_KIBBLE_REQUEST_INTERVAL_HOURS  giãn cách tối thiểu giữa 2 lần đăng (mặc định 12).
+  FLOP_KIBBLE_REQUEST_MAX_PER_RUN     số JOB đăng mỗi lần tới hạn (mặc định 1).
+  FLOP_KIBBLE_REQUEST_TYPE            type mặc định cho JOB đăng (mặc định 'explain').
+  FLOP_KIBBLE_REQUEST_QUESTIONS      pool câu hỏi THẬT 'title::body' phân tách '|'
+                        (rỗng -> dùng pool default nhỏ; NÊN đặt câu hỏi thật của bạn).
 """
 
 import re
@@ -240,3 +250,83 @@ def run_kibble_worker(fetch_fn, answer_fn, post_fn, state, *,
             "delivered_items": delivered_items,   # {jobid,answer} của DELIVER thật (tracker)
             "messages": messages,                 # buffer đã fetch (reconcile ATTEST, khỏi fetch lại)
             "skipped": skipped, "dry_run": dry_run, "cursor": state.get("kibble_cursor")}
+
+
+# ── REQUESTER (vai ĐĂNG JOB) ────────────────────────────────────────────────────────
+# Vì sao: điểm reply-distance của census (được key khác TRẢ LỜI) CHỈ tích khi agent KHỞI
+# XƯỚNG thứ người khác trả lời. Worker (claim/deliver) tích credit cho NGƯỜI ĐĂNG job và
+# chỉ tích reciprocity cho mình -> agent thuần-worker vô hình trên trục "được-trả-lời".
+# Requester đăng JOB THẬT (câu hỏi agent thực sự muốn có câu trả lời) -> peer trả lời ->
+# credit về mình. GIỚI HẠN CHẶT (đọc & gate ở agent_cron): mặc định TẮT + DRY-RUN, số
+# lượng thấp, xoay vòng câu hỏi để KHÔNG lặp. Đăng job RÁC/lặp để farm "được-trả-lời"
+# chính là pattern anti-sybil lọc (self-serving cluster) -> pool phải là câu hỏi THẬT.
+
+
+def format_job(jobid, jtype, title, body):
+    """JOB v1 | jobid | type | title | body (1 dòng, gộp whitespace). THUẦN."""
+    jt = " ".join(str(jtype or "explain").split()).lower()
+    ti = " ".join(str(title or "").split())
+    bo = " ".join(str(body or "").split())
+    return f"JOB v1 | {jobid} | {jt} | {ti} | {bo}"
+
+
+def gen_jobid(rand=None):
+    """Sinh jobid HỢP LỆ 'k'+10hex (khớp _JOBID_RE). `rand(n)->bytes` tiêm được để test
+    tất định (mặc định os.urandom)."""
+    if rand is None:
+        import os as _os
+        rand = _os.urandom
+    return "k" + rand(5).hex()          # 5 byte = 10 ký tự hex
+
+
+def pick_request(questions, state, *, key="kibble_req_idx"):
+    """Chọn 1 câu hỏi theo VÒNG XOAY (rotate) để không lặp liên tiếp. `questions` là list các
+    dict {title, body, type?} / str / (title, body[, type]). Trả (question_dict|None, new_idx).
+    THUẦN — không sửa state (caller tự ghi new_idx)."""
+    qs = [q for q in (questions or []) if q]
+    if not qs:
+        return None, int(state.get(key, 0) or 0)
+    idx = int(state.get(key, 0) or 0) % len(qs)
+    q = qs[idx]
+    if isinstance(q, str):
+        q = {"title": q, "body": q}
+    elif isinstance(q, (list, tuple)):
+        q = {"title": q[0], "body": (q[1] if len(q) > 1 else q[0]),
+             "type": (q[2] if len(q) > 2 else None)}
+    return dict(q), (idx + 1) % len(qs)
+
+
+def run_kibble_requester(post_fn, state, *, questions, jtype_default="explain",
+                         max_per_run=1, dry_run=True, log=print, gen=None):
+    """Đăng tối đa `max_per_run` JOB THẬT (mặc định 1) từ pool `questions`, xoay vòng.
+    dry_run: chỉ log 'would post', KHÔNG đăng, KHÔNG ghi 'requested'. Cập nhật state tại chỗ
+    (kibble_req_idx luôn tiến để xoay; kibble_requested ghi jobid đã đăng THẬT, chặn phình).
+    Phụ thuộc TIÊM: post_fn(text)->bool, gen()->jobid. Trả summary dict."""
+    if state is None:
+        state = {}
+    gen = gen or gen_jobid
+    posted, would = [], []
+    for _ in range(max(0, int(max_per_run))):
+        q, new_idx = pick_request(questions, state)
+        if not q:
+            break
+        state["kibble_req_idx"] = new_idx          # xoay con trỏ (cả dry lẫn live)
+        jobid = gen()
+        jtype = q.get("type") or jtype_default
+        text = format_job(jobid, jtype, q.get("title", ""), q.get("body", ""))
+        if dry_run:
+            would.append(jobid)
+            log(f"[kibble-req:DRY] would post -> {text[:200]}")
+            continue
+        try:
+            ok = post_fn(text)
+        except Exception as e:
+            log(f"[kibble-req] post fail {jobid} | {str(e)[:80]}")
+            ok = False
+        if ok:
+            posted.append(jobid)
+            reqd = list(state.get("kibble_requested", []))
+            reqd.append(jobid)
+            state["kibble_requested"] = reqd[-DONE_CAP:]
+            log(f"[kibble-req] posted JOB {jobid} ({jtype})")
+    return {"posted": posted, "would_post": would, "dry_run": dry_run}

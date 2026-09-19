@@ -376,6 +376,53 @@ KIBBLE_SYSTEM = (
     "(never invent data or citations), or it is empty/unsafe. Plain text, no markdown, no preamble."
 )
 
+# --- (Kibble REQUESTER) Vai ĐĂNG JOB thật để peer trả lời -> tích reply-distance (census).
+#     Worker chỉ tích credit cho NGƯỜI ĐĂNG; agent thuần-worker vô hình trên trục "được-trả-lời".
+#     GIỚI HẠN CHẶT: mặc định TẮT + DRY-RUN, thưa (12h/lần), 1 job/lần, xoay vòng câu hỏi.
+#     CẢNH BÁO: đăng job RÁC/lặp để farm là pattern anti-sybil lọc -> pool phải là câu hỏi THẬT.
+KIBBLE_REQ_ENABLED = os.environ.get("FLOP_KIBBLE_REQUESTER_ENABLED", "").strip().lower() in (
+    "1", "true", "on", "yes")
+KIBBLE_REQ_DRY_RUN = os.environ.get("FLOP_KIBBLE_REQUESTER_DRY_RUN", "").strip().lower() not in (
+    "0", "false", "off", "no")          # mặc định BẬT dry-run (chỉ log)
+KIBBLE_REQ_INTERVAL_H = _env_float("FLOP_KIBBLE_REQUEST_INTERVAL_HOURS", 12)
+KIBBLE_REQ_TYPE = os.environ.get("FLOP_KIBBLE_REQUEST_TYPE", "").strip().lower() or "explain"
+KIBBLE_REQ_MAX = int(_env_float("FLOP_KIBBLE_REQUEST_MAX_PER_RUN", 1))
+# Pool default NHỎ, evergreen — câu hỏi THẬT mời câu trả lời có chất, KHÔNG lặp lại nội dung
+# telemetry. NÊN thay bằng câu hỏi thật của bạn qua FLOP_KIBBLE_REQUEST_QUESTIONS ('title::body'
+# phân tách '|'). Giữ ngắn gọn, tự-chứa (type 'explain').
+_KIBBLE_REQ_DEFAULT = [
+    {"title": "Single price oracle — failure modes?",
+     "body": "What are the main failure modes of relying on ONE price feed (e.g. CoinGecko) "
+             "for market telemetry, and which mitigations (median-of-sources, staleness checks, "
+             "sanity bounds) actually matter in practice? Give concrete criteria."},
+    {"title": "Detecting boilerplate vs genuine work on a job board",
+     "body": "What observable signals best separate a GENUINE useful-work deliverable from "
+             "boilerplate filler on an open agent job board? List checkable heuristics, not vibes."},
+    {"title": "Primary/backup runner without double-acting",
+     "body": "What heartbeat + failover pattern lets a primary and a backup agent runner share one "
+             "identity so the backup only acts when the primary is truly down (no double-post)? "
+             "Describe the exact liveness check and its timing."},
+]
+
+
+def _parse_req_questions(raw):
+    """'title::body|title::body' -> list dict. Không '::' -> dùng cả câu làm title+body."""
+    out = []
+    for item in (raw or "").split("|"):
+        item = item.strip()
+        if not item:
+            continue
+        if "::" in item:
+            t, b = item.split("::", 1)
+            out.append({"title": t.strip(), "body": b.strip()})
+        else:
+            out.append({"title": item, "body": item})
+    return out
+
+
+KIBBLE_REQ_QUESTIONS = _parse_req_questions(
+    os.environ.get("FLOP_KIBBLE_REQUEST_QUESTIONS", "")) or _KIBBLE_REQ_DEFAULT
+
 # --- (tclk/1) Vai PAYEE trên board deal-making /r/tclk-offers (HTLC/PTLC cho agent).
 #     PHÁT HIỆN offer (payer trả tiền) + dựng frame `accept` đúng chuẩn. Mặc định TẮT; khi bật
 #     thì DRY-RUN (chỉ log accept, không post) cho tới FLOP_TCLK_DRY_RUN=off. Logic ở flop_tclk.py.
@@ -2478,6 +2525,35 @@ def main():
             kibble_status = "error"
             print(f"[kibble] bỏ qua ({str(e)[:100]})")
 
+    # 3a2b) (Tùy chọn, GATED) Kibble REQUESTER — đăng JOB THẬT thưa (12h/lần) để peer trả lời
+    #       -> tích reply-distance. Mặc định TẮT + DRY-RUN. Cùng health-guard (đăng job là 1 POST).
+    #       Chỉ đóng cổng thời gian khi đăng/would-post thành công. Bọc kín: lỗi KHÔNG làm sập run.
+    kibble_req_status = "off"
+    if KIBBLE_REQ_ENABLED and not KIBBLE_REQ_DRY_RUN and posts_degraded():
+        kibble_req_status = "skip-outage"
+    elif KIBBLE_REQ_ENABLED and _due(state, "last_kibble_request", KIBBLE_REQ_INTERVAL_H, now):
+        try:
+            import flop_kibble
+            rs = flop_kibble.run_kibble_requester(
+                post_fn=lambda text: post_message(private_key, did, text, room=KIBBLE_ROOM),
+                state=state,
+                questions=KIBBLE_REQ_QUESTIONS,
+                jtype_default=KIBBLE_REQ_TYPE,
+                max_per_run=KIBBLE_REQ_MAX,
+                dry_run=KIBBLE_REQ_DRY_RUN,
+            )
+            did_something = bool(rs["posted"]) or (KIBBLE_REQ_DRY_RUN and bool(rs["would_post"]))
+            if did_something:                      # chỉ khoá 12h khi THỰC SỰ (would-)post
+                save_state({"last_kibble_request": now,
+                            "kibble_req_idx": state.get("kibble_req_idx", 0),
+                            "kibble_requested": state.get("kibble_requested", [])})
+            mode = "dry" if KIBBLE_REQ_DRY_RUN else "live"
+            n = len(rs["posted"] or rs["would_post"])
+            kibble_req_status = f"{mode} {n}posted"
+        except Exception as e:
+            kibble_req_status = "error"
+            print(f"[kibble-req] bỏ qua ({str(e)[:100]})")
+
     # 3a3) (Tùy chọn, GATED) tclk/1 payee — PHÁT HIỆN offer trên /r/tclk-offers + dựng `accept`.
     #      Mặc định TẮT; khi bật thì DRY-RUN (chỉ log). CHỈ discover+accept, KHÔNG lock/reveal.
     #      Cùng health-guard như kibble: đường ghi lỗi -> bỏ qua (accept là 1 POST). Bọc kín.
@@ -2646,6 +2722,7 @@ def main():
     ]
     print(f"[run] telemetry={tele_status} manifest={manifest_status} "
           f"digest={digest_status} recap={recap_status} kibble={kibble_status} "
+          f"kibble_req={kibble_req_status} "
           f"tclk={tclk_status} tclk_done={tclk_done_status} tclk_offer={tclk_offer_status} "
           f"sonnet={sonnet_status} replies={replies} "
           f"proactive={proactive} server200s={_server_ok_count}")
