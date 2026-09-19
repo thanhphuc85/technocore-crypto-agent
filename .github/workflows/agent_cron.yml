@@ -58,6 +58,9 @@ jobs:
           # runner thứ 2 làm chính (xem cơ chế heartbeat trong agent_cron.py): khi đó Actions
           # tự ĐỨNG IM lúc runner chính còn sống, chỉ gánh khi chính sập.
           RUNNER_ROLE: ${{ vars.RUNNER_ROLE || 'primary' }}
+          # Nhịp broadcast — giảm beacon một chiều vào lobby để tăng originality (bỏ trống -> mặc
+          # định code: telemetry 1h). Đặt Variable TELEMETRY_INTERVAL_HOURS (vd 6) để thưa hơn.
+          TELEMETRY_INTERVAL_HOURS: ${{ vars.TELEMETRY_INTERVAL_HOURS }}
           # Branding — đặt Repo Variables (Settings → Secrets and variables → Actions → Variables)
           # để fork tự đổi tên. Bỏ trống -> giữ danh tính agent tham chiếu (NguyenVuLV).
           AGENT_NAME: ${{ vars.AGENT_NAME }}
