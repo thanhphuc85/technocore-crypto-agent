@@ -16,14 +16,20 @@ concurrency:
   group: technocore-agent
   cancel-in-progress: false
 
+# Quyền TỐI THIỂU cho GITHUB_TOKEN: job này chỉ checkout code + đọc/ghi cache + gọi mạng ra
+# technocore.chat. KHÔNG push commit, KHÔNG cần quyền ghi. `contents: read` là đủ cho checkout;
+# mọi scope khác bị thu về none -> token rò (nếu có) cũng gần như vô hại.
+permissions:
+  contents: read
+
 jobs:
   run-agent:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5 (pinned to full SHA — chống tag bị repoint)
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6 (pinned)
         with:
           python-version: '3.12'
 
@@ -34,7 +40,7 @@ jobs:
 
       # Khôi phục state (cursor last_seq) từ lần chạy trước
       - name: Restore agent state
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830  # v4 (pinned)
         with:
           path: state.json
           # key gồm cả run_attempt -> RE-RUN (giữ nguyên run_id) không trùng key với lần
@@ -116,7 +122,7 @@ jobs:
       # Lưu lại state cho lần chạy kế tiếp (key duy nhất theo run_id -> luôn ghi mới)
       - name: Save agent state
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830  # v4 (pinned)
         with:
           path: state.json
           key: technocore-state-${{ github.run_id }}-${{ github.run_attempt }}
