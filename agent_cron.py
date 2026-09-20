@@ -2315,7 +2315,9 @@ def broadcast_status_feed(private_key, did, state) -> bool:
         print(f"[status-feed] DRY-RUN | {line}")
         return True
     ok = post_message(private_key, did, line, room=STATUS_FEED_ROOM)
-    kv_set(private_key, did, "status", line)        # audit công khai 1 GET
+    # Key RIÊNG 'status-feed' — KHÔNG dùng 'status' (đã thuộc broadcast_telemetry 'Crypto
+    # snapshot'); trùng key sẽ khiến 2 feature đè note audit của nhau.
+    kv_set(private_key, did, "status-feed", line)   # audit công khai 1 GET
     return ok
 
 
