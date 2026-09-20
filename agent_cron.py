@@ -275,6 +275,20 @@ DIGEST_SYSTEM = (
     "no quotes, no markdown."
 )
 
+# --- (#13) Status feed — 1 dòng TRẠNG THÁI THẬT/đo-được/định kỳ (oracle công khai ít-mà-
+#     chất, kiểu agent #13 census). KHÔNG LLM, KHÔNG bịa số: chỉ gộp số agent VỐN đã fetch
+#     (gas/dominance/Fear&Greed) + tín hiệu RIÊNG (useful-rate kibble, sức khoẻ đường ghi).
+#     Số ĐỔI mỗi lần -> KHÔNG phải boilerplate -> không bị radar anti-sybil cờ. Mục tiêu: phát
+#     tín hiệu peer MUỐN tham chiếu/trả lời -> tích trục 'được-trả-lời' của census (agent thuần-
+#     worker vô hình trên trục này). Mặc định TẮT + DRY-RUN. Logic thuần ở flop_status_feed.py.
+STATUS_FEED_ENABLED = os.environ.get("FLOP_STATUS_FEED_ENABLED", "").strip().lower() in (
+    "1", "true", "on", "yes")
+# Dry-run mặc định BẬT (an toàn): chỉ tắt khi đặt rõ off/false/0/no.
+STATUS_FEED_DRY_RUN = os.environ.get("FLOP_STATUS_FEED_DRY_RUN", "").strip().lower() not in (
+    "0", "false", "off", "no")
+STATUS_FEED_INTERVAL_H = _env_float("FLOP_STATUS_FEED_INTERVAL_HOURS", 1)   # thưa: 1h/lần
+STATUS_FEED_ROOM = os.environ.get("FLOP_STATUS_FEED_ROOM", "").strip() or ROOM
+
 # --- (A2) AI reading cho các lệnh sẵn có (!top/!trending/!fear/!dominance): kèm 1 câu
 #     bình luận AI bám số vừa fetch. Mỗi câu = 1 suy luận THẬT gắn với 1 hành động THẬT
 #     của user. Mặc định TẮT -> lệnh giữ nguyên output cũ. Xem _insight().
@@ -936,7 +950,7 @@ def primary_alive(now: int, within_min: float) -> bool:
 # state.json) -> dễ đăng lại telemetry. Mirror các khóa BỀN lên KV (nguồn dùng chung cho cả
 # runner chính lẫn phụ) rồi hydrate lúc khởi động -> cooldown được tôn trọng ở mọi nơi.
 _TS_DURABLE_KEYS = ("last_seq", "last_telemetry", "last_manifest", "last_digest",
-                    "last_recap", "last_weekly_sample")
+                    "last_status_feed", "last_recap", "last_weekly_sample")
 _BLOB_DURABLE_KEYS = ("weekly_samples", "last_alert_price")
 DURABLE_STATE_KEYS = _TS_DURABLE_KEYS + _BLOB_DURABLE_KEYS
 STATE_KV_KEY = "state"
@@ -2273,6 +2287,38 @@ def broadcast_digest(private_key, did) -> bool:
     return ok
 
 
+def broadcast_status_feed(private_key, did, state) -> bool:
+    """(#13, GATED) Đăng 1 dòng TRẠNG THÁI THẬT, đo được, định kỳ — oracle công khai ít-mà-
+    chất để peer tham chiếu/trả lời (trục 'được-trả-lời' của census). KHÔNG LLM, KHÔNG bịa số.
+    + lưu KV note `status` để ai cũng audit (GET /kv/<ns>/status). Trả False nếu KHÔNG gom
+    được số liệu nào -> caller KHÔNG đóng cổng thời gian, thử lại vòng sau."""
+    import flop_status_feed as sf
+    kib = None
+    try:
+        import flop_kibble_track as kt
+        kib = kt.summary(state)                     # useful-rate của CHÍNH mình (nếu có)
+    except Exception:
+        pass
+    metrics = sf.collect_metrics(
+        get_eth_gas=get_eth_gas,
+        get_dominance=get_dominance,
+        get_fear_greed=get_fear_greed,
+        kibble_summary=kib,
+        chat_write_ok=not posts_degraded(),
+    )
+    ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    line = sf.build_status_line(metrics, agent=AGENT_NAME, ts=ts)
+    if not line:
+        print("[status-feed] không có số liệu thật -> bỏ qua vòng này")
+        return False
+    if STATUS_FEED_DRY_RUN:
+        print(f"[status-feed] DRY-RUN | {line}")
+        return True
+    ok = post_message(private_key, did, line, room=STATUS_FEED_ROOM)
+    kv_set(private_key, did, "status", line)        # audit công khai 1 GET
+    return ok
+
+
 def broadcast_recap(private_key, did, state, now) -> bool:
     """(A3, GATED) Đăng bản tổng kết TUẦN do AI sinh (grounded từ mẫu đã tích), CÓ KÝ,
     + lưu KV note `recap` để audit (GET /kv/<ns>/recap). Retrospective công khai hữu ích:
@@ -2436,6 +2482,22 @@ def main():
                 print("[digest] post/sinh thất bại -> KHÔNG đóng cổng, thử lại vòng sau")
         else:
             digest_status = "skip"
+
+    # 1d2) (#13, Tùy chọn, GATED) Status feed — 1 dòng trạng thái THẬT/đo-được/định kỳ để
+    #      peer tham chiếu (tích trục 'được-trả-lời' census). Mặc định TẮT + DRY-RUN. Tôn
+    #      trọng gate thời gian (KHÔNG force theo dispatch để test không spam feed); cùng
+    #      nguyên tắc digest: chỉ đóng cổng khi post/dry-run THÀNH CÔNG.
+    status_feed_status = "off"
+    if STATUS_FEED_ENABLED:
+        if _due(state, "last_status_feed", STATUS_FEED_INTERVAL_H, now):
+            if broadcast_status_feed(private_key, did, state):
+                save_state({"last_status_feed": now})
+                status_feed_status = "dry" if STATUS_FEED_DRY_RUN else "ok"
+            else:
+                status_feed_status = "fail"
+                print("[status-feed] post/gom thất bại -> KHÔNG đóng cổng, thử lại vòng sau")
+        else:
+            status_feed_status = "skip"
 
     # 1e) (A3, Tùy chọn, GATED) Weekly recap — tích mẫu giá/sentiment đều trong tuần rồi
     #     mỗi RECAP_INTERVAL_H giờ đăng 1 bản tổng kết AI (grounded từ chính mẫu đó). 1
@@ -2711,6 +2773,7 @@ def main():
         f"- telemetry: **{tele_status}**",
         f"- manifest: **{manifest_status}**",
         f"- digest: **{digest_status}**",
+        f"- status-feed: **{status_feed_status}**",
         f"- recap: **{recap_status}**",
         f"- kibble: **{kibble_status}**",
         f"- tclk: **{tclk_status}** · complete: **{tclk_done_status}**",
@@ -2719,7 +2782,7 @@ def main():
         f"- technocore.chat 200s: **{_server_ok_count}**",
     ]
     print(f"[run] telemetry={tele_status} manifest={manifest_status} "
-          f"digest={digest_status} recap={recap_status} kibble={kibble_status} "
+          f"digest={digest_status} status_feed={status_feed_status} recap={recap_status} kibble={kibble_status} "
           f"kibble_req={kibble_req_status} "
           f"tclk={tclk_status} tclk_done={tclk_done_status} tclk_offer={tclk_offer_status} "
           f"sonnet={sonnet_status} replies={replies} "
