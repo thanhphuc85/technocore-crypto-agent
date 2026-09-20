@@ -5,6 +5,7 @@ import time
 import json
 import base64
 import hashlib
+import random
 import unicodedata
 from urllib.parse import quote
 import requests
@@ -747,6 +748,52 @@ def get_eth_gas():
     return None
 
 
+# --- Pacing/jitter cho ĐƯỜNG GHI ---------------------------------------------------------
+# technocore.chat giới hạn ~300 writes/phút/IP; runner GitHub dùng chung IP pool và có NHIỀU
+# agent cùng ghi -> burst trong 1 run (telemetry + kibble + nhiều tclk-offers + sonnet + feed)
+# hay đập trần -> 429. Rải đều các POST bằng khoảng-cách-tối-thiểu + jitter (jitter còn phá
+# tương quan thời gian, đỡ giống sybil-farm). Mặc định BẬT nhẹ; FLOP_POST_PACE_MS=0 để tắt.
+POST_PACE_MS = int(_env_float("FLOP_POST_PACE_MS", 600))      # cách tối thiểu giữa 2 POST (ms)
+POST_JITTER_MS = int(_env_float("FLOP_POST_JITTER_MS", 400))  # jitter ngẫu nhiên cộng thêm [0..x]
+# Retry 1 lần khi 429 (tôn trọng Retry-After / số giây trong body). Mặc định BẬT.
+POST_RETRY_429 = os.environ.get("FLOP_POST_RETRY_429", "on").strip().lower() not in (
+    "0", "false", "off", "no")
+POST_RETRY_429_MAX_S = _env_float("FLOP_POST_RETRY_429_MAX_S", 6)   # trần thời gian chờ 1 lần
+
+_last_post_ts = 0.0          # monotonic của POST gần nhất -> giãn nhịp giữa các lần ghi
+
+
+def _pace_before_post(rng=None) -> None:
+    """Chờ đủ để 2 POST liên tiếp cách nhau >= PACE + jitter[0..JITTER]. POST đầu run KHÔNG
+    chờ (mốc = 0). rng tiêm được để test tất định."""
+    global _last_post_ts
+    if POST_PACE_MS <= 0 and POST_JITTER_MS <= 0:
+        return
+    r = rng or random
+    gap = (POST_PACE_MS + r.uniform(0, max(0, POST_JITTER_MS))) / 1000.0
+    wait = _last_post_ts + gap - time.monotonic()
+    if wait > 0:
+        time.sleep(wait)
+    _last_post_ts = time.monotonic()
+
+
+def _retry_after_seconds(res, default: float = 2.0) -> float:
+    """Số giây nên chờ khi bị 429: header Retry-After trước, rồi 'N s' trong body, rồi default."""
+    ra = (getattr(res, "headers", None) or {}).get("Retry-After")
+    if ra:
+        try:
+            return float(ra)
+        except (TypeError, ValueError):
+            pass
+    m = re.search(r"(\d+(?:\.\d+)?)\s*s(?:ec(?:onds?)?)?\b", getattr(res, "text", "") or "")
+    if m:
+        try:
+            return float(m.group(1))
+        except ValueError:
+            pass
+    return default
+
+
 def post_message(private_key, did, text, room=ROOM) -> bool:
     text = sweep_for_sign(text)          # quét sạch (control/bidi/zero-width), KHÔNG cắt, TRƯỚC khi ký
     nonce = next_nonce()
@@ -754,19 +801,30 @@ def post_message(private_key, did, text, room=ROOM) -> bool:
     sig = sign_message(private_key, to_sign)
     payload = {"did": did, "sig": sig, "nonce": nonce, "text": text}
     headers = {"User-Agent": UA, "Content-Type": "application/json"}
-    try:
-        res = requests.post(f"{BASE_URL}/r/{room}", json=payload, headers=headers, timeout=15)
+    _pace_before_post()                  # giãn nhịp + jitter -> đỡ đập trần 429
+    attempts = 2 if POST_RETRY_429 else 1
+    for attempt in range(attempts):
+        try:
+            res = requests.post(f"{BASE_URL}/r/{room}", json=payload, headers=headers, timeout=15)
+        except requests.RequestException as e:
+            # Server lag / mạng lỗi tạm thời: log lại nhưng không fail workflow
+            _note_post(False)
+            print(f"[post] request_failed | {e}")
+            return False
+        # 429 rate-limit: chờ (bounded) rồi thử LẠI đúng payload — nonce cũ idempotent, server
+        # có duplicate_filter 120s nên không nhân đôi kể cả khi lần đầu lỡ lọt.
+        if res.status_code == 429 and attempt + 1 < attempts:
+            wait = min(_retry_after_seconds(res), POST_RETRY_429_MAX_S)
+            print(f"[post] 429 rate-limited | chờ {wait:.1f}s rồi thử lại | r/{room}")
+            time.sleep(max(0.0, wait))
+            continue
         ok = res.status_code == 200
         if ok:
             _note_server_ok()
-        _note_post(ok)                   # đếm sức khoẻ đường GHI (kể cả 503 -> fail)
+        _note_post(ok)                   # đếm sức khoẻ đường GHI (kể cả 503/429 -> fail)
         print(f"[post] {res.status_code} | r/{room} | {text[:60]}")
         return ok
-    except requests.RequestException as e:
-        # Server lag / mạng lỗi tạm thời: log lại nhưng không fail workflow
-        _note_post(False)
-        print(f"[post] request_failed | {e}")
-        return False
+    return False                         # lý thuyết không tới đây (vòng lặp luôn return)
 
 
 # Số lần THỬ LẠI khi fetch rỗng/hỏng (tổng số lần cố = 1 + FETCH_RETRIES). Read-endpoint

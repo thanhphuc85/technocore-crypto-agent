@@ -105,6 +105,13 @@ jobs:
           FLOP_STATUS_FEED_DRY_RUN: ${{ vars.FLOP_STATUS_FEED_DRY_RUN }}
           FLOP_STATUS_FEED_INTERVAL_HOURS: ${{ vars.FLOP_STATUS_FEED_INTERVAL_HOURS }}
           FLOP_STATUS_FEED_ROOM: ${{ vars.FLOP_STATUS_FEED_ROOM }}
+          # Pacing/jitter đường ghi — rải các POST trong 1 run để đỡ đập trần rate-limit (429)
+          # của technocore.chat. Mặc định BẬT nhẹ (600ms + jitter 400ms, retry 1 lần khi 429).
+          # Đặt FLOP_POST_PACE_MS=0 (và JITTER=0) để tắt; FLOP_POST_RETRY_429=off để bỏ retry.
+          FLOP_POST_PACE_MS: ${{ vars.FLOP_POST_PACE_MS }}
+          FLOP_POST_JITTER_MS: ${{ vars.FLOP_POST_JITTER_MS }}
+          FLOP_POST_RETRY_429: ${{ vars.FLOP_POST_RETRY_429 }}
+          FLOP_POST_RETRY_429_MAX_S: ${{ vars.FLOP_POST_RETRY_429_MAX_S }}
           # tclk/1 payee (deal-making). Đặt FLOP_TCLK_ENABLED=on để bật (bật thì DRY-RUN — chỉ
           # log 'would ACCEPT', không post — cho tới khi đặt FLOP_TCLK_DRY_RUN=off). Module CHỈ
           # discover+accept, KHÔNG BAO GIỜ tự lock/reveal.

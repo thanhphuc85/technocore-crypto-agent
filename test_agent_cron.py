@@ -31,6 +31,14 @@ class _Resp:
             raise RuntimeError(f"HTTP {self.status_code}")
 
 
+@pytest.fixture(autouse=True)
+def _no_post_pacing(monkeypatch):
+    """Tắt pacing/jitter đường ghi trong test (nhanh + tất định); test pacing bật lại tường minh."""
+    monkeypatch.setattr(ac, "POST_PACE_MS", 0)
+    monkeypatch.setattr(ac, "POST_JITTER_MS", 0)
+    monkeypatch.setattr(ac, "_last_post_ts", 0.0)
+
+
 # 32-byte seed cố định -> khóa/DID/chữ ký ĐỀU tất định (test lặp lại được).
 SEED_HEX = "00" * 31 + "01"
 
@@ -1275,3 +1283,48 @@ def test_hydrate_ledger_keeps_richer_local(tmp_path, monkeypatch):
         {"balances": {"FLOP": "-0.1"}, "entries": []}))           # KV nghèo hơn
     ac.hydrate_ledger_from_kv()
     assert tm.check_balance() == "-5.0"                           # KHÔNG để KV nghèo ghi đè local đầy
+
+
+# --- Pacing/jitter + retry 429 cho đường ghi ---------------------------------------------
+def test_retry_after_seconds_header_body_default():
+    class _H:
+        def __init__(self, headers, text=""):
+            self.headers = headers; self.text = text; self.status_code = 429
+    assert ac._retry_after_seconds(_H({"Retry-After": "3"})) == 3.0          # header ưu tiên
+    assert ac._retry_after_seconds(_Resp(status=429, text="retry in 5 s")) == 5.0  # số giây trong body
+    assert ac._retry_after_seconds(_Resp(status=429, text="nope"), default=2.0) == 2.0  # fallback
+
+
+def test_pace_before_post_disabled_no_wait(monkeypatch):
+    monkeypatch.setattr(ac, "POST_PACE_MS", 0)
+    monkeypatch.setattr(ac, "POST_JITTER_MS", 0)
+    calls = {"n": 0}
+    monkeypatch.setattr(ac.time, "sleep", lambda s: calls.__setitem__("n", calls["n"] + 1))
+    ac._pace_before_post()
+    assert calls["n"] == 0                       # tắt -> không chờ
+
+
+def test_pace_before_post_waits_when_recent(monkeypatch):
+    monkeypatch.setattr(ac, "POST_PACE_MS", 600)
+    monkeypatch.setattr(ac, "POST_JITTER_MS", 0)
+    monkeypatch.setattr(ac, "_last_post_ts", ac.time.monotonic())   # POST trước vừa xảy ra
+    slept = {}
+    monkeypatch.setattr(ac.time, "sleep", lambda s: slept.__setitem__("s", s))
+    ac._pace_before_post()
+    assert slept.get("s", 0) > 0                 # phải chờ để giãn nhịp
+
+
+def test_post_message_retries_once_on_429_then_ok(pk, monkeypatch):
+    monkeypatch.setattr(ac, "POST_RETRY_429", True)
+    monkeypatch.setattr(ac.time, "sleep", lambda s: None)
+    seq = iter([_Resp(status=429, text="wait 1 s"), _Resp(status=200)])
+    monkeypatch.setattr(ac.requests, "post", lambda url, json=None, **k: next(seq))
+    assert ac.post_message(pk, ac.did_of(pk), "hi") is True     # 429 -> retry -> 200
+
+
+def test_post_message_429_exhausted_returns_false(pk, monkeypatch):
+    monkeypatch.setattr(ac, "POST_RETRY_429", True)
+    monkeypatch.setattr(ac.time, "sleep", lambda s: None)
+    monkeypatch.setattr(ac.requests, "post",
+                        lambda url, json=None, **k: _Resp(status=429, text=""))
+    assert ac.post_message(pk, ac.did_of(pk), "hi") is False    # 429 mãi -> False (fail ghi)
