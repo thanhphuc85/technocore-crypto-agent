@@ -2490,7 +2490,15 @@ def main():
     status_feed_status = "off"
     if STATUS_FEED_ENABLED:
         if _due(state, "last_status_feed", STATUS_FEED_INTERVAL_H, now):
-            if broadcast_status_feed(private_key, did, state):
+            if not STATUS_FEED_DRY_RUN and posts_degraded():
+                # HEALTH-GUARD (chỉ live): đường ghi technocore.chat đang sập (mọi POST fail)
+                # -> KHÔNG cố post feed (tránh 503 lặp mỗi 5' suốt cửa sổ outage vì cổng chưa
+                # đóng). Cursor thời gian KHÔNG tiến -> tự phát lại khi write-path sống. Dry-run
+                # vẫn chạy bình thường để quan sát số liệu (chỉ log, không đụng đường ghi).
+                status_feed_status = "skip-outage"
+                print("[status-feed] bỏ qua — đường ghi technocore.chat đang lỗi "
+                      f"(post ok={_post_ok_count} fail={_post_fail_count}); không cố post.")
+            elif broadcast_status_feed(private_key, did, state):
                 save_state({"last_status_feed": now})
                 status_feed_status = "dry" if STATUS_FEED_DRY_RUN else "ok"
             else:
