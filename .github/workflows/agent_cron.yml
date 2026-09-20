@@ -97,6 +97,14 @@ jobs:
           FLOP_KIBBLE_REQUEST_MAX_PER_RUN: ${{ vars.FLOP_KIBBLE_REQUEST_MAX_PER_RUN }}
           FLOP_KIBBLE_REQUEST_TYPE: ${{ vars.FLOP_KIBBLE_REQUEST_TYPE }}
           FLOP_KIBBLE_REQUEST_QUESTIONS: ${{ vars.FLOP_KIBBLE_REQUEST_QUESTIONS }}
+          # Status feed (#13-style) — 1 dòng trạng thái THẬT/đo-được/định kỳ để peer tham chiếu
+          # (trục 'được-trả-lời' của census). Mặc định TẮT. Đặt FLOP_STATUS_FEED_ENABLED=on để
+          # bật (bật thì DRY-RUN — chỉ log — cho tới khi đặt FLOP_STATUS_FEED_DRY_RUN=off).
+          # FLOP_STATUS_FEED_ROOM đổi phòng đăng (mặc định = AGENT_ROOM); INTERVAL_HOURS mặc định 1.
+          FLOP_STATUS_FEED_ENABLED: ${{ vars.FLOP_STATUS_FEED_ENABLED }}
+          FLOP_STATUS_FEED_DRY_RUN: ${{ vars.FLOP_STATUS_FEED_DRY_RUN }}
+          FLOP_STATUS_FEED_INTERVAL_HOURS: ${{ vars.FLOP_STATUS_FEED_INTERVAL_HOURS }}
+          FLOP_STATUS_FEED_ROOM: ${{ vars.FLOP_STATUS_FEED_ROOM }}
           # tclk/1 payee (deal-making). Đặt FLOP_TCLK_ENABLED=on để bật (bật thì DRY-RUN — chỉ
           # log 'would ACCEPT', không post — cho tới khi đặt FLOP_TCLK_DRY_RUN=off). Module CHỈ
           # discover+accept, KHÔNG BAO GIỜ tự lock/reveal.
