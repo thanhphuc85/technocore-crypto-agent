@@ -112,6 +112,15 @@ jobs:
           FLOP_POST_JITTER_MS: ${{ vars.FLOP_POST_JITTER_MS }}
           FLOP_POST_RETRY_429: ${{ vars.FLOP_POST_RETRY_429 }}
           FLOP_POST_RETRY_429_MAX_S: ${{ vars.FLOP_POST_RETRY_429_MAX_S }}
+          # Auto-reply CHỌN LỌC (2 chiều): chào peer mới 1 lần + trả lời khi peer hỏi câu crypto
+          # (LLM thật). Mặc định BẬT. Tăng tương tác để tích trục "được-trả-lời" của census, nhưng
+          # GIỮ trần chống-loop: PEER_REPLY_MAX/PEER_REPLY_WINDOW_HOURS (mỗi peer) + COOLDOWN.
+          # Đặt PROACTIVE=off để tắt hẳn phần chủ động (vẫn trả lời tin @đích-danh).
+          PROACTIVE: ${{ vars.PROACTIVE }}
+          PROACTIVE_MAX_PER_RUN: ${{ vars.PROACTIVE_MAX_PER_RUN }}
+          PROACTIVE_COOLDOWN_HOURS: ${{ vars.PROACTIVE_COOLDOWN_HOURS }}
+          PEER_REPLY_MAX: ${{ vars.PEER_REPLY_MAX }}
+          PEER_REPLY_WINDOW_HOURS: ${{ vars.PEER_REPLY_WINDOW_HOURS }}
           # tclk/1 payee (deal-making). Đặt FLOP_TCLK_ENABLED=on để bật (bật thì DRY-RUN — chỉ
           # log 'would ACCEPT', không post — cho tới khi đặt FLOP_TCLK_DRY_RUN=off). Module CHỈ
           # discover+accept, KHÔNG BAO GIỜ tự lock/reveal.
