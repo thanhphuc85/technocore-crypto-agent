@@ -1343,3 +1343,41 @@ def test_proactive_engage_allows_non_denylisted(monkeypatch):
     # peer khac chao -> duoc chao (greeting khong can LLM)
     out = ac.proactive_engage({}, "did:key:z6MkPEERpeer", "gm everyone", 1000, [])
     assert out is not None and "gm" in out.lower()
+
+
+# --- Goal/desc bien-the theo DID (chong copied-boilerplate giua fork) ---------------------
+def test_agent_goal_desc_env_override(monkeypatch):
+    monkeypatch.setattr(ac, "_AGENT_GOAL_ENV", "my custom goal")
+    monkeypatch.setattr(ac, "_AGENT_DESC_ENV", "my custom desc")
+    assert ac.agent_goal("did:key:z6MkX") == "my custom goal"
+    assert ac.agent_desc("did:key:z6MkX") == "my custom desc"
+
+
+def test_agent_goal_desc_deterministic_and_distinct(monkeypatch):
+    monkeypatch.setattr(ac, "_AGENT_GOAL_ENV", "")
+    monkeypatch.setattr(ac, "_AGENT_DESC_ENV", "")
+    d1 = "did:key:z6MkiCxCfTP6gHmWrJvPgF4UtxYL4upzry6hTAs6g1ni2C8g"
+    d2 = "did:key:z6MkkqC8CC6v9WeRHtnD4qP47RGHmvzKvznspa7mQrhvzYG6"
+    # tat dinh: cung DID -> cung ket qua
+    assert ac.agent_goal(d1) == ac.agent_goal(d1)
+    assert ac.agent_desc(d1) == ac.agent_desc(d1)
+    # khac DID -> (rat co the) khac; voi 2 DID that nay phai khac
+    assert ac.agent_goal(d1) != ac.agent_goal(d2)
+    assert ac.agent_desc(d1) != ac.agent_desc(d2)
+    # deu la phuong an hop le trong pool
+    assert ac.agent_goal(d1) in ac._GOAL_VARIANTS
+    assert ac.agent_desc(d1) in ac._DESC_VARIANTS
+
+
+def test_agent_goal_empty_did_is_default(monkeypatch):
+    monkeypatch.setattr(ac, "_AGENT_GOAL_ENV", "")
+    assert ac.agent_goal("") == ac._GOAL_VARIANTS[0]
+
+
+def test_goal_desc_independent_salt(monkeypatch):
+    # salt khac nhau -> goal-index va desc-index KHONG bi khoa cung nhau
+    monkeypatch.setattr(ac, "_AGENT_GOAL_ENV", "")
+    monkeypatch.setattr(ac, "_AGENT_DESC_ENV", "")
+    gi = ac._GOAL_VARIANTS.index(ac.agent_goal("did:key:z6MkiCxCfTP6gHmWrJvPgF4UtxYL4upzry6hTAs6g1ni2C8g"))
+    di = ac._DESC_VARIANTS.index(ac.agent_desc("did:key:z6MkiCxCfTP6gHmWrJvPgF4UtxYL4upzry6hTAs6g1ni2C8g"))
+    assert gi != di  # neu cung hash se bang nhau; salt lam chung khac

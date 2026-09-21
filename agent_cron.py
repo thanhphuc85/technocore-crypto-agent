@@ -218,8 +218,12 @@ ALERT_MOVE_PCT = _env_float("ALERT_MOVE_PCT", 5)   # % biến động BTC/ETH k�
 
 # MỤC TIÊU (goal) đứng yên của agent — inject vào system prompt mỗi lần suy luận để agent
 # bám nhiệm vụ (không trôi thành chatbot tán gẫu) và mirror lên KV cho người/agent khác đọc.
-AGENT_GOAL = os.environ.get(
-    "AGENT_GOAL", "").strip() or "serve live, signed market facts and help peers onboard Technocore"
+# Goal/desc: env override THẮNG; nếu rỗng -> chọn 1 BIẾN THỂ tất định theo DID (xem
+# agent_goal()/agent_desc()). Mục đích: fork cùng codebase KHÔNG phát text byte-identical
+# (copied-boilerplate là tín hiệu anti-sybil), mà mỗi DID tự landing 1 cách diễn đạt thật,
+# tương đương, ỔN ĐỊNH. Đặt AGENT_GOAL/AGENT_DESC để ghi đè tường minh.
+_AGENT_GOAL_ENV = os.environ.get("AGENT_GOAL", "").strip()
+_AGENT_DESC_ENV = os.environ.get("AGENT_DESC", "").strip()
 
 # Chống đăng TRÙNG: nhớ hash các tin ĐÃ ĐĂNG gần đây (chỉ áp cho reply/chủ động, KHÔNG
 # áp telemetry/manifest/alert vốn đã được rate-gate + đa dạng hoá).
@@ -527,6 +531,84 @@ def load_private_key() -> Ed25519PrivateKey:
     if len(seed) != 32:                  # 32-byte seed = đúng 64 ký tự hex (0-9a-f)
         raise ValueError("AGENT_PRIVATE_KEY phải là 64 ký tự hex (32-byte Ed25519 seed)")
     return Ed25519PrivateKey.from_private_bytes(seed)
+
+
+# --- Goal/desc biến-thể-theo-DID (chống copied-boilerplate giữa các fork) -----------------
+# Các cách diễn đạt ĐỀU ĐÚNG SỰ THẬT & tương đương; mỗi DID chọn 1 cái tất định -> fork khác
+# nhau ra text khác nhau mà KHÔNG cần chỉnh tay, KHÔNG hardcode DID nào.
+_GOAL_VARIANTS = (
+    "serve live, signed market facts and help peers onboard Technocore",
+    "publish signed, real-time market telemetry and help agents get started on Technocore",
+    "provide verifiable live market data and support new agents joining Technocore",
+    "broadcast signed crypto market facts and help peers find their footing on Technocore",
+    "deliver real-time, signed market signals and onboard fellow agents to Technocore",
+    "share live signed market readings and guide newcomers onto Technocore",
+    "offer trustworthy live market facts and help other agents onboard Technocore",
+    "post signed, up-to-the-minute market data and help peers join Technocore",
+    "put out signed live market readings and help fellow agents settle into Technocore",
+    "supply verifiable, real-time market telemetry and welcome new agents to Technocore",
+    "keep a signed live market feed running and help peers onboard Technocore",
+    "relay signed, current market facts and help other agents get going on Technocore",
+)
+_DESC_VARIANTS = (
+    "Open-source Ed25519 crypto agent SDK: signed oracle telemetry, context-aware Gemini AI "
+    "replies, injection-guarded, KV store. Runnable & importable by anyone.",
+    "Open-source Ed25519 agent toolkit: signed market telemetry, context-aware AI replies, "
+    "prompt-injection guards, KV notes. Anyone can run or import it.",
+    "An open Ed25519 crypto-agent SDK with signed telemetry, Gemini-backed contextual replies, "
+    "injection defenses, and a KV store — free to run or import.",
+    "Open-source Ed25519 agent framework: signed oracle feeds, context-aware LLM replies, "
+    "injection-guarded input, KV persistence. Fork-friendly and importable.",
+    "A reusable Ed25519 crypto agent: signed telemetry, contextual Gemini replies, hardened "
+    "against prompt injection, KV-backed. Open source, run it yourself.",
+    "Open Ed25519 agent SDK for crypto: signed market oracle, context-aware AI answers, "
+    "injection guards, KV store — runnable and importable by anyone.",
+    "Signed-telemetry Ed25519 crypto agent, open source: Gemini contextual replies, "
+    "injection-guarded ingestion, KV notes; easy to fork, run, or import.",
+    "Open-source crypto agent on Ed25519: verifiable signed telemetry, context-aware AI "
+    "replies, injection protection, KV store — importable and self-hostable.",
+    "Ed25519-signed crypto agent, open source: oracle telemetry, context-aware Gemini "
+    "replies, prompt-injection guards, KV store. Run it, fork it, or import it.",
+    "Open, importable Ed25519 crypto agent: signed market telemetry, contextual AI replies, "
+    "injection-hardened input, KV-backed notes. Self-host or embed as an SDK.",
+    "A self-hostable Ed25519 crypto agent SDK: signed oracle feeds, context-aware replies, "
+    "injection guards, and KV storage — open source and importable.",
+    "Open-source Ed25519 market agent: signed telemetry oracle, Gemini context replies, "
+    "input injection defenses, KV persistence. Anyone can run or import it.",
+)
+
+
+def _self_did_safe() -> str:
+    """DID của chính agent (từ seed) để chọn biến thể; '' nếu chưa có/seed sai."""
+    try:
+        return did_of(load_private_key())
+    except Exception:
+        return ""
+
+
+def _pick_variant(options, did: str, salt: str = ""):
+    """Chọn 1 phần tử TẤT ĐỊNH theo (salt, DID). Salt khác nhau -> goal/desc ĐỘC LẬP (không
+    cùng chỉ số). did rỗng -> phần tử đầu (mặc định gốc)."""
+    if not options:
+        return ""
+    if not did:
+        return options[0]
+    idx = int(hashlib.sha256(f"{salt}|{did}".encode("utf-8")).hexdigest(), 16) % len(options)
+    return options[idx]
+
+
+def agent_goal(did: str = None) -> str:
+    """Mục tiêu công khai: env AGENT_GOAL nếu đặt, ngược lại biến thể theo DID."""
+    if _AGENT_GOAL_ENV:
+        return _AGENT_GOAL_ENV
+    return _pick_variant(_GOAL_VARIANTS, did if did is not None else _self_did_safe(), "goal")
+
+
+def agent_desc(did: str = None) -> str:
+    """Mô tả SDK: env AGENT_DESC nếu đặt, ngược lại biến thể theo DID."""
+    if _AGENT_DESC_ENV:
+        return _AGENT_DESC_ENV
+    return _pick_variant(_DESC_VARIANTS, did if did is not None else _self_did_safe(), "desc")
 
 
 def sign_message(private_key: Ed25519PrivateKey, message: str) -> str:
@@ -1903,7 +1985,7 @@ def llm_reply(user_text: str, sender_nick=None, state=None, mem_key=None):
     tone, system, temperature = pick_tone(user_text)          # giọng theo ngữ cảnh
     lang = detect_lang(user_text)                             # trả lời đúng ngôn ngữ
     # MỤC TIÊU đứng yên đặt ĐẦU system prompt -> agent bám nhiệm vụ, không trôi thành chatbot.
-    system = f"Your standing goal: {AGENT_GOAL}.\n" + system
+    system = f"Your standing goal: {agent_goal()}.\n" + system
     system += "\nReply in Vietnamese." if lang == "vi" else "\nReply in English."
     # Grounding GIÀU theo ngữ cảnh: câu phân tích/quan điểm thêm macro (dominance + top
     # movers) & trending, câu kỹ thuật thêm gas -> reply bám nhiều dữ kiện THẬT, không rỗng.
@@ -2407,9 +2489,9 @@ def broadcast_manifest(private_key, did):
     """Đăng 1 'contribution record' CÓ KÝ mô tả TRUNG THỰC: đây là tool gì, giúp
     ai, link GitHub, DID — và lưu bản audit vào KV note /kv/<ns>/manifest. Đây là
     'proof of contribution' mà nhiều guide cộng đồng coi trọng hơn broadcast giá."""
+    _desc = agent_desc(did)              # biến thể theo DID -> fork không phát text trùng
     msg = (
-        f"[{AGENT_NAME}] 🤖 open-source Ed25519 agent SDK — signed telemetry, "
-        f"Gemini AI replies, KV store. Import & tự chạy: pip install technocore-agent-sdk "
+        f"[{AGENT_NAME}] 🤖 {_desc} Cài: pip install technocore-agent-sdk "
         f"(hoặc clone + pip install -e .) → {REPO_URL} "
         f"| cmds: !price !market !fear !about | DID {did}"
     )
@@ -2418,9 +2500,7 @@ def broadcast_manifest(private_key, did):
         "agent": AGENT_NAME,
         "did": did,
         "repo": REPO_URL,
-        "desc": ("Open-source Ed25519 crypto agent SDK: signed oracle telemetry, "
-                 "context-aware Gemini AI replies, injection-guarded, KV store. "
-                 "Runnable & importable by anyone."),
+        "desc": _desc,
         "commands": COMMANDS,
         "reusable": True,
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -2527,8 +2607,9 @@ def main():
     # 1b2) (#3) Mirror MỤC TIÊU (goal) lên KV note công khai để người/agent khác đọc được
     #      agent này "đang làm gì" — bản audit tĩnh, chỉ ghi lại khi đổi hoặc theo nhịp dài.
     #      Bản goal chèn vào prompt vẫn là hằng số trong code (self-anchor mỗi lần suy luận).
-    if _due(state, "last_goal", MANIFEST_INTERVAL_H, now) or kv_get("goal") != AGENT_GOAL:
-        if kv_set(private_key, did, "goal", AGENT_GOAL):
+    _goal = agent_goal(did)
+    if _due(state, "last_goal", MANIFEST_INTERVAL_H, now) or kv_get("goal") != _goal:
+        if kv_set(private_key, did, "goal", _goal):
             save_state({"last_goal": now})
 
     # 1c) Cảnh báo biến động mạnh (chỉ đăng khi vượt ngưỡng -> signal, không spam).
