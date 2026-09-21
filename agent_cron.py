@@ -179,13 +179,14 @@ def _env_float(name: str, default: float) -> float:
         return float(default)
 
 
-# REPO_URL: ưu tiên env; nếu trống thì suy ra từ repo đang chạy (GITHUB_REPOSITORY) để FORK
-# tự giới thiệu đúng nguồn của mình; chỉ khi cả hai đều trống mới về repo tham chiếu.
+# REPO_URL: ưu tiên env REPO_URL; nếu trống thì suy từ repo đang chạy (GITHUB_REPOSITORY, Actions
+# tự cấp) để FORK tự giới thiệu ĐÚNG nguồn của mình. KHÔNG còn fallback cứng về repo gốc: một
+# fork self-host (không có GITHUB_REPOSITORY) mà không đặt REPO_URL sẽ để TRỐNG thay vì vô tình
+# quảng bá repo người khác (tránh tín hiệu linkage anti-sybil). Muốn hiện repo thì đặt REPO_URL.
 _gh_repo = os.environ.get("GITHUB_REPOSITORY", "").strip()
 REPO_URL = (
     os.environ.get("REPO_URL", "").strip()
     or (f"https://github.com/{_gh_repo}" if _gh_repo else "")
-    or f"https://github.com/{OWNER_REPO}"
 )
 # Room để đăng "contribution manifest" (đây là tool gì, giúp ai, link, DID).
 # Mặc định = ROOM (theo AGENT_ROOM). MẸO CHIẾN LƯỢC: khi agent chạy trong ROOM RIÊNG
@@ -2120,7 +2121,8 @@ def a2a_reply(text: str, sender_nick: str):
     # verb == "about"
     if args:
         return None
-    return line(f"ok about agent={AGENT_NAME} | proto={_A2A_PROTO} | repo={REPO_URL} | t={ts}")
+    _repo_part = f" | repo={REPO_URL}" if REPO_URL else ""
+    return line(f"ok about agent={AGENT_NAME} | proto={_A2A_PROTO}{_repo_part} | t={ts}")
 
 
 def build_reply(sender_nick: str, text: str, state=None, sender_id=None) -> str:
@@ -2490,21 +2492,23 @@ def broadcast_manifest(private_key, did):
     ai, link GitHub, DID — và lưu bản audit vào KV note /kv/<ns>/manifest. Đây là
     'proof of contribution' mà nhiều guide cộng đồng coi trọng hơn broadcast giá."""
     _desc = agent_desc(did)              # biến thể theo DID -> fork không phát text trùng
+    _repo_clause = f"→ {REPO_URL} " if REPO_URL else ""   # trống -> KHÔNG quảng bá repo nào
     msg = (
         f"[{AGENT_NAME}] 🤖 {_desc} Cài: pip install technocore-agent-sdk "
-        f"(hoặc clone + pip install -e .) → {REPO_URL} "
+        f"(hoặc clone + pip install -e .) {_repo_clause}"
         f"| cmds: !price !market !fear !about | DID {did}"
     )
     ok = post_message(private_key, did, msg, room=MANIFEST_ROOM)
     manifest = {
         "agent": AGENT_NAME,
         "did": did,
-        "repo": REPO_URL,
         "desc": _desc,
         "commands": COMMANDS,
         "reusable": True,
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+    if REPO_URL:
+        manifest["repo"] = REPO_URL      # chỉ ghi trường repo khi biết chắc nguồn của mình
     kv_set(private_key, did, "manifest", json.dumps(manifest, ensure_ascii=False))
     return ok            # trả kết quả post -> caller chỉ đóng cổng thời gian khi THÀNH CÔNG
 

@@ -338,7 +338,21 @@ def test_a2a_help_and_about():
     h = ac.a2a_reply(_mention("help"), "bob")
     assert "ok help verbs=" in h and "price" in h and "market" in h and "gas" in h
     ab = ac.a2a_reply(_mention("about"), "bob")
-    assert "ok about" in ab and ac.REPO_URL in ab
+    assert "ok about" in ab
+    # repo chỉ hiện khi biết nguồn; trống -> KHÔNG in "repo=" (không quảng bá repo người khác)
+    if ac.REPO_URL:
+        assert f"repo={ac.REPO_URL}" in ab
+    else:
+        assert "repo=" not in ab
+
+
+def test_about_omits_repo_when_unknown(monkeypatch):
+    monkeypatch.setattr(ac, "REPO_URL", "")
+    ab = ac.a2a_reply(_mention("about"), "bob")
+    assert "repo=" not in ab                       # fork không suy được repo -> KHÔNG hardcode ai
+    monkeypatch.setattr(ac, "REPO_URL", "https://github.com/me/repo")
+    ab2 = ac.a2a_reply(_mention("about"), "bob")
+    assert "repo=https://github.com/me/repo" in ab2
 
 
 def test_a2a_market_top_dominance_gas(monkeypatch):
