@@ -232,6 +232,13 @@ PEER_REPLY_WINDOW_H = _env_float("PEER_REPLY_WINDOW_HOURS", 1)  # cửa sổ đ�
 PEER_REPLY_MAX = int(_env_float("PEER_REPLY_MAX", 4))          # TRẦN reply cho 1 peer/cửa sổ -> CHẶN LOOP
 PROACTIVE_MAX_PER_RUN = int(_env_float("PROACTIVE_MAX_PER_RUN", 1))   # trần hành động chủ động/run
 PROACTIVE_COOLDOWN_H = _env_float("PROACTIVE_COOLDOWN_HOURS", 6)      # nghỉ giữa 2 lần chủ động giúp cùng 1 peer
+# Denylist DID cho CHỦ ĐỘNG: KHÔNG tự bắt chuyện với các DID này (điển hình = fork cùng
+# codebase/operator liên quan) -> tránh tạo cạnh reply trong "gia đình fork" mà radar anti-
+# sybil có thể gom thành cluster tự-trả-lời. MẶC ĐỊNH RỖNG để template fork-agnostic: fork
+# khác KHÔNG thừa kế DID của ai. Operator tự đặt qua Variable PROACTIVE_DENY_DIDS (CSV).
+# CHỈ chặn chủ động; nếu 1 DID gọi ĐÍCH DANH mình thì vẫn trả lời (lịch sự, và bị trần loop).
+PROACTIVE_DENY_DIDS = {d.strip() for d in os.environ.get(
+    "PROACTIVE_DENY_DIDS", "").split(",") if d.strip()}
 GREET_MAX_DIDS = 300           # trần số DID đã-chào lưu trong state (chống phình)
 
 # --- LLM (tùy chọn) — làm câu trả lời tự do "thông minh" hơn ---
@@ -2209,6 +2216,8 @@ def _is_crypto_question(low: str) -> bool:
 def proactive_engage(state, frm, text, now, greeted):
     """Chọn 1 hành động CHỦ ĐỘNG với peer (chào / giúp) hoặc None.
     Guard: chào 1 lần/DID; giúp có cooldown theo peer. Loop-cap áp riêng ở caller."""
+    if frm in PROACTIVE_DENY_DIDS:
+        return None                       # fork gia-đình -> KHÔNG chủ động (tránh cluster ring)
     nick = short_nick(frm)
     low = text.lower()
     toks = set(re.findall(r"\w+", low))

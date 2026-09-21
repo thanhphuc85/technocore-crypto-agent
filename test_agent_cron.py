@@ -1328,3 +1328,18 @@ def test_post_message_429_exhausted_returns_false(pk, monkeypatch):
     monkeypatch.setattr(ac.requests, "post",
                         lambda url, json=None, **k: _Resp(status=429, text=""))
     assert ac.post_message(pk, ac.did_of(pk), "hi") is False    # 429 mãi -> False (fail ghi)
+
+
+# --- Denylist fork DIDs cho proactive (chong cluster ring) --------------------------------
+def test_proactive_engage_skips_denylisted_did(monkeypatch):
+    dd = "did:key:z6MkFORKfork0000000000000000000000000000000000000"
+    monkeypatch.setattr(ac, "PROACTIVE_DENY_DIDS", {dd})
+    # du peer hoi cau crypto + co tu chao -> van None vi bi denylist
+    assert ac.proactive_engage({}, dd, "gm! what is btc price outlook?", 1000, []) is None
+
+
+def test_proactive_engage_allows_non_denylisted(monkeypatch):
+    monkeypatch.setattr(ac, "PROACTIVE_DENY_DIDS", {"did:key:z6MkOTHER"})
+    # peer khac chao -> duoc chao (greeting khong can LLM)
+    out = ac.proactive_engage({}, "did:key:z6MkPEERpeer", "gm everyone", 1000, [])
+    assert out is not None and "gm" in out.lower()

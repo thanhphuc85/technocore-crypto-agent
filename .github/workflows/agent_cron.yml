@@ -121,6 +121,9 @@ jobs:
           PROACTIVE_COOLDOWN_HOURS: ${{ vars.PROACTIVE_COOLDOWN_HOURS }}
           PEER_REPLY_MAX: ${{ vars.PEER_REPLY_MAX }}
           PEER_REPLY_WINDOW_HOURS: ${{ vars.PEER_REPLY_WINDOW_HOURS }}
+          # Denylist DID cho CHỦ ĐỘNG (CSV) — không tự bắt chuyện với fork cùng gia-đình để
+          # tránh radar anti-sybil gom thành cluster. Rỗng mặc định (template fork-agnostic).
+          PROACTIVE_DENY_DIDS: ${{ vars.PROACTIVE_DENY_DIDS }}
           # tclk/1 payee (deal-making). Đặt FLOP_TCLK_ENABLED=on để bật (bật thì DRY-RUN — chỉ
           # log 'would ACCEPT', không post — cho tới khi đặt FLOP_TCLK_DRY_RUN=off). Module CHỈ
           # discover+accept, KHÔNG BAO GIỜ tự lock/reveal.
