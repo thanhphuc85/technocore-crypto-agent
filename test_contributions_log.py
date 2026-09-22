@@ -106,3 +106,22 @@ def test_check_mode_does_not_write(monkeypatch, tmp_path, capsys):
     assert rc == 0
     assert cl.DID in capsys.readouterr().out
     assert not (tmp_path / "should_not_exist.md").exists()          # --check KHÔNG ghi
+
+
+def test_fork_never_inherits_owner_identity(monkeypatch):
+    """Fork (khong OWNER_DID, khong seed, repo khac) KHONG BAO GIO nhat danh tinh chu."""
+    import importlib
+    monkeypatch.setenv("OWNER_DID", "")
+    monkeypatch.setenv("AGENT_PRIVATE_KEY", "")
+    monkeypatch.setenv("AGENT_NAME", "")
+    monkeypatch.setenv("AGENT_DID", "")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "someonelse/technocore-crypto-agent")
+    try:
+        importlib.reload(cl)
+        assert cl.OWNER_DID == ""                       # DID chu KHONG con hardcode
+        assert cl.IS_OWNER is False                     # empty==empty KHONG lam IS_OWNER True
+        assert "NguyenVuLV" not in cl.AGENT             # fork -> ten rieng, khong phai chu
+        assert "z6MkiCxCfTP6gHmWrJvPgF4UtxYL4upzry6hTAs6g1ni2C8g" not in (cl.DID or "")
+    finally:
+        monkeypatch.undo()
+        importlib.reload(cl)                            # tra module ve mac dinh cho test khac

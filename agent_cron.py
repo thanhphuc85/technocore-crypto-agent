@@ -102,15 +102,16 @@ BASE_URL = "https://technocore.chat"
 
 # --- Nhận diện CHỦ SỞ HỮU (agent tham chiếu) -------------------------------------------
 # Danh tính tham chiếu CHỈ được dùng làm mặc định khi instance ĐÚNG LÀ của chủ. Tín hiệu:
-#   (1) khóa đang chạy dẫn xuất ra đúng OWNER_DID (bằng chứng mạnh nhất), HOẶC
+#   (1) khóa đang chạy dẫn xuất ra đúng OWNER_DID (nếu chủ ĐẶT env OWNER_DID), HOẶC
 #   (2) đang chạy trong repo GỐC trên GitHub Actions (GITHUB_REPOSITORY == OWNER_REPO)
 #       -> để CI/test của bản gốc giữ nguyên "NguyenVuLV"/"nguyenvulv" dù không nạp khóa.
-# Fork (khóa khác + repo khác) sẽ KHÔNG BAO GIỜ tự nhặt danh tính chủ: nếu để trống tên,
-# code dẫn xuất tên/namespace DUY NHẤT từ khóa của CHÍNH fork -> tránh va chạm KV_NS = sybil.
-OWNER_DID = "did:key:z6MkiCxCfTP6gHmWrJvPgF4UtxYL4upzry6hTAs6g1ni2C8g"
+# OWNER_DID KHÔNG hardcode (fork-safe): mặc định RỖNG -> DID của chủ KHÔNG nằm trong code
+# fork nào. Chủ chỉ cần (2) khi chạy trên Actions repo gốc; muốn nhận diện chủ ngoài Actions
+# thì đặt env OWNER_DID. Fork (khóa khác + repo khác) KHÔNG BAO GIỜ tự nhặt danh tính chủ.
+OWNER_DID = os.environ.get("OWNER_DID", "").strip()
 OWNER_REPO = "thanhphuc85/technocore-crypto-agent"
 MY_DID = did_from_seed_hex(os.environ.get("AGENT_PRIVATE_KEY", ""))
-IS_OWNER = (MY_DID == OWNER_DID) or (
+IS_OWNER = (bool(OWNER_DID) and MY_DID == OWNER_DID) or (
     os.environ.get("GITHUB_REPOSITORY", "").strip() == OWNER_REPO
 )
 

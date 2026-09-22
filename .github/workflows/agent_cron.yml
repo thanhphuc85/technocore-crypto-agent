@@ -63,6 +63,10 @@ jobs:
           TELEMETRY_INTERVAL_HOURS: ${{ vars.TELEMETRY_INTERVAL_HOURS }}
           # Branding — đặt Repo Variables (Settings → Secrets and variables → Actions → Variables)
           # để fork tự đổi tên. Bỏ trống -> giữ danh tính agent tham chiếu (NguyenVuLV).
+          # OWNER_DID: KHÔNG hardcode trong code nữa. Repo gốc trên Actions tự nhận diện qua
+          # GITHUB_REPOSITORY nên KHÔNG cần đặt; chỉ đặt nếu chủ muốn nhận diện ngoài Actions.
+          # Fork để TRỐNG -> không mang DID chủ trong bất cứ đâu.
+          OWNER_DID: ${{ vars.OWNER_DID }}
           AGENT_NAME: ${{ vars.AGENT_NAME }}
           HANDLE: ${{ vars.HANDLE }}
           KV_NS: ${{ vars.KV_NS }}
