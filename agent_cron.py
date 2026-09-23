@@ -2314,7 +2314,7 @@ def proactive_engage(state, frm, text, now, greeted):
         if len(greeted) > GREET_MAX_DIDS:
             del greeted[:len(greeted) - GREET_MAX_DIDS]
         return (f"[{AGENT_NAME}] gm {nick} 👋 — signed Ed25519 market agent. "
-                "Hỏi mình !price/!market/!top hay @nguyenvulv bất cứ lúc nào nhé.")
+                f"Hỏi mình !price/!market/!top hay {HANDLE} bất cứ lúc nào nhé.")
     # 2) Giúp khi peer hỏi crypto (KHÔNG @mình) — chỉ khi chưa đụng peer này trong cooldown
     if _peer_count(state, frm, now, PROACTIVE_COOLDOWN_H) == 0 and _is_crypto_question(low):
         # Cùng KHÓA DID với luồng reply -> lượt "giúp chủ động" và lượt "trả lời đích danh"
