@@ -1395,3 +1395,68 @@ def test_goal_desc_independent_salt(monkeypatch):
     gi = ac._GOAL_VARIANTS.index(ac.agent_goal("did:key:z6MkiCxCfTP6gHmWrJvPgF4UtxYL4upzry6hTAs6g1ni2C8g"))
     di = ac._DESC_VARIANTS.index(ac.agent_desc("did:key:z6MkiCxCfTP6gHmWrJvPgF4UtxYL4upzry6hTAs6g1ni2C8g"))
     assert gi != di  # neu cung hash se bang nhau; salt lam chung khac
+
+
+# --- Per-DID telemetry divergence (chong "van tay" trung giua cac fork) -----------
+_OWNER_DID = "did:key:z6MkiCxCfTP6gHmWrJvPgF4UtxYL4upzry6hTAs6g1ni2C8g"
+_LACHUTE_DID = "did:key:z6MkkqC8CC6v9WeRHtnD4qP47RGHmvzKvznspa7mQrhvzYG6"
+_HUONG_DID = "did:key:z6Mkqc7fABEewxUPe3xb4vaYYGVpYmn6jb2QwUHb5BcHzokH"
+
+
+def test_did_phase_deterministic_and_in_range():
+    n = len(ac.TELEMETRY_TEMPLATES)
+    a = ac._did_phase(_OWNER_DID, n, 0)
+    b = ac._did_phase(_OWNER_DID, n, 0)
+    assert a == b                      # tat dinh
+    assert 0 <= a < n                  # trong khoang
+
+
+def test_did_phase_rotates_with_tick():
+    n = len(ac.TELEMETRY_TEMPLATES)
+    seen = {ac._did_phase(_OWNER_DID, n, t) for t in range(n)}
+    assert seen == set(range(n))       # xoay het cac template theo thoi gian
+
+
+def test_did_phase_empty_did_is_zero_phase():
+    n = len(ac.TELEMETRY_TEMPLATES)
+    # did rong -> chi so = tick % n (khong co pha rieng)
+    assert ac._did_phase("", n, 5) == 5 % n
+    assert ac._did_phase("", 0, 5) == 0
+
+
+def test_did_phase_diverges_across_forks_at_same_time():
+    # Tinh chat CHONG-SYBIL cot loi: cung mot thoi diem (tick), 3 fork KHONG cung template.
+    n = len(ac.TELEMETRY_TEMPLATES)
+    for tick in range(0, 240, 7):      # quet nhieu moc thoi gian
+        idxs = {
+            ac._did_phase(_OWNER_DID, n, tick),
+            ac._did_phase(_LACHUTE_DID, n, tick),
+            ac._did_phase(_HUONG_DID, n, tick),
+        }
+        assert len(idxs) >= 2, f"tick={tick}: 3 fork trung template"
+
+
+def test_cadence_offset_deterministic_in_range_and_distinct():
+    span = 20 * 60
+    for did in (_OWNER_DID, _LACHUTE_DID, _HUONG_DID):
+        o1 = ac._did_cadence_offset(did, span)
+        assert o1 == ac._did_cadence_offset(did, span)   # tat dinh
+        assert 0 <= o1 < span                            # trong [0, span)
+    offs = {ac._did_cadence_offset(d, span)
+            for d in (_OWNER_DID, _LACHUTE_DID, _HUONG_DID)}
+    assert len(offs) == 3                                 # 3 fork -> 3 offset khac nhau
+
+
+def test_cadence_offset_empty_did_is_zero():
+    assert ac._did_cadence_offset("", 20 * 60) == 0
+    assert ac._did_cadence_offset(_OWNER_DID, 0) == 0
+
+
+def test_due_respects_phase_offset():
+    now = 100_000
+    # last cach day dung 1h; phase_s=0 -> da den han, phase_s>0 -> chua
+    state = {"k": now - 3600}
+    assert ac._due(state, "k", 1.0, now, phase_s=0) is True
+    assert ac._due(state, "k", 1.0, now, phase_s=300) is False
+    # du 1h + phase -> den han
+    assert ac._due({"k": now - 3600 - 300}, "k", 1.0, now, phase_s=300) is True
