@@ -2247,16 +2247,38 @@ TELEMETRY_TEMPLATES = [
 ]
 
 
+def _did_phase(did: str, n: int, tick: int = 0) -> int:
+    """Chỉ số [0, n) TẤT ĐỊNH theo DID, có thể xoay theo 'tick' (vd bucket thời gian).
+    Mục đích chống-sybil: các fork chạy cùng codebase mà bắn CÙNG thời điểm sẽ KHÔNG
+    còn ra cùng một template (trước đây chọn theo time.time() -> đồng bộ = trùng khuôn,
+    tín hiệu linkage). Giờ mỗi DID có PHA riêng, vẫn xoay theo thời gian. did rỗng -> 0."""
+    if n <= 0:
+        return 0
+    base = int(hashlib.sha256(f"tpl|{did}".encode("utf-8")).hexdigest(), 16) if did else 0
+    return (base + int(tick)) % n
+
+
+def _did_cadence_offset(did: str, span_s: int = 20 * 60) -> int:
+    """Lệch pha cadence TẤT ĐỊNH theo DID (giây, 0..span_s). Cộng vào ngưỡng _due của
+    telemetry để beacon của các fork KHÔNG dồn vào cùng phút. span mặc định 20' < bước
+    cron 30' nên trễ tối đa dưới 1 nhịp. did rỗng -> 0 (giữ hành vi cũ)."""
+    if not did or span_s <= 0:
+        return 0
+    return int(hashlib.sha256(f"cadence|{did}".encode("utf-8")).hexdigest(), 16) % int(span_s)
+
+
 def broadcast_telemetry(private_key, did):
     m = get_market(["bitcoin", "ethereum"])
     btc, eth = m.get("bitcoin", {}), m.get("ethereum", {})
     ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     if btc.get("usd") is not None:
-        tpl = TELEMETRY_TEMPLATES[int(time.time() // 60) % len(TELEMETRY_TEMPLATES)]
+        # Template xoay theo thời gian NHƯNG lệch pha theo DID -> fork đồng bộ vẫn khác khuôn.
+        tpl = TELEMETRY_TEMPLATES[_did_phase(did, len(TELEMETRY_TEMPLATES), int(time.time() // 60))]
         body = tpl.format(btc=btc["usd"], bchg=_fmt_chg(btc.get("chg")),
                           eth=eth.get("usd"), echg=_fmt_chg(eth.get("chg")))
-        # Thỉnh thoảng đính kèm chỉ số Fear & Greed cho phong phú
-        val, cls = (get_fear_greed() if int(time.time() // 1800) % 3 == 0 else (None, None))
+        # Thỉnh thoảng đính kèm chỉ số Fear & Greed cho phong phú — cũng lệch pha theo DID để
+        # phần đuôi "| F&G ..." KHÔNG xuất hiện đồng loạt trên mọi fork cùng lúc.
+        val, cls = (get_fear_greed() if _did_phase(did, 3, int(time.time() // 1800)) == 0 else (None, None))
         if val is not None:
             body += f" | F&G {val}({cls})"
         text = f"[{AGENT_NAME}] {body} | {ts}"
@@ -2514,13 +2536,15 @@ def broadcast_manifest(private_key, did):
     return ok            # trả kết quả post -> caller chỉ đóng cổng thời gian khi THÀNH CÔNG
 
 
-def _due(state: dict, key: str, interval_h: float, now: int) -> bool:
-    """True nếu đã đủ interval_h giờ kể từ lần cuối (hoặc chưa từng chạy)."""
+def _due(state: dict, key: str, interval_h: float, now: int, phase_s: int = 0) -> bool:
+    """True nếu đã đủ interval_h giờ kể từ lần cuối (hoặc chưa từng chạy).
+    phase_s: lệch pha (giây) cộng thêm vào ngưỡng — dùng để so le cadence theo DID giữa
+    các fork (mặc định 0 -> hành vi cũ)."""
     try:
         last = int(state.get(key, 0))
     except (TypeError, ValueError):
         last = 0
-    return (now - last) >= int(interval_h * 3600)
+    return (now - last) >= int(interval_h * 3600) + int(phase_s)
 
 
 def check_price_alert(private_key, did, state):
@@ -2587,7 +2611,8 @@ def main():
     #    đúng nhịp này thì KHÔNG lưu mốc, để vòng sau thử lại ngay (chống "xanh mà
     #    không post được gì" + không bỏ trống 1 nhịp broadcast).
     tele_status = "skip"
-    if force or _due(state, "last_telemetry", TELEMETRY_INTERVAL_H, now):
+    if force or _due(state, "last_telemetry", TELEMETRY_INTERVAL_H, now,
+                     phase_s=_did_cadence_offset(did)):
         if broadcast_telemetry(private_key, did):
             save_state({"last_telemetry": now})
             tele_status = "ok"
