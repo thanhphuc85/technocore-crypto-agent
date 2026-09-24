@@ -62,7 +62,10 @@ KV_NS = os.environ.get("KV_NS", "").strip() or re.sub(r"[^a-z0-9_-]", "-", AGENT
 REPO = (
     os.environ.get("REPO_URL", "").strip()
     or (f"https://github.com/{_gh_repo}" if _gh_repo else "")
-    or f"https://github.com/{OWNER_REPO}"
+    # fork-safe: CHỈ lùi về repo CHỦ khi instance ĐÚNG LÀ của chủ. Fork self-host (không
+    # REPO_URL, không GITHUB_REPOSITORY) -> để TRỐNG, KHÔNG đóng dấu repo chủ vào file
+    # proof-of-work của chính nó (tránh tín hiệu linkage anti-sybil). Khớp agent_cron.REPO_URL.
+    or (f"https://github.com/{OWNER_REPO}" if IS_OWNER else "")
 )
 UA = {"User-Agent": f"{AGENT}-Agent/2.0"}
 OUT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "contributions-log.md")
