@@ -158,6 +158,14 @@ jobs:
           SONNET_CONTEST_ID: ${{ vars.SONNET_CONTEST_ID }}
           SONNET_BALLOT_ENTRY: ${{ vars.SONNET_BALLOT_ENTRY }}
           SONNET_REFEREE_DID: ${{ vars.SONNET_REFEREE_DID }}
+          # OWNER cho contest "Close Call" của FLOP Labs (mặc định TẮT). Đặt CLOSE_CALL_ENABLED=on
+          # -> agent đăng ký owner 1 LẦN vào room close1 (season close-1) rồi sweep kế cấp 10,000
+          # POLF. CHỈ đăng ký, KHÔNG giao dịch. season/room/referee/lock override qua CLOSE_CALL_*.
+          CLOSE_CALL_ENABLED: ${{ vars.CLOSE_CALL_ENABLED }}
+          CLOSE_CALL_SEASON: ${{ vars.CLOSE_CALL_SEASON }}
+          CLOSE_CALL_ROOM: ${{ vars.CLOSE_CALL_ROOM }}
+          CLOSE_CALL_REFEREE_DID: ${{ vars.CLOSE_CALL_REFEREE_DID }}
+          CLOSE_CALL_LOCK: ${{ vars.CLOSE_CALL_LOCK }}
           # Câu hỏi nhập tay khi Run workflow (bỏ qua khi chạy theo cron)
           ASK: ${{ github.event.inputs.ask }}
         run: python agent_cron.py
