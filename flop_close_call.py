@@ -206,9 +206,20 @@ def take_max_per_run() -> int:
 
 
 def tp_price():
-    """TAKE-PROFIT: ngưỡng giá reference để CHỐT toàn bộ vị thế (bán đóng long / mua đóng short).
-    Rỗng/sai -> None (tắt). Đây là NGƯỠNG của operator, không phải dự báo."""
-    raw = os.environ.get("CLOSE_CALL_TP", "").strip()
+    """TAKE-PROFIT: ngưỡng giá reference để CHỐT lời toàn bộ vị thế. Rỗng/sai -> None (tắt).
+    Ngưỡng của operator, không phải dự báo. Ý nghĩa theo hướng vị thế:
+    long -> chốt khi ref >= TP (giá lên); short -> chốt khi ref <= TP (giá xuống)."""
+    return _pos_price("CLOSE_CALL_TP")
+
+
+def sl_price():
+    """STOP-LOSS: ngưỡng cắt lỗ toàn bộ vị thế. Rỗng/sai -> None (tắt).
+    long -> cắt khi ref <= SL (giá xuống); short -> cắt khi ref >= SL (giá lên)."""
+    return _pos_price("CLOSE_CALL_SL")
+
+
+def _pos_price(env: str):
+    raw = os.environ.get(env, "").strip()
     if not raw:
         return None
     try:
@@ -216,6 +227,36 @@ def tp_price():
         return v if v > 0 else None
     except InvalidOperation:
         return None
+
+
+def position_side(state: dict = None):
+    """Hướng vị thế đang giữ: 'long'|'short'|None. Ưu tiên state['close_call_side'] (auto_take
+    ghi khi mở), fallback suy từ CLOSE_CALL_TAKE_SIDE (buy->long, sell->short)."""
+    s = (state or {}).get("close_call_side")
+    if s in ("long", "short"):
+        return s
+    ts = take_side()
+    return "long" if ts == "buy" else "short" if ts == "sell" else None
+
+
+def exit_triggered(side: str, ref_px, tp, sl):
+    """(triggered, kind) với kind ∈ {'tp','sl',None}. long: TP khi ref>=tp, SL khi ref<=sl;
+    short: TP khi ref<=tp, SL khi ref>=sl. Thuần, test được."""
+    try:
+        p = Decimal(str(ref_px))
+    except (InvalidOperation, TypeError):
+        return (False, None)
+    if side == "long":
+        if tp is not None and p >= tp:
+            return (True, "tp")
+        if sl is not None and p <= sl:
+            return (True, "sl")
+    elif side == "short":
+        if tp is not None and p <= tp:
+            return (True, "tp")
+        if sl is not None and p >= sl:
+            return (True, "sl")
+    return (False, None)
 
 
 # --- Chuẩn hoá số/terms (thuần, test được) -----------------------------------------
@@ -536,7 +577,8 @@ def auto_take(private_key=None, did: str = None, *, post_fn=None, fetch_fn=None,
             filled += q
             accepted.append({"id": tid, "qty": str(q), "px": str(p)})
             if save:
-                save({"close_call_taken": taken, "close_call_filled": str(filled)})
+                save({"close_call_taken": taken, "close_call_filled": str(filled),
+                      "close_call_side": "long" if want == "buy" else "short"})
             log(f"[close-call] auto-take {want}: took id={tid} {q}@{p} (filled {filled}/{target})")
         else:
             return {"outcome": "post_failed", "reason": f"post offer id={tid} thất bại",
@@ -549,48 +591,15 @@ def auto_take(private_key=None, did: str = None, *, post_fn=None, fetch_fn=None,
             "filled": str(filled), "target": str(target)}
 
 
-# --- TAKE-PROFIT: chốt toàn bộ vị thế khi reference chạm ngưỡng operator đặt --------
+# --- EXIT: chốt lời / cắt lỗ toàn bộ vị thế (CẢ long lẫn short) khi chạm ngưỡng ------
 
-def take_profit(private_key=None, did: str = None, *, post_fn=None, fetch_fn=None,
-                state: dict = None, save=None, log=print) -> dict:
-    """Khi reference px >= CLOSE_CALL_TP, ĐÓNG toàn bộ long đã mở bằng cách BÁN (khớp offer
-    maker 'buy', giá TỐT NHẤT = px cao nhất, trong biên). Đóng qty = filled − closed (đã mở −
-    đã đóng). Bền qua state['close_call_closed'] (+ ids). Gated + dry-run mặc định.
-    Trả kèm 'triggered' để caller TẮT auto-take khi đang ở chế độ chốt (khỏi vừa mua vừa bán).
-
-    outcome: skipped_disabled|skipped_unconfigured|skipped_no_tp|no_position|waiting|
-             none_available|dry_run|closed|post_failed
-    """
-    tp = tp_price()
-    if tp is None:
-        return {"outcome": "skipped_no_tp", "triggered": False}
-    if not trade_enabled():
-        return {"outcome": "skipped_disabled", "triggered": False}
-    sender = post_fn or post_message
-    fetcher = fetch_fn or fetch_messages
-    if sender is None or fetcher is None or not (did and private_key):
-        return {"outcome": "skipped_unconfigured", "triggered": False}
-    st = state if state is not None else {}
-    try:
-        filled = Decimal(str(st.get("close_call_filled", "0")))
-        closed = Decimal(str(st.get("close_call_closed", "0")))
-    except InvalidOperation:
-        filled, closed = Decimal(0), Decimal(0)
-    open_long = filled - closed
-    if open_long <= 0:
-        return {"outcome": "no_position", "triggered": False, "open": str(open_long)}
-    ref = read_reference()
-    if not ref.get("ok"):
-        return {"outcome": "waiting", "triggered": False, "reason": "chưa đọc được reference"}
-    try:
-        ref_px = Decimal(str(ref["ref_px"]))
-    except (InvalidOperation, TypeError):
-        return {"outcome": "waiting", "triggered": False, "reason": "reference px lỗi"}
-    if ref_px < tp:
-        return {"outcome": "waiting", "triggered": False, "px": str(ref_px), "tp": str(tp)}
-
-    # ĐÃ CHẠM NGƯỠNG -> đóng long bằng cách khớp offer maker 'buy' (ta là người BÁN)
-    closed_ids = list(st.get("close_call_closed_ids", []))
+def _close_position(private_key, did, pos_side, remaining, closed, closed_ids, *,
+                    sender, fetcher, ref, save, log) -> dict:
+    """Đóng `remaining` hợp đồng của vị thế `pos_side` bằng cách khớp offer NGƯỢC hướng:
+    long -> BÁN (khớp maker 'buy', giá cao nhất trước); short -> MUA (khớp maker 'sell', thấp nhất).
+    Cộng dồn `closed` (+ ids), bền qua save. Trả outcome + closed + open còn lại."""
+    maker_side = "buy" if pos_side == "long" else "sell"   # offer ta cần khớp để đóng
+    best_high = (pos_side == "long")                        # bán -> px cao nhất; mua -> px thấp nhất
     data = fetcher(since=0, room=room())
     cands, seen = [], set(closed_ids)
     for m in reversed((data or {}).get("messages", [])):
@@ -599,7 +608,7 @@ def take_profit(private_key=None, did: str = None, *, post_fn=None, fetch_fn=Non
             continue
         t = off["terms"]
         tid = t.get("id")
-        if (t.get("side") != "buy" or tid in seen or t.get("maker") == did
+        if (t.get("side") != maker_side or tid in seen or t.get("maker") == did
                 or t.get("taker") not in ("any", did)):
             continue
         try:
@@ -610,18 +619,18 @@ def take_profit(private_key=None, did: str = None, *, post_fn=None, fetch_fn=Non
             continue
         seen.add(tid)
         cands.append((p, q, off))
-    cands.sort(key=lambda c: c[0], reverse=True)   # bán -> px cao nhất trước (tốt cho ta)
+    cands.sort(key=lambda c: c[0], reverse=best_high)
 
     accepted, per_run, dry = [], take_max_per_run(), trade_dry_run()
-    remaining = open_long
+    verb = "sell" if pos_side == "long" else "buy"
     for p, q, off in cands:
         if remaining <= 0 or len(accepted) >= per_run:
             break
-        if q > remaining:                          # không bán quá vị thế (trade settle nguyên qty)
+        if q > remaining:                       # không đóng quá vị thế (trade settle nguyên qty)
             continue
         tid = off["terms"]["id"]
         if dry:
-            log(f"[close-call][DRY] TP close: sell via buy-offer id={tid} {q}@{p}")
+            log(f"[close-call][DRY] exit {pos_side}: {verb} via {maker_side}-offer id={tid} {q}@{p}")
             accepted.append({"id": tid, "qty": str(q), "px": str(p)})
             closed += q
             remaining -= q
@@ -634,15 +643,66 @@ def take_profit(private_key=None, did: str = None, *, post_fn=None, fetch_fn=Non
             accepted.append({"id": tid, "qty": str(q), "px": str(p)})
             if save:
                 save({"close_call_closed": str(closed), "close_call_closed_ids": closed_ids})
-            log(f"[close-call] TP close: sold id={tid} {q}@{p} (closed {closed}/{filled})")
+            log(f"[close-call] exit {pos_side}: {verb} id={tid} {q}@{p} (closed {closed})")
         else:
-            return {"outcome": "post_failed", "triggered": True, "accepted": accepted,
-                    "closed": str(closed)}
+            return {"outcome": "post_failed", "accepted": accepted, "closed": str(closed)}
     if not accepted:
-        return {"outcome": "none_available", "triggered": True,
-                "reason": "chưa có offer 'buy' hợp lệ để bán đóng", "open": str(remaining)}
-    return {"outcome": "dry_run" if dry else "closed", "triggered": True,
+        return {"outcome": "none_available",
+                "reason": f"chưa có offer '{maker_side}' hợp lệ để đóng", "open": str(remaining)}
+    return {"outcome": "dry_run" if dry else "closed",
             "accepted": accepted, "closed": str(closed), "open": str(remaining)}
+
+
+def manage_exit(private_key=None, did: str = None, *, post_fn=None, fetch_fn=None,
+                state: dict = None, save=None, log=print) -> dict:
+    """Chốt lời (CLOSE_CALL_TP) / cắt lỗ (CLOSE_CALL_SL) TOÀN BỘ vị thế khi reference chạm ngưỡng,
+    cho CẢ long lẫn short. Hướng vị thế lấy từ state['close_call_side'] (auto_take ghi) hoặc suy từ
+    CLOSE_CALL_TAKE_SIDE. Gated + dry-run mặc định. Trả 'triggered' để caller TẮT auto-take.
+
+    outcome: skipped_disabled|skipped_unconfigured|skipped_no_exit|no_side|no_position|waiting|
+             none_available|dry_run|closed|post_failed  (+ 'kind': tp|sl khi triggered)
+    """
+    tp, sl = tp_price(), sl_price()
+    if tp is None and sl is None:
+        return {"outcome": "skipped_no_exit", "triggered": False}
+    if not trade_enabled():
+        return {"outcome": "skipped_disabled", "triggered": False}
+    sender = post_fn or post_message
+    fetcher = fetch_fn or fetch_messages
+    if sender is None or fetcher is None or not (did and private_key):
+        return {"outcome": "skipped_unconfigured", "triggered": False}
+    st = state if state is not None else {}
+    side = position_side(st)
+    if side is None:
+        return {"outcome": "no_side", "triggered": False,
+                "reason": "không xác định được hướng vị thế (state close_call_side / TAKE_SIDE)"}
+    try:
+        filled = Decimal(str(st.get("close_call_filled", "0")))
+        closed = Decimal(str(st.get("close_call_closed", "0")))
+    except InvalidOperation:
+        filled, closed = Decimal(0), Decimal(0)
+    open_qty = filled - closed
+    if open_qty <= 0:
+        return {"outcome": "no_position", "triggered": False, "open": str(open_qty)}
+    ref = read_reference()
+    if not ref.get("ok"):
+        return {"outcome": "waiting", "triggered": False, "reason": "chưa đọc được reference"}
+    fired, kind = exit_triggered(side, ref.get("ref_px"), tp, sl)
+    if not fired:
+        return {"outcome": "waiting", "triggered": False, "side": side,
+                "px": str(ref.get("ref_px")), "tp": str(tp) if tp else None,
+                "sl": str(sl) if sl else None}
+    res = _close_position(private_key, did, side, open_qty, closed,
+                          list(st.get("close_call_closed_ids", [])),
+                          sender=sender, fetcher=fetcher, ref=ref, save=save, log=log)
+    res["triggered"] = True
+    res["kind"] = kind
+    res["side"] = side
+    return res
+
+
+# Alias tương thích ngược (long-only take-profit cũ) -> exit tổng quát.
+take_profit = manage_exit
 
 
 # --- Chạy thử offline (KHÔNG gửi) --------------------------------------------------

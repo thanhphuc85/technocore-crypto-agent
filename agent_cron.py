@@ -2976,14 +2976,14 @@ def main():
                 r = flop_close_call.take_offer(private_key, did, post_fn=post_message,
                                                fetch_fn=fetch_messages)
                 parts.append(f"take:{r.get('outcome', '?')}")
-            # TAKE-PROFIT trước: chạm ngưỡng -> đóng vị thế và TẮT auto-take (khỏi vừa mua vừa bán)
-            _tp_triggered = False
-            if flop_close_call.tp_price() is not None:
-                r = flop_close_call.take_profit(private_key, did, post_fn=post_message,
+            # EXIT trước (TP/SL, cả long/short): chạm ngưỡng -> đóng vị thế và TẮT auto-take
+            _exit_triggered = False
+            if flop_close_call.tp_price() is not None or flop_close_call.sl_price() is not None:
+                r = flop_close_call.manage_exit(private_key, did, post_fn=post_message,
                                                 fetch_fn=fetch_messages, state=state, save=save_state)
-                _tp_triggered = bool(r.get("triggered"))
-                parts.append(f"tp:{r.get('outcome', '?')}")
-            if flop_close_call.take_side() and not _tp_triggered:
+                _exit_triggered = bool(r.get("triggered"))
+                parts.append(f"exit:{r.get('outcome', '?')}{('/' + r['kind']) if r.get('kind') else ''}")
+            if flop_close_call.take_side() and not _exit_triggered:
                 r = flop_close_call.auto_take(private_key, did, post_fn=post_message,
                                               fetch_fn=fetch_messages, state=state, save=save_state)
                 parts.append(f"auto:{r.get('outcome', '?')} {r.get('filled', '?')}/{r.get('target', '?')}")

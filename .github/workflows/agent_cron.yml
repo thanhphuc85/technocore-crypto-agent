@@ -179,9 +179,11 @@ jobs:
           CLOSE_CALL_TAKE_SIDE: ${{ vars.CLOSE_CALL_TAKE_SIDE }}
           CLOSE_CALL_TAKE_QTY: ${{ vars.CLOSE_CALL_TAKE_QTY }}
           CLOSE_CALL_TAKE_MAX_PER_RUN: ${{ vars.CLOSE_CALL_TAKE_MAX_PER_RUN }}
-          # TAKE-PROFIT: khi reference px >= CLOSE_CALL_TP -> đóng TOÀN BỘ vị thế (bán đóng long),
-          # và tự tắt auto-take. Ngưỡng do operator đặt, không phải dự báo.
+          # EXIT (cả long lẫn short): chạm ngưỡng -> đóng TOÀN BỘ vị thế và tự tắt auto-take.
+          # TP (chốt lời): long đóng khi ref>=TP, short đóng khi ref<=TP.
+          # SL (cắt lỗ):   long đóng khi ref<=SL, short đóng khi ref>=SL. Ngưỡng của operator.
           CLOSE_CALL_TP: ${{ vars.CLOSE_CALL_TP }}
+          CLOSE_CALL_SL: ${{ vars.CLOSE_CALL_SL }}
           # Câu hỏi nhập tay khi Run workflow (bỏ qua khi chạy theo cron)
           ASK: ${{ github.event.inputs.ask }}
         run: python agent_cron.py
