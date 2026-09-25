@@ -556,13 +556,13 @@ def test_tp_price_parse(monkeypatch):
 def test_tp_skipped_no_tp(monkeypatch):
     monkeypatch.delenv("CLOSE_CALL_TP", raising=False)
     out = cc.take_profit("k", _ME, post_fn=lambda *a: True, fetch_fn=lambda **kw: {"messages": []})
-    assert out["outcome"] == "skipped_no_tp" and out["triggered"] is False
+    assert out["outcome"] == "skipped_no_exit" and out["triggered"] is False
 
 
 def test_tp_no_position(monkeypatch):
     monkeypatch.setenv("CLOSE_CALL_TRADE_ENABLED", "on")
     monkeypatch.setenv("CLOSE_CALL_TP", "248")
-    st = {"close_call_filled": "5", "close_call_closed": "5"}
+    st = {"close_call_filled": "5", "close_call_closed": "5", "close_call_side": "long"}
     out = cc.take_profit("k", _ME, post_fn=lambda *a: True, fetch_fn=lambda **kw: {"messages": []}, state=st)
     assert out["outcome"] == "no_position"
 
@@ -571,7 +571,7 @@ def test_tp_waiting_below_threshold(monkeypatch):
     monkeypatch.setenv("CLOSE_CALL_TRADE_ENABLED", "on")
     monkeypatch.setenv("CLOSE_CALL_TP", "248")
     _ref_px(monkeypatch, "224.00")
-    st = {"close_call_filled": "20", "close_call_closed": "0"}
+    st = {"close_call_filled": "20", "close_call_closed": "0", "close_call_side": "long"}
     out = cc.take_profit("k", _ME, post_fn=lambda *a: True, fetch_fn=lambda **kw: {"messages": []}, state=st)
     assert out["outcome"] == "waiting" and out["triggered"] is False
 
@@ -583,7 +583,7 @@ def test_tp_triggered_dry_closes_best_and_no_overshoot(monkeypatch):
     monkeypatch.setenv("CLOSE_CALL_MAX_QTY", "20")
     _fake_sign(monkeypatch)
     _ref_px(monkeypatch, "248.50")          # đã chạm ngưỡng
-    st = {"close_call_filled": "3", "close_call_closed": "0"}
+    st = {"close_call_filled": "3", "close_call_closed": "0", "close_call_side": "long"}
     # để ĐÓNG long -> ta bán -> khớp offer maker 'buy'; giá cao nhất trước
     offers = [("buy", "2", "248.00", "b1", _MAKER),
               ("buy", "2", "249.00", "b2", _M2),     # cao hơn -> ưu tiên
@@ -604,7 +604,7 @@ def test_tp_triggered_dry_single_fit(monkeypatch):
     monkeypatch.setenv("CLOSE_CALL_MAX_QTY", "20")
     _fake_sign(monkeypatch)
     _ref_px(monkeypatch, "248.50")
-    st = {"close_call_filled": "3", "close_call_closed": "0"}
+    st = {"close_call_filled": "3", "close_call_closed": "0", "close_call_side": "long"}
     offers = [("buy", "3", "249.00", "fit", _MAKER)]   # vừa khít open 3
     out = cc.take_profit("k", _ME, post_fn=lambda *a: True,
                          fetch_fn=lambda **kw: _offers_room(offers), state=st)
@@ -619,7 +619,7 @@ def test_tp_triggered_live_posts_and_persists(monkeypatch):
     monkeypatch.setenv("CLOSE_CALL_MAX_QTY", "20")
     _fake_sign(monkeypatch)
     _ref_px(monkeypatch, "248.50")
-    st = {"close_call_filled": "2", "close_call_closed": "0"}
+    st = {"close_call_filled": "2", "close_call_closed": "0", "close_call_side": "long"}
     sent, saved = [], []
     offers = [("buy", "2", "249.00", "go", _MAKER)]
     out = cc.take_profit("k", _ME,
@@ -636,8 +636,117 @@ def test_tp_triggered_none_available(monkeypatch):
     monkeypatch.setenv("CLOSE_CALL_TP", "248")
     _fake_sign(monkeypatch)
     _ref_px(monkeypatch, "248.50")
-    st = {"close_call_filled": "5", "close_call_closed": "0"}
+    st = {"close_call_filled": "5", "close_call_closed": "0", "close_call_side": "long"}
     offers = [("sell", "2", "248.00", "s1", _MAKER)]   # chỉ có sell -> không bán đóng được
     out = cc.take_profit("k", _ME, post_fn=lambda *a: True,
                          fetch_fn=lambda **kw: _offers_room(offers), state=st)
     assert out["outcome"] == "none_available" and out["triggered"] is True
+
+
+# ============================ EXIT: short-side + stop-loss ============================
+
+def test_sl_price_parse(monkeypatch):
+    monkeypatch.delenv("CLOSE_CALL_SL", raising=False)
+    assert cc.sl_price() is None
+    monkeypatch.setenv("CLOSE_CALL_SL", "215")
+    assert cc.sl_price() == Decimal("215")
+
+
+def test_position_side_from_state_and_env(monkeypatch):
+    assert cc.position_side({"close_call_side": "short"}) == "short"
+    monkeypatch.delenv("CLOSE_CALL_TAKE_SIDE", raising=False)
+    assert cc.position_side({}) is None
+    monkeypatch.setenv("CLOSE_CALL_TAKE_SIDE", "sell")
+    assert cc.position_side({}) == "short"
+    monkeypatch.setenv("CLOSE_CALL_TAKE_SIDE", "buy")
+    assert cc.position_side({}) == "long"
+
+
+def test_exit_triggered_long():
+    assert cc.exit_triggered("long", "248", Decimal("248"), None) == (True, "tp")
+    assert cc.exit_triggered("long", "247.99", Decimal("248"), None) == (False, None)
+    assert cc.exit_triggered("long", "215", None, Decimal("215")) == (True, "sl")
+    assert cc.exit_triggered("long", "216", None, Decimal("215")) == (False, None)
+
+
+def test_exit_triggered_short():
+    # short: TP khi giá GIẢM tới/ dưới tp; SL khi giá TĂNG tới/ trên sl
+    assert cc.exit_triggered("short", "200", Decimal("200"), None) == (True, "tp")
+    assert cc.exit_triggered("short", "200.01", Decimal("200"), None) == (False, None)
+    assert cc.exit_triggered("short", "235", None, Decimal("235")) == (True, "sl")
+    assert cc.exit_triggered("short", "234", None, Decimal("235")) == (False, None)
+
+
+def test_manage_exit_skipped_no_exit(monkeypatch):
+    monkeypatch.delenv("CLOSE_CALL_TP", raising=False)
+    monkeypatch.delenv("CLOSE_CALL_SL", raising=False)
+    out = cc.manage_exit("k", _ME, post_fn=lambda *a: True, fetch_fn=lambda **kw: {"messages": []})
+    assert out["outcome"] == "skipped_no_exit"
+
+
+def test_manage_exit_no_side(monkeypatch):
+    monkeypatch.setenv("CLOSE_CALL_TRADE_ENABLED", "on")
+    monkeypatch.setenv("CLOSE_CALL_TP", "248")
+    monkeypatch.delenv("CLOSE_CALL_TAKE_SIDE", raising=False)
+    out = cc.manage_exit("k", _ME, post_fn=lambda *a: True, fetch_fn=lambda **kw: {"messages": []},
+                         state={"close_call_filled": "5"})
+    assert out["outcome"] == "no_side"
+
+
+def test_short_tp_closes_by_buying(monkeypatch):
+    # SHORT: chốt lời khi giá GIẢM -> đóng bằng MUA (khớp offer maker 'sell', giá THẤP nhất trước)
+    monkeypatch.setenv("CLOSE_CALL_TRADE_ENABLED", "on")
+    monkeypatch.setenv("CLOSE_CALL_TP", "200")
+    monkeypatch.delenv("CLOSE_CALL_TRADE_DRY_RUN", raising=False)
+    monkeypatch.setenv("CLOSE_CALL_MAX_QTY", "20")
+    _fake_sign(monkeypatch)
+    monkeypatch.setattr(cc, "read_reference", lambda: {"ok": True, "ref_px": "199.50",
+                                                       "low": "190.00", "high": "210.00", "n_next": 100})
+    st = {"close_call_filled": "3", "close_call_closed": "0", "close_call_side": "short"}
+    offers = [("sell", "2", "200.00", "s_hi", _MAKER),
+              ("sell", "2", "199.00", "s_lo", _M2),     # thấp hơn -> ưu tiên (mua rẻ)
+              ("buy", "2", "199.00", "b1", _MAKER)]     # ngược -> bỏ
+    out = cc.manage_exit("k", _ME, post_fn=lambda *a: True,
+                         fetch_fn=lambda **kw: _offers_room(offers), state=st)
+    assert out["outcome"] == "dry_run" and out["triggered"] is True and out["kind"] == "tp"
+    assert out["side"] == "short"
+    assert [a["id"] for a in out["accepted"]][0] == "s_lo"    # giá thấp nhất trước
+    assert out["closed"] == "2.00"                           # s_lo(2); s_hi(2)>remaining1 bỏ
+
+
+def test_short_sl_closes_by_buying(monkeypatch):
+    # SHORT: cắt lỗ khi giá TĂNG >= SL -> đóng bằng MUA
+    monkeypatch.setenv("CLOSE_CALL_TRADE_ENABLED", "on")
+    monkeypatch.setenv("CLOSE_CALL_SL", "235")
+    monkeypatch.setenv("CLOSE_CALL_TRADE_DRY_RUN", "off")
+    monkeypatch.setenv("CLOSE_CALL_MAX_QTY", "20")
+    _fake_sign(monkeypatch)
+    monkeypatch.setattr(cc, "read_reference", lambda: {"ok": True, "ref_px": "236.00",
+                                                       "low": "225.00", "high": "248.00", "n_next": 100})
+    st = {"close_call_filled": "2", "close_call_closed": "0", "close_call_side": "short"}
+    sent, saved = [], []
+    offers = [("sell", "2", "235.50", "go", _MAKER)]
+    out = cc.manage_exit("k", _ME,
+                         post_fn=lambda pk, did, text, rm: sent.append(text) or True,
+                         fetch_fn=lambda **kw: _offers_room(offers),
+                         state=st, save=lambda d: saved.append(d))
+    assert out["outcome"] == "closed" and out["kind"] == "sl" and out["closed"] == "2.00"
+    assert '"t":"trade"' in sent[0]
+    assert saved[-1]["close_call_closed"] == "2.00"
+
+
+def test_long_sl_closes_by_selling(monkeypatch):
+    # LONG: cắt lỗ khi giá GIẢM <= SL -> đóng bằng BÁN (khớp offer maker 'buy')
+    monkeypatch.setenv("CLOSE_CALL_TRADE_ENABLED", "on")
+    monkeypatch.setenv("CLOSE_CALL_SL", "215")
+    monkeypatch.delenv("CLOSE_CALL_TRADE_DRY_RUN", raising=False)
+    monkeypatch.setenv("CLOSE_CALL_MAX_QTY", "20")
+    _fake_sign(monkeypatch)
+    monkeypatch.setattr(cc, "read_reference", lambda: {"ok": True, "ref_px": "214.00",
+                                                       "low": "205.00", "high": "225.00", "n_next": 100})
+    st = {"close_call_filled": "2", "close_call_closed": "0", "close_call_side": "long"}
+    offers = [("buy", "2", "214.00", "b1", _MAKER)]
+    out = cc.manage_exit("k", _ME, post_fn=lambda *a: True,
+                         fetch_fn=lambda **kw: _offers_room(offers), state=st)
+    assert out["outcome"] == "dry_run" and out["kind"] == "sl" and out["side"] == "long"
+    assert [a["id"] for a in out["accepted"]] == ["b1"]
