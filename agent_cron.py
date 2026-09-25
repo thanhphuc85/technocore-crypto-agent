@@ -2956,6 +2956,31 @@ def main():
             close_call_status = "error"
             print(f"[close-call] bỏ qua ({str(e)[:100]})")
 
+    # 3a8) (Tùy chọn, GATED riêng) GIAO DỊCH Close Call theo Ý ĐỊNH TƯỜNG MINH. Mặc định TẮT
+    #      (CLOSE_CALL_TRADE_ENABLED) + dry-run mặc định BẬT -> KHÔNG bao giờ tự đặt lệnh thật
+    #      tới khi operator cấu hình CLOSE_CALL_ORDER (maker) / CLOSE_CALL_ACCEPT (taker) và tắt
+    #      dry-run. KHÔNG tự đoán hướng NVDA (cược -EV nếu không có view). Bọc kín, health-guarded.
+    close_call_trade_status = "off"
+    _cct_on = os.environ.get("CLOSE_CALL_TRADE_ENABLED", "").strip().lower() in ("1", "true", "on", "yes")
+    if _cct_on and posts_degraded():
+        close_call_trade_status = "skip-outage"
+        print(f"[close-call-trade] bỏ qua — đường ghi lỗi (post ok={_post_ok_count} fail={_post_fail_count}).")
+    elif _cct_on:
+        try:
+            import flop_close_call
+            parts = []
+            if flop_close_call.order_spec():
+                r = flop_close_call.post_offer(private_key, did, post_fn=post_message)
+                parts.append(f"offer:{r.get('outcome', '?')}")
+            if flop_close_call.accept_id():
+                r = flop_close_call.take_offer(private_key, did, post_fn=post_message,
+                                               fetch_fn=fetch_messages)
+                parts.append(f"take:{r.get('outcome', '?')}")
+            close_call_trade_status = " ".join(parts) if parts else "no-intent"
+        except Exception as e:
+            close_call_trade_status = "error"
+            print(f"[close-call-trade] bỏ qua ({str(e)[:100]})")
+
     # 3b) (Tùy chọn, GATED) Công khai tiến độ MỞ KHÓA MAINNET 3:1 vào KV note `unlock`
     #     để ai cũng audit được (GET /kv/<ns>/unlock). Mặc định TẮT (FLOP_PUBLISH_UNLOCK)
     #     -> agent không đổi hành vi. Bọc kín: lỗi bị nuốt, không làm sập run.
@@ -2991,7 +3016,7 @@ def main():
         f"- kibble: **{kibble_status}**",
         f"- tclk: **{tclk_status}** · complete: **{tclk_done_status}**",
         f"- sonnet: **{sonnet_status}**",
-        f"- close-call: **{close_call_status}**",
+        f"- close-call: **{close_call_status}** · trade: **{close_call_trade_status}**",
         f"- replies: **{replies}** · proactive: **{proactive}**",
         f"- technocore.chat 200s: **{_server_ok_count}**",
     ]
@@ -2999,7 +3024,8 @@ def main():
           f"digest={digest_status} status_feed={status_feed_status} recap={recap_status} kibble={kibble_status} "
           f"kibble_req={kibble_req_status} "
           f"tclk={tclk_status} tclk_done={tclk_done_status} tclk_offer={tclk_offer_status} "
-          f"sonnet={sonnet_status} close_call={close_call_status} replies={replies} "
+          f"sonnet={sonnet_status} close_call={close_call_status} close_call_trade={close_call_trade_status} "
+          f"replies={replies} "
           f"proactive={proactive} server200s={_server_ok_count}")
 
     if _server_ok_count == 0:
