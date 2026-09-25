@@ -2931,6 +2931,31 @@ def main():
             sonnet_status = "error"
             print(f"[sonnet] bỏ qua ({str(e)[:100]})")
 
+    # 3a7) (Tùy chọn, GATED) OWNER cho contest "Close Call" của FLOP Labs
+    #      (technocore-close-call-challenge). Mặc định TẮT (CLOSE_CALL_ENABLED) -> agent
+    #      không đổi hành vi. Khi bật: đăng ký owner 1 LẦN (idempotent qua
+    #      state['close_call_registered']) -> sweep kế cấp 10,000 POLF. CHỈ đăng ký, KHÔNG
+    #      giao dịch. register là POST -> cùng health-guard đường ghi như kibble/sonnet. Bọc kín.
+    close_call_status = "off"
+    _cc_on = os.environ.get("CLOSE_CALL_ENABLED", "").strip().lower() in ("1", "true", "on", "yes")
+    if _cc_on and posts_degraded():
+        close_call_status = "skip-outage"
+        print(f"[close-call] bỏ qua — đường ghi lỗi (post ok={_post_ok_count} fail={_post_fail_count}).")
+    elif _cc_on:
+        try:
+            import flop_close_call
+            if state.get("close_call_registered"):
+                close_call_status = "already"
+            else:
+                r = flop_close_call.register_owner(private_key, did, post_fn=post_message)
+                close_call_status = r.get("outcome", "?")
+                if close_call_status == "registered":
+                    state["close_call_registered"] = True
+                    save_state({"close_call_registered": True})
+        except Exception as e:
+            close_call_status = "error"
+            print(f"[close-call] bỏ qua ({str(e)[:100]})")
+
     # 3b) (Tùy chọn, GATED) Công khai tiến độ MỞ KHÓA MAINNET 3:1 vào KV note `unlock`
     #     để ai cũng audit được (GET /kv/<ns>/unlock). Mặc định TẮT (FLOP_PUBLISH_UNLOCK)
     #     -> agent không đổi hành vi. Bọc kín: lỗi bị nuốt, không làm sập run.
@@ -2966,6 +2991,7 @@ def main():
         f"- kibble: **{kibble_status}**",
         f"- tclk: **{tclk_status}** · complete: **{tclk_done_status}**",
         f"- sonnet: **{sonnet_status}**",
+        f"- close-call: **{close_call_status}**",
         f"- replies: **{replies}** · proactive: **{proactive}**",
         f"- technocore.chat 200s: **{_server_ok_count}**",
     ]
@@ -2973,7 +2999,7 @@ def main():
           f"digest={digest_status} status_feed={status_feed_status} recap={recap_status} kibble={kibble_status} "
           f"kibble_req={kibble_req_status} "
           f"tclk={tclk_status} tclk_done={tclk_done_status} tclk_offer={tclk_offer_status} "
-          f"sonnet={sonnet_status} replies={replies} "
+          f"sonnet={sonnet_status} close_call={close_call_status} replies={replies} "
           f"proactive={proactive} server200s={_server_ok_count}")
 
     if _server_ok_count == 0:
