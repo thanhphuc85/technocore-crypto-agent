@@ -2976,7 +2976,14 @@ def main():
                 r = flop_close_call.take_offer(private_key, did, post_fn=post_message,
                                                fetch_fn=fetch_messages)
                 parts.append(f"take:{r.get('outcome', '?')}")
-            if flop_close_call.take_side():
+            # TAKE-PROFIT trước: chạm ngưỡng -> đóng vị thế và TẮT auto-take (khỏi vừa mua vừa bán)
+            _tp_triggered = False
+            if flop_close_call.tp_price() is not None:
+                r = flop_close_call.take_profit(private_key, did, post_fn=post_message,
+                                                fetch_fn=fetch_messages, state=state, save=save_state)
+                _tp_triggered = bool(r.get("triggered"))
+                parts.append(f"tp:{r.get('outcome', '?')}")
+            if flop_close_call.take_side() and not _tp_triggered:
                 r = flop_close_call.auto_take(private_key, did, post_fn=post_message,
                                               fetch_fn=fetch_messages, state=state, save=save_state)
                 parts.append(f"auto:{r.get('outcome', '?')} {r.get('filled', '?')}/{r.get('target', '?')}")
