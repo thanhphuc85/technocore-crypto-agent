@@ -2976,6 +2976,10 @@ def main():
                 r = flop_close_call.take_offer(private_key, did, post_fn=post_message,
                                                fetch_fn=fetch_messages)
                 parts.append(f"take:{r.get('outcome', '?')}")
+            if flop_close_call.take_side():
+                r = flop_close_call.auto_take(private_key, did, post_fn=post_message,
+                                              fetch_fn=fetch_messages, state=state, save=save_state)
+                parts.append(f"auto:{r.get('outcome', '?')} {r.get('filled', '?')}/{r.get('target', '?')}")
             close_call_trade_status = " ".join(parts) if parts else "no-intent"
         except Exception as e:
             close_call_trade_status = "error"

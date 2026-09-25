@@ -179,6 +179,32 @@ def accept_id() -> str:
     return os.environ.get("CLOSE_CALL_ACCEPT", "").strip()
 
 
+def take_side() -> str:
+    """AUTO-TAKE: hướng operator MUỐN (buy=long / sell=short). Rỗng -> tắt auto-take.
+    KHÔNG mặc định hướng nào (không tự cược)."""
+    s = os.environ.get("CLOSE_CALL_TAKE_SIDE", "").strip().lower()
+    return s if s in ("buy", "sell") else ""
+
+
+def take_target_qty() -> Decimal:
+    """Tổng qty MỤC TIÊU muốn gom qua auto-take. Rỗng/sai -> 0 (không làm gì)."""
+    raw = os.environ.get("CLOSE_CALL_TAKE_QTY", "").strip()
+    try:
+        v = Decimal(raw) if raw else Decimal(0)
+        return v if v > 0 else Decimal(0)
+    except InvalidOperation:
+        return Decimal(0)
+
+
+def take_max_per_run() -> int:
+    """Trần số offer khớp trong MỘT run (chống gom ồ ạt). Mặc định 3."""
+    raw = os.environ.get("CLOSE_CALL_TAKE_MAX_PER_RUN", "").strip()
+    try:
+        return max(1, int(raw)) if raw else 3
+    except ValueError:
+        return 3
+
+
 # --- Chuẩn hoá số/terms (thuần, test được) -----------------------------------------
 
 def _dec2(x) -> str:
@@ -396,9 +422,7 @@ def take_offer(private_key=None, did: str = None, offer_id: str = None, *, post_
     ref = read_reference()
     if ref.get("ok") and not within_limits(terms.get("px"), ref["low"], ref["high"]):
         return {"outcome": "out_of_limits", "reason": f"px {terms.get('px')} ngoài biên hiện tại"}
-    terms_json = canonical_terms(terms)
-    taker_sig = sign_message(private_key, accept_sign_str(terms_json, did))
-    msg = build_trade_msg(terms, found["maker_sig"], did, taker_sig)
+    msg = _accept_offer(private_key, did, found)
     if trade_dry_run():
         log(f"[close-call][DRY] take offer id={offer_id} ({terms.get('side')} {terms.get('qty')}@{terms.get('px')})")
         return {"outcome": "dry_run", "message": msg, "id": offer_id}
@@ -407,6 +431,109 @@ def take_offer(private_key=None, did: str = None, offer_id: str = None, *, post_
         log(f"[close-call] took offer id={offer_id} -> r/{room()}")
         return {"outcome": "posted", "id": offer_id}
     return {"outcome": "post_failed", "reason": "post trả False"}
+
+
+def _accept_offer(private_key, did: str, offer: dict) -> str:
+    """Ký taker_sig cho offer + dựng {"t":"trade"} đủ 2 chữ ký. Dùng chung take_offer/auto_take."""
+    terms = offer["terms"]
+    terms_json = canonical_terms(terms)
+    taker_sig = sign_message(private_key, accept_sign_str(terms_json, did))
+    return build_trade_msg(terms, offer["maker_sig"], did, taker_sig)
+
+
+# --- AUTO-TAKE: gom vị thế theo hướng TƯỜNG MINH bằng cách khớp offer tốt nhất --------
+
+def auto_take(private_key=None, did: str = None, *, post_fn=None, fetch_fn=None,
+              state: dict = None, save=None, log=print) -> dict:
+    """Khớp các offer trên close1 để mở vị thế theo CLOSE_CALL_TAKE_SIDE tới CLOSE_CALL_TAKE_QTY.
+    Hướng do OPERATOR chọn (buy=long/sell=short) — KHÔNG tự đoán. Chọn giá TỐT NHẤT trong biên
+    (mua: px thấp nhất; bán: px cao nhất). Dedup qua state['close_call_taken']; cộng dồn
+    state['close_call_filled']; trần/run CLOSE_CALL_TAKE_MAX_PER_RUN; gated + dry-run mặc định.
+
+    outcome: skipped_disabled|skipped_unconfigured|skipped_no_side|skipped_locked|
+             no_target|filled|dry_run|took|none_available|post_failed
+    """
+    if not trade_enabled():
+        return {"outcome": "skipped_disabled", "reason": "CLOSE_CALL_TRADE_ENABLED tắt"}
+    sender = post_fn or post_message
+    fetcher = fetch_fn or fetch_messages
+    if sender is None or fetcher is None or not (did and private_key):
+        return {"outcome": "skipped_unconfigured", "reason": "thiếu post_fn/fetch/did/private_key"}
+    if _past_lock():
+        return {"outcome": "skipped_locked", "reason": f"đã qua khoá {lock_iso()}"}
+    want = take_side()
+    if not want:
+        return {"outcome": "skipped_no_side", "reason": "CLOSE_CALL_TAKE_SIDE rỗng"}
+    target = take_target_qty()
+    if target <= 0:
+        return {"outcome": "no_target", "reason": "CLOSE_CALL_TAKE_QTY <= 0"}
+    st = state if state is not None else {}
+    taken = list(st.get("close_call_taken", []))
+    try:
+        filled = Decimal(str(st.get("close_call_filled", "0")))
+    except InvalidOperation:
+        filled = Decimal(0)
+    if filled >= target:
+        return {"outcome": "filled", "filled": str(filled), "target": str(target)}
+
+    # để BUY (long) ta khớp offer maker side='sell'; để SELL (short) khớp maker side='buy'
+    maker_side = "sell" if want == "buy" else "buy"
+    ref = read_reference()
+    data = fetcher(since=0, room=room())
+    cands = []
+    seen_ids = set(taken)
+    for m in reversed((data or {}).get("messages", [])):
+        off = parse_offer(m.get("text", ""))
+        if not off:
+            continue
+        t = off["terms"]
+        tid = t.get("id")
+        if (t.get("side") != maker_side or tid in seen_ids or t.get("maker") == did
+                or t.get("taker") not in ("any", did)):
+            continue
+        try:
+            q, p = Decimal(_dec2(t.get("qty"))), Decimal(_dec2(t.get("px")))
+        except (ValueError, TypeError):
+            continue
+        if q < MIN_QTY or q > max_qty():
+            continue
+        if ref.get("ok") and not within_limits(p, ref["low"], ref["high"]):
+            continue
+        seen_ids.add(tid)
+        cands.append((p, q, off))
+    # giá tốt nhất trước: mua -> px thấp; bán -> px cao
+    cands.sort(key=lambda c: c[0], reverse=(want == "sell"))
+
+    accepted, per_run = [], take_max_per_run()
+    dry = trade_dry_run()
+    for p, q, off in cands:
+        if filled >= target or len(accepted) >= per_run:
+            break
+        if q > target - filled:            # không vượt mục tiêu (offer settle nguyên qty)
+            continue
+        tid = off["terms"]["id"]
+        if dry:
+            log(f"[close-call][DRY] auto-take {want}: offer id={tid} {q}@{p}")
+            accepted.append({"id": tid, "qty": str(q), "px": str(p)})
+            filled += q
+            continue
+        msg = _accept_offer(private_key, did, off)
+        if sender(private_key, did, msg, room()):
+            taken.append(tid)
+            filled += q
+            accepted.append({"id": tid, "qty": str(q), "px": str(p)})
+            if save:
+                save({"close_call_taken": taken, "close_call_filled": str(filled)})
+            log(f"[close-call] auto-take {want}: took id={tid} {q}@{p} (filled {filled}/{target})")
+        else:
+            return {"outcome": "post_failed", "reason": f"post offer id={tid} thất bại",
+                    "accepted": accepted, "filled": str(filled)}
+
+    if not accepted:
+        return {"outcome": "none_available", "reason": f"không có offer {maker_side} hợp lệ trong biên",
+                "filled": str(filled), "target": str(target)}
+    return {"outcome": "dry_run" if dry else "took", "accepted": accepted,
+            "filled": str(filled), "target": str(target)}
 
 
 # --- Chạy thử offline (KHÔNG gửi) --------------------------------------------------

@@ -375,3 +375,163 @@ def test_take_offer_posts_live(monkeypatch):
                         fetch_fn=lambda **kw: _offer_room(terms))
     assert out["outcome"] == "posted"
     assert '"t":"trade"' in sent["text"] and sent["room"] == "close1"
+
+
+# ============================ AUTO-TAKE ============================
+
+def _offers_room(offers):
+    """offers: list of (side, qty, px, id, maker). Trả messages dict như fetch_messages."""
+    msgs = []
+    for side, qty, px, tid, maker in offers:
+        terms = cc.build_terms(maker, side, qty, px, 500, tid=tid)
+        msgs.append({"text": cc.build_offer_msg(terms, "MSIG_" + tid)})
+    return {"messages": msgs}
+
+
+_M2 = "did:key:z6MkMakerTwo000000000000000000000000000000000"
+_ME = "did:key:z6MkMeTaker00000000000000000000000000000000000"
+
+
+def _ref_ok(monkeypatch):
+    monkeypatch.setattr(cc, "read_reference", lambda: {"ok": True, "ref_px": "224.50",
+                                                       "low": "210.00", "high": "240.00", "n_next": 100})
+
+
+def test_take_side_parse(monkeypatch):
+    monkeypatch.delenv("CLOSE_CALL_TAKE_SIDE", raising=False)
+    assert cc.take_side() == ""
+    monkeypatch.setenv("CLOSE_CALL_TAKE_SIDE", "BUY")
+    assert cc.take_side() == "buy"
+    monkeypatch.setenv("CLOSE_CALL_TAKE_SIDE", "junk")
+    assert cc.take_side() == ""
+
+
+def test_take_target_and_per_run(monkeypatch):
+    monkeypatch.delenv("CLOSE_CALL_TAKE_QTY", raising=False)
+    assert cc.take_target_qty() == Decimal(0)
+    monkeypatch.setenv("CLOSE_CALL_TAKE_QTY", "5")
+    assert cc.take_target_qty() == Decimal(5)
+    monkeypatch.delenv("CLOSE_CALL_TAKE_MAX_PER_RUN", raising=False)
+    assert cc.take_max_per_run() == 3
+    monkeypatch.setenv("CLOSE_CALL_TAKE_MAX_PER_RUN", "10")
+    assert cc.take_max_per_run() == 10
+
+
+def test_auto_take_disabled(monkeypatch):
+    monkeypatch.delenv("CLOSE_CALL_TRADE_ENABLED", raising=False)
+    out = cc.auto_take("k", _ME, post_fn=lambda *a: True, fetch_fn=lambda **kw: {"messages": []})
+    assert out["outcome"] == "skipped_disabled"
+
+
+def test_auto_take_no_side(monkeypatch):
+    monkeypatch.setenv("CLOSE_CALL_TRADE_ENABLED", "on")
+    monkeypatch.setenv("CLOSE_CALL_LOCK", "2099-01-01T00:00:00Z")
+    monkeypatch.delenv("CLOSE_CALL_TAKE_SIDE", raising=False)
+    out = cc.auto_take("k", _ME, post_fn=lambda *a: True, fetch_fn=lambda **kw: {"messages": []})
+    assert out["outcome"] == "skipped_no_side"
+
+
+def test_auto_take_no_target(monkeypatch):
+    monkeypatch.setenv("CLOSE_CALL_TRADE_ENABLED", "on")
+    monkeypatch.setenv("CLOSE_CALL_LOCK", "2099-01-01T00:00:00Z")
+    monkeypatch.setenv("CLOSE_CALL_TAKE_SIDE", "buy")
+    monkeypatch.delenv("CLOSE_CALL_TAKE_QTY", raising=False)
+    out = cc.auto_take("k", _ME, post_fn=lambda *a: True, fetch_fn=lambda **kw: {"messages": []})
+    assert out["outcome"] == "no_target"
+
+
+def test_auto_take_already_filled(monkeypatch):
+    monkeypatch.setenv("CLOSE_CALL_TRADE_ENABLED", "on")
+    monkeypatch.setenv("CLOSE_CALL_LOCK", "2099-01-01T00:00:00Z")
+    monkeypatch.setenv("CLOSE_CALL_TAKE_SIDE", "buy")
+    monkeypatch.setenv("CLOSE_CALL_TAKE_QTY", "5")
+    st = {"close_call_filled": "5"}
+    out = cc.auto_take("k", _ME, post_fn=lambda *a: True, fetch_fn=lambda **kw: {"messages": []}, state=st)
+    assert out["outcome"] == "filled"
+
+
+def test_auto_take_dry_picks_best_and_caps(monkeypatch):
+    monkeypatch.setenv("CLOSE_CALL_TRADE_ENABLED", "on")
+    monkeypatch.setenv("CLOSE_CALL_LOCK", "2099-01-01T00:00:00Z")
+    monkeypatch.setenv("CLOSE_CALL_TAKE_SIDE", "buy")     # long -> khớp offer 'sell'
+    monkeypatch.setenv("CLOSE_CALL_TAKE_QTY", "5")
+    monkeypatch.setenv("CLOSE_CALL_MAX_QTY", "5")
+    monkeypatch.delenv("CLOSE_CALL_TRADE_DRY_RUN", raising=False)   # dry mặc định
+    _fake_sign(monkeypatch)
+    _ref_ok(monkeypatch)
+    offers = [
+        ("sell", "2", "225.00", "s1", _MAKER),   # trong biên
+        ("sell", "2", "223.00", "s2", _M2),      # rẻ hơn -> ưu tiên
+        ("buy", "2", "224.00", "b1", _MAKER),    # ngược hướng -> bỏ
+        ("sell", "9", "223.50", "big", _M2),     # qty > max_qty(5) -> bỏ
+    ]
+    out = cc.auto_take("k", _ME, post_fn=lambda *a: True,
+                       fetch_fn=lambda **kw: _offers_room(offers), state={})
+    assert out["outcome"] == "dry_run"
+    ids = [a["id"] for a in out["accepted"]]
+    assert ids[0] == "s2"                      # giá tốt nhất (thấp nhất) trước
+    assert set(ids) == {"s2", "s1"}            # gom đúng 2+2 = 4 (<=5)
+    assert out["filled"] == "4.00"
+
+
+def test_auto_take_no_overshoot(monkeypatch):
+    monkeypatch.setenv("CLOSE_CALL_TRADE_ENABLED", "on")
+    monkeypatch.setenv("CLOSE_CALL_LOCK", "2099-01-01T00:00:00Z")
+    monkeypatch.setenv("CLOSE_CALL_TAKE_SIDE", "buy")
+    monkeypatch.setenv("CLOSE_CALL_TAKE_QTY", "3")
+    monkeypatch.setenv("CLOSE_CALL_MAX_QTY", "5")
+    _fake_sign(monkeypatch)
+    _ref_ok(monkeypatch)
+    offers = [("sell", "5", "223.00", "big", _MAKER),   # 5 > remaining 3 -> bỏ
+              ("sell", "3", "224.00", "fit", _M2)]      # vừa khít 3
+    out = cc.auto_take("k", _ME, post_fn=lambda *a: True,
+                       fetch_fn=lambda **kw: _offers_room(offers), state={})
+    assert [a["id"] for a in out["accepted"]] == ["fit"]
+    assert out["filled"] == "3.00"
+
+
+def test_auto_take_live_posts_and_persists(monkeypatch):
+    monkeypatch.setenv("CLOSE_CALL_TRADE_ENABLED", "on")
+    monkeypatch.setenv("CLOSE_CALL_LOCK", "2099-01-01T00:00:00Z")
+    monkeypatch.setenv("CLOSE_CALL_TAKE_SIDE", "buy")
+    monkeypatch.setenv("CLOSE_CALL_TAKE_QTY", "2")
+    monkeypatch.setenv("CLOSE_CALL_TRADE_DRY_RUN", "off")
+    _fake_sign(monkeypatch)
+    _ref_ok(monkeypatch)
+    sent, saved = [], []
+    offers = [("sell", "2", "224.00", "go", _MAKER)]
+    out = cc.auto_take("k", _ME,
+                       post_fn=lambda pk, did, text, rm: sent.append(text) or True,
+                       fetch_fn=lambda **kw: _offers_room(offers),
+                       state={}, save=lambda d: saved.append(d))
+    assert out["outcome"] == "took" and out["filled"] == "2.00"
+    assert '"t":"trade"' in sent[0]
+    assert saved and saved[-1]["close_call_filled"] == "2.00" and "go" in saved[-1]["close_call_taken"]
+
+
+def test_auto_take_none_available(monkeypatch):
+    monkeypatch.setenv("CLOSE_CALL_TRADE_ENABLED", "on")
+    monkeypatch.setenv("CLOSE_CALL_LOCK", "2099-01-01T00:00:00Z")
+    monkeypatch.setenv("CLOSE_CALL_TAKE_SIDE", "buy")
+    monkeypatch.setenv("CLOSE_CALL_TAKE_QTY", "5")
+    _fake_sign(monkeypatch)
+    _ref_ok(monkeypatch)
+    offers = [("buy", "2", "224.00", "b1", _MAKER)]   # chỉ có offer cùng hướng -> không khớp
+    out = cc.auto_take("k", _ME, post_fn=lambda *a: True,
+                       fetch_fn=lambda **kw: _offers_room(offers), state={})
+    assert out["outcome"] == "none_available"
+
+
+def test_auto_take_skips_self_and_dedup(monkeypatch):
+    monkeypatch.setenv("CLOSE_CALL_TRADE_ENABLED", "on")
+    monkeypatch.setenv("CLOSE_CALL_LOCK", "2099-01-01T00:00:00Z")
+    monkeypatch.setenv("CLOSE_CALL_TAKE_SIDE", "buy")
+    monkeypatch.setenv("CLOSE_CALL_TAKE_QTY", "5")
+    _fake_sign(monkeypatch)
+    _ref_ok(monkeypatch)
+    offers = [("sell", "2", "224.00", "mine", _ME),      # của chính mình -> bỏ
+              ("sell", "2", "223.00", "done", _MAKER)]   # đã nằm trong taken -> bỏ
+    st = {"close_call_taken": ["done"], "close_call_filled": "0"}
+    out = cc.auto_take("k", _ME, post_fn=lambda *a: True,
+                       fetch_fn=lambda **kw: _offers_room(offers), state=st)
+    assert out["outcome"] == "none_available"
