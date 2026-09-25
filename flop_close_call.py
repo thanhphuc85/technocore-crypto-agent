@@ -205,6 +205,19 @@ def take_max_per_run() -> int:
         return 3
 
 
+def tp_price():
+    """TAKE-PROFIT: ngưỡng giá reference để CHỐT toàn bộ vị thế (bán đóng long / mua đóng short).
+    Rỗng/sai -> None (tắt). Đây là NGƯỠNG của operator, không phải dự báo."""
+    raw = os.environ.get("CLOSE_CALL_TP", "").strip()
+    if not raw:
+        return None
+    try:
+        v = Decimal(raw)
+        return v if v > 0 else None
+    except InvalidOperation:
+        return None
+
+
 # --- Chuẩn hoá số/terms (thuần, test được) -----------------------------------------
 
 def _dec2(x) -> str:
@@ -534,6 +547,102 @@ def auto_take(private_key=None, did: str = None, *, post_fn=None, fetch_fn=None,
                 "filled": str(filled), "target": str(target)}
     return {"outcome": "dry_run" if dry else "took", "accepted": accepted,
             "filled": str(filled), "target": str(target)}
+
+
+# --- TAKE-PROFIT: chốt toàn bộ vị thế khi reference chạm ngưỡng operator đặt --------
+
+def take_profit(private_key=None, did: str = None, *, post_fn=None, fetch_fn=None,
+                state: dict = None, save=None, log=print) -> dict:
+    """Khi reference px >= CLOSE_CALL_TP, ĐÓNG toàn bộ long đã mở bằng cách BÁN (khớp offer
+    maker 'buy', giá TỐT NHẤT = px cao nhất, trong biên). Đóng qty = filled − closed (đã mở −
+    đã đóng). Bền qua state['close_call_closed'] (+ ids). Gated + dry-run mặc định.
+    Trả kèm 'triggered' để caller TẮT auto-take khi đang ở chế độ chốt (khỏi vừa mua vừa bán).
+
+    outcome: skipped_disabled|skipped_unconfigured|skipped_no_tp|no_position|waiting|
+             none_available|dry_run|closed|post_failed
+    """
+    tp = tp_price()
+    if tp is None:
+        return {"outcome": "skipped_no_tp", "triggered": False}
+    if not trade_enabled():
+        return {"outcome": "skipped_disabled", "triggered": False}
+    sender = post_fn or post_message
+    fetcher = fetch_fn or fetch_messages
+    if sender is None or fetcher is None or not (did and private_key):
+        return {"outcome": "skipped_unconfigured", "triggered": False}
+    st = state if state is not None else {}
+    try:
+        filled = Decimal(str(st.get("close_call_filled", "0")))
+        closed = Decimal(str(st.get("close_call_closed", "0")))
+    except InvalidOperation:
+        filled, closed = Decimal(0), Decimal(0)
+    open_long = filled - closed
+    if open_long <= 0:
+        return {"outcome": "no_position", "triggered": False, "open": str(open_long)}
+    ref = read_reference()
+    if not ref.get("ok"):
+        return {"outcome": "waiting", "triggered": False, "reason": "chưa đọc được reference"}
+    try:
+        ref_px = Decimal(str(ref["ref_px"]))
+    except (InvalidOperation, TypeError):
+        return {"outcome": "waiting", "triggered": False, "reason": "reference px lỗi"}
+    if ref_px < tp:
+        return {"outcome": "waiting", "triggered": False, "px": str(ref_px), "tp": str(tp)}
+
+    # ĐÃ CHẠM NGƯỠNG -> đóng long bằng cách khớp offer maker 'buy' (ta là người BÁN)
+    closed_ids = list(st.get("close_call_closed_ids", []))
+    data = fetcher(since=0, room=room())
+    cands, seen = [], set(closed_ids)
+    for m in reversed((data or {}).get("messages", [])):
+        off = parse_offer(m.get("text", ""))
+        if not off:
+            continue
+        t = off["terms"]
+        tid = t.get("id")
+        if (t.get("side") != "buy" or tid in seen or t.get("maker") == did
+                or t.get("taker") not in ("any", did)):
+            continue
+        try:
+            q, p = Decimal(_dec2(t.get("qty"))), Decimal(_dec2(t.get("px")))
+        except (ValueError, TypeError):
+            continue
+        if q < MIN_QTY or not within_limits(p, ref["low"], ref["high"]):
+            continue
+        seen.add(tid)
+        cands.append((p, q, off))
+    cands.sort(key=lambda c: c[0], reverse=True)   # bán -> px cao nhất trước (tốt cho ta)
+
+    accepted, per_run, dry = [], take_max_per_run(), trade_dry_run()
+    remaining = open_long
+    for p, q, off in cands:
+        if remaining <= 0 or len(accepted) >= per_run:
+            break
+        if q > remaining:                          # không bán quá vị thế (trade settle nguyên qty)
+            continue
+        tid = off["terms"]["id"]
+        if dry:
+            log(f"[close-call][DRY] TP close: sell via buy-offer id={tid} {q}@{p}")
+            accepted.append({"id": tid, "qty": str(q), "px": str(p)})
+            closed += q
+            remaining -= q
+            continue
+        msg = _accept_offer(private_key, did, off)
+        if sender(private_key, did, msg, room()):
+            closed_ids.append(tid)
+            closed += q
+            remaining -= q
+            accepted.append({"id": tid, "qty": str(q), "px": str(p)})
+            if save:
+                save({"close_call_closed": str(closed), "close_call_closed_ids": closed_ids})
+            log(f"[close-call] TP close: sold id={tid} {q}@{p} (closed {closed}/{filled})")
+        else:
+            return {"outcome": "post_failed", "triggered": True, "accepted": accepted,
+                    "closed": str(closed)}
+    if not accepted:
+        return {"outcome": "none_available", "triggered": True,
+                "reason": "chưa có offer 'buy' hợp lệ để bán đóng", "open": str(remaining)}
+    return {"outcome": "dry_run" if dry else "closed", "triggered": True,
+            "accepted": accepted, "closed": str(closed), "open": str(remaining)}
 
 
 # --- Chạy thử offline (KHÔNG gửi) --------------------------------------------------
