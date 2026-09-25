@@ -166,6 +166,14 @@ jobs:
           CLOSE_CALL_ROOM: ${{ vars.CLOSE_CALL_ROOM }}
           CLOSE_CALL_REFEREE_DID: ${{ vars.CLOSE_CALL_REFEREE_DID }}
           CLOSE_CALL_LOCK: ${{ vars.CLOSE_CALL_LOCK }}
+          # GIAO DỊCH Close Call (mặc định TẮT + dry-run BẬT). Đặt CLOSE_CALL_TRADE_ENABLED=on và
+          # CLOSE_CALL_ORDER='side,qty,px,until' (maker) hoặc CLOSE_CALL_ACCEPT=<offer id> (taker);
+          # tắt dry-run bằng CLOSE_CALL_TRADE_DRY_RUN=off khi muốn phát THẬT. Agent KHÔNG tự đoán hướng.
+          CLOSE_CALL_TRADE_ENABLED: ${{ vars.CLOSE_CALL_TRADE_ENABLED }}
+          CLOSE_CALL_TRADE_DRY_RUN: ${{ vars.CLOSE_CALL_TRADE_DRY_RUN }}
+          CLOSE_CALL_ORDER: ${{ vars.CLOSE_CALL_ORDER }}
+          CLOSE_CALL_ACCEPT: ${{ vars.CLOSE_CALL_ACCEPT }}
+          CLOSE_CALL_MAX_QTY: ${{ vars.CLOSE_CALL_MAX_QTY }}
           # Câu hỏi nhập tay khi Run workflow (bỏ qua khi chạy theo cron)
           ASK: ${{ github.event.inputs.ask }}
         run: python agent_cron.py
