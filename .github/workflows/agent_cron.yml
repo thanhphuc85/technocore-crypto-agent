@@ -79,7 +79,9 @@ jobs:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          GROQ_MODEL: ${{ vars.GROQ_MODEL || 'llama-3.3-70b-versatile' }}
+          # Để trống -> tự dò model Groq hợp lệ trên key (Groq hay đổi/deprecate model).
+          # Ghim model cụ thể bằng cách đặt Variable GROQ_MODEL nếu muốn.
+          GROQ_MODEL: ${{ vars.GROQ_MODEL }}
           DEEPSEEK_MODEL: ${{ vars.DEEPSEEK_MODEL || 'deepseek-chat' }}
           # Ghim model đã chạy tốt -> bỏ qua bước tự dò (đổi qua Variable GEMINI_MODEL nếu muốn)
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-flash-lite-latest' }}
