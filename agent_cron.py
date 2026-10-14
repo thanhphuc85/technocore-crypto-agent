@@ -459,6 +459,8 @@ TCLK_RAILS = [r.strip().lower() for r in (
 TCLK_MAX_PER_RUN = int(_env_float("FLOP_TCLK_MAX_PER_RUN", 2))
 TCLK_MIN_CLAIM_WINDOW_MS = int(_env_float("FLOP_TCLK_MIN_CLAIM_WINDOW_MS", 5 * 60 * 1000))
 TCLK_MIN_REFUND_GAP_MS = int(_env_float("FLOP_TCLK_MIN_REFUND_GAP_MS", 5 * 60 * 1000))
+# Trần ký tự cho spec INLINE (context không phải con trỏ KV) — chặn context khổng lồ làm phình prompt.
+TCLK_INLINE_SPEC_MAX = int(_env_float("FLOP_TCLK_INLINE_SPEC_MAX", 2000))
 # VÒNG HOÀN TẤT (reveal=claim) — GATED RIÊNG, dry-run mặc định. Chỉ chạy trên deal đã accept
 # live. reveal chỉ khi payer đã lock + rail xác nhận + làm được việc (guard trong flop_tclk).
 TCLK_COMPLETE_ENABLED = os.environ.get("FLOP_TCLK_COMPLETE_ENABLED", "").strip().lower() in (
@@ -1033,10 +1035,17 @@ def kv_get_ns(ns: str, key: str):
 
 
 def tclk_job_spec(ctx: str):
-    """Đọc job-spec từ context dạng '/kv/<ns>/<key>'. None nếu context sai/không đọc được.
+    """Đọc job-spec từ context. Hai dạng được chấp nhận:
+      1) con trỏ KV '/kv/<ns>/<key>' -> fetch note (payer tốn công post trước).
+      2) spec INLINE: ctx là chính mô tả job -> dùng trực tiếp.
+    None nếu context rỗng/không đọc được. Spec (dù KV hay inline) đều là dữ liệu KHÔNG tin cậy
+    và luôn được bọc bằng isolate_for_llm ở nơi gọi -> inline không mở thêm bề mặt injection.
     Dùng cho cả bộ lọc chỉ-nhận-text (lúc accept) lẫn lúc làm việc (lúc hoàn tất)."""
-    m = re.match(r"^/kv/([^/]+)/([^/]+)$", ctx or "")
-    return kv_get_ns(m.group(1), m.group(2)) if m else None
+    ctx = (ctx or "").strip()
+    m = re.match(r"^/kv/([^/]+)/([^/]+)$", ctx)
+    if m:
+        return kv_get_ns(m.group(1), m.group(2))
+    return ctx[:TCLK_INLINE_SPEC_MAX] or None
 
 
 def tclk_do_work(meta: dict):
