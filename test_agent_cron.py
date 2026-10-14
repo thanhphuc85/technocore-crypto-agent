@@ -963,6 +963,34 @@ def test_provider_chain_pinned_without_key_is_empty(monkeypatch):
     assert ac._provider_chain() == []
 
 
+def test_groq_candidates_auto_orders_preferred_and_drops_non_chat(monkeypatch):
+    monkeypatch.setattr(ac, "GROQ_MODEL", "")
+    live = ["whisper-large-v3", "llama-3.1-8b-instant",
+            "llama-3.3-70b-versatile", "some-new-chat-model"]
+    monkeypatch.setattr(ac, "_groq_list_models",
+                        lambda: [m for m in live
+                                 if not any(h in m for h in ac._GROQ_NON_CHAT)])
+    cands = ac._groq_candidates()
+    assert "whisper-large-v3" not in cands                 # non-chat bị loại
+    assert cands[0] == "llama-3.3-70b-versatile"           # PREFERRED lên trước
+    assert cands.index("llama-3.1-8b-instant") < cands.index("some-new-chat-model")
+    assert "some-new-chat-model" in cands                  # model lạ vẫn giữ cuối
+
+
+def test_groq_candidates_pinned_model_tried_first(monkeypatch):
+    monkeypatch.setattr(ac, "GROQ_MODEL", "pinned-x")
+    cands = ac._groq_candidates()
+    assert cands[0] == "pinned-x"
+    assert "llama-3.3-70b-versatile" in cands              # vẫn có PREFERRED làm fallback
+
+
+def test_groq_candidates_falls_back_to_preferred_when_list_fails(monkeypatch):
+    monkeypatch.setattr(ac, "GROQ_MODEL", "")
+    monkeypatch.setattr(ac, "_groq_list_models",
+                        lambda: (_ for _ in ()).throw(RuntimeError("no key")))
+    assert ac._groq_candidates() == list(ac.GROQ_PREFERRED)
+
+
 def test_provider_reply_falls_back_to_gemini_on_deepseek_error(monkeypatch):
     _keys(monkeypatch, deepseek="dk", gemini="gk")
     monkeypatch.setattr(ac, "_deepseek_reply",

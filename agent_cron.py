@@ -259,7 +259,7 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "").strip()  # để trống -> tự dò model hợp lệ
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "").strip()   # để trống -> tự dò model hợp lệ
 # Endpoint DeepSeek (OpenAI-compatible). Đổi được qua env nếu dùng proxy/gateway riêng.
 DEEPSEEK_BASE_URL = os.environ.get(
     "DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
@@ -274,6 +274,17 @@ GEMINI_PREFERRED = [
     "gemini-2.5-flash", "gemini-2.0-flash", "gemini-flash-latest",
     "gemini-2.5-flash-lite", "gemini-1.5-flash",
 ]
+# Thứ tự ưu tiên khi tự dò model Groq (chỉ dùng model THẬT SỰ có trên key — Groq hay
+# deprecate/đổi tên model nên không ghim cứng, để auto-detect tự lành).
+GROQ_PREFERRED = [
+    "llama-3.3-70b-versatile", "llama-3.1-8b-instant",
+    "openai/gpt-oss-120b", "openai/gpt-oss-20b",
+    "moonshotai/kimi-k2-instruct", "qwen/qwen3-32b",
+    "deepseek-r1-distill-llama-70b", "gemma2-9b-it",
+    "llama3-70b-8192", "llama3-8b-8192",
+]
+# Model KHÔNG phải chat (bỏ khi quét danh sách live để tránh thử nhầm TTS/ASR/guard/embed).
+_GROQ_NON_CHAT = ("whisper", "tts", "guard", "embed", "distil")
 LLM_MAX_CHARS = 220             # giới hạn độ dài câu trả lời LLM
 
 # --- (A1) Daily AI Market Digest — nội dung CÔNG KHAI hữu ích do AI sinh (grounded).
@@ -1463,12 +1474,86 @@ def _deepseek_reply(user_text: str, system: str, temperature: float,
         DEEPSEEK_API_KEY, DEEPSEEK_MODEL, user_text, system, temperature, max_tokens)
 
 
-def _groq_reply(user_text: str, system: str, temperature: float,
-                max_tokens: int = 120) -> str:
+_groq_model_cache = None
+
+
+def _groq_list_models():
+    """Model chat đang hoạt động trên key Groq hiện tại (OpenAI-compatible /models).
+    Lọc bỏ model không-chat (whisper/tts/guard/embed) để không thử nhầm."""
+    r = requests.get(
+        f"{GROQ_BASE_URL}/models",
+        headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+        timeout=15,
+    )
+    r.raise_for_status()
+    out = []
+    for m in r.json().get("data", []):
+        mid = m.get("id", "")
+        if not mid or m.get("active") is False:
+            continue
+        if any(h in mid.lower() for h in _GROQ_NON_CHAT):
+            continue
+        out.append(mid)
+    return out
+
+
+def _groq_candidates():
+    """Danh sách model Groq để thử lần lượt, xếp theo độ ưu tiên."""
+    if GROQ_MODEL:                       # user ép model cụ thể -> thử trước, NHƯNG
+        # vẫn xếp GROQ_PREFERRED phía sau làm fallback nếu model ghim fail.
+        return [GROQ_MODEL] + [p for p in GROQ_PREFERRED if p != GROQ_MODEL]
+    try:
+        models = _groq_list_models()
+    except Exception as e:
+        print(f"[llm:groq] list models failed | {e}")
+        return list(GROQ_PREFERRED)      # đoán khi không list được
+    print(f"[llm:groq] available ({len(models)}): {', '.join(models[:12])}"
+          + (" ..." if len(models) > 12 else ""))
+    ordered = [p for p in GROQ_PREFERRED if p in models]
+    ordered += [m for m in models if m not in ordered]
+    return ordered or list(GROQ_PREFERRED)
+
+
+def _groq_call(model: str, user_text: str, system: str, temperature: float,
+               max_tokens: int = 120) -> str:
     """Groq dùng chung schema OpenAI (chat/completions + Bearer)."""
     return _openai_compatible_reply(
         f"{GROQ_BASE_URL}/chat/completions",
-        GROQ_API_KEY, GROQ_MODEL, user_text, system, temperature, max_tokens)
+        GROQ_API_KEY, model, user_text, system, temperature, max_tokens)
+
+
+def _groq_reply(user_text: str, system: str, temperature: float,
+                max_tokens: int = 120) -> str:
+    """Thử model đã cache trước (nhanh, khỏi list lại); FAIL thì LÙI về full danh sách ưu
+    tiên và thử lần lượt — tự lành khi Groq deprecate/đổi tên model (giống _gemini_reply)."""
+    global _groq_model_cache
+    last_err = None
+    tried = set()
+
+    # 1) Model đã cache ở lần gọi trước: thử ngay, không cần gọi list models.
+    if _groq_model_cache:
+        try:
+            return _groq_call(_groq_model_cache, user_text, system, temperature, max_tokens)
+        except Exception as e:
+            last_err = e
+            print(f"[llm:groq] cached {_groq_model_cache} -> {str(e)[:80]}, fallback")
+            tried.add(_groq_model_cache)
+            _groq_model_cache = None
+
+    # 2) Lùi về danh sách ưu tiên (áp dụng cả khi user ghim GROQ_MODEL nhưng nó fail).
+    for model in _groq_candidates():
+        if model in tried:
+            continue
+        try:
+            text = _groq_call(model, user_text, system, temperature, max_tokens)
+            print(f"[llm:groq] model = {model}")
+            _groq_model_cache = model
+            return text
+        except Exception as e:
+            last_err = e
+            print(f"[llm:groq] {model} -> {str(e)[:80]}")
+            tried.add(model)
+    raise last_err or RuntimeError("no groq model available")
 
 
 def _openai_compatible_reply(url: str, api_key: str, model: str, user_text: str,
