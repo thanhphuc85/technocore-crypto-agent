@@ -248,21 +248,27 @@ PROACTIVE_DENY_DIDS = {d.strip() for d in os.environ.get(
 GREET_MAX_DIDS = 300           # trần số DID đã-chào lưu trong state (chống phình)
 
 # --- LLM (tùy chọn) — làm câu trả lời tự do "thông minh" hơn ---
-# LLM_PROVIDER: auto | deepseek | gemini | openai | none. "auto" tự chọn theo key đang
-# có, THEO THỨ TỰ ƯU TIÊN: DeepSeek (chính) -> Gemini (phụ) -> OpenAI. Provider chính lỗi
-# lúc chạy -> LÙI sang provider kế tiếp còn key (xem _provider_chain / _provider_reply).
+# LLM_PROVIDER: auto | groq | gemini | deepseek | openai | none. "auto" tự chọn theo key
+# đang có, THEO THỨ TỰ ƯU TIÊN: Groq (chính) -> Gemini (phụ) -> DeepSeek -> OpenAI. Provider
+# chính lỗi lúc chạy -> LÙI sang provider kế tiếp còn key (xem _provider_chain / _provider_reply).
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "auto").lower()
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "").strip()
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "").strip()  # để trống -> tự dò model hợp lệ
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 # Endpoint DeepSeek (OpenAI-compatible). Đổi được qua env nếu dùng proxy/gateway riêng.
 DEEPSEEK_BASE_URL = os.environ.get(
     "DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
+# Endpoint Groq (OpenAI-compatible). Đổi được qua env nếu dùng proxy/gateway riêng.
+GROQ_BASE_URL = os.environ.get(
+    "GROQ_BASE_URL", "https://api.groq.com/openai/v1").rstrip("/")
 # Thứ tự ưu tiên khi tự chọn provider ở chế độ auto (chỉ giữ provider có key).
-LLM_PROVIDER_ORDER = ["deepseek", "gemini", "openai"]
+# Groq đứng chính (free tier nhanh); Gemini phụ ổn định; DeepSeek sau (hay 402 khi hết credit).
+LLM_PROVIDER_ORDER = ["groq", "gemini", "deepseek", "openai"]
 # Thứ tự ưu tiên khi tự chọn model Gemini (chỉ dùng model thật sự có trên key)
 GEMINI_PREFERRED = [
     "gemini-2.5-flash", "gemini-2.0-flash", "gemini-flash-latest",
@@ -1292,6 +1298,7 @@ def is_addressed(text: str, my_did: str, my_nick: str) -> bool:
 
 def _provider_has_key(provider: str) -> bool:
     return {
+        "groq": bool(GROQ_API_KEY),
         "deepseek": bool(DEEPSEEK_API_KEY),
         "gemini": bool(GEMINI_API_KEY),
         "openai": bool(OPENAI_API_KEY),
@@ -1302,7 +1309,7 @@ def _provider_chain():
     """Danh sách provider để thử LẦN LƯỢT (chính -> phụ), chỉ giữ provider còn key.
     - LLM_PROVIDER=none            -> [] (tắt LLM)
     - LLM_PROVIDER=<provider>      -> chỉ provider đó (không fallback), nếu có key
-    - LLM_PROVIDER=auto (mặc định) -> DeepSeek -> Gemini -> OpenAI, lọc theo key có sẵn.
+    - LLM_PROVIDER=auto (mặc định) -> Groq -> Gemini -> DeepSeek -> OpenAI, lọc theo key có sẵn.
     Provider đầu danh sách = 'chính'; các provider sau = fallback khi provider trước lỗi."""
     if LLM_PROVIDER == "none":
         return []
@@ -1323,6 +1330,8 @@ def _active_provider():
 def _one_reply(provider: str, user_text: str, system: str, temperature: float,
                max_tokens: int = 120) -> str:
     """Gọi ĐÚNG một provider. Ném lỗi lên trên để _provider_reply xử lý fallback."""
+    if provider == "groq":
+        return _groq_reply(user_text, system, temperature, max_tokens)
     if provider == "deepseek":
         return _deepseek_reply(user_text, system, temperature, max_tokens)
     if provider == "gemini":
@@ -1333,7 +1342,7 @@ def _one_reply(provider: str, user_text: str, system: str, temperature: float,
 
 
 def _provider_reply(user_text: str, system: str, temperature: float, max_tokens: int = 120):
-    """Thử provider theo thứ tự ưu tiên (DeepSeek chính -> Gemini phụ -> OpenAI); provider
+    """Thử provider theo thứ tự ưu tiên (Groq chính -> Gemini phụ -> DeepSeek -> OpenAI); provider
     lỗi -> LÙI sang provider kế còn key. Trả (text, provider_đã_dùng). Ném lỗi cuối cùng
     nếu MỌI provider đều fail; RuntimeError nếu không có provider nào (caller tự chặn trước).
     `max_tokens` = ngân sách token đầu ra: mặc định 120 (reply lobby ngắn); việc kibble/tclk
@@ -1452,6 +1461,14 @@ def _deepseek_reply(user_text: str, system: str, temperature: float,
     return _openai_compatible_reply(
         f"{DEEPSEEK_BASE_URL}/chat/completions",
         DEEPSEEK_API_KEY, DEEPSEEK_MODEL, user_text, system, temperature, max_tokens)
+
+
+def _groq_reply(user_text: str, system: str, temperature: float,
+                max_tokens: int = 120) -> str:
+    """Groq dùng chung schema OpenAI (chat/completions + Bearer)."""
+    return _openai_compatible_reply(
+        f"{GROQ_BASE_URL}/chat/completions",
+        GROQ_API_KEY, GROQ_MODEL, user_text, system, temperature, max_tokens)
 
 
 def _openai_compatible_reply(url: str, api_key: str, model: str, user_text: str,

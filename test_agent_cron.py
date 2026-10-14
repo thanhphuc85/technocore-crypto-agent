@@ -921,17 +921,24 @@ def test_check_price_alert_unchanged_when_explain_off(monkeypatch):
 
 
 # --- LLM provider chain: DeepSeek chính -> Gemini phụ -> OpenAI --------------------
-def _keys(monkeypatch, deepseek="", gemini="", openai="", mode="auto"):
+def _keys(monkeypatch, groq="", deepseek="", gemini="", openai="", mode="auto"):
+    monkeypatch.setattr(ac, "GROQ_API_KEY", groq)
     monkeypatch.setattr(ac, "DEEPSEEK_API_KEY", deepseek)
     monkeypatch.setattr(ac, "GEMINI_API_KEY", gemini)
     monkeypatch.setattr(ac, "OPENAI_API_KEY", openai)
     monkeypatch.setattr(ac, "LLM_PROVIDER", mode)
 
 
-def test_provider_chain_auto_prefers_deepseek_then_gemini(monkeypatch):
-    _keys(monkeypatch, deepseek="dk", gemini="gk", openai="ok")
-    assert ac._provider_chain() == ["deepseek", "gemini", "openai"]
-    assert ac._active_provider() == "deepseek"
+def test_provider_chain_auto_prefers_groq_then_gemini(monkeypatch):
+    _keys(monkeypatch, groq="qk", deepseek="dk", gemini="gk", openai="ok")
+    assert ac._provider_chain() == ["groq", "gemini", "deepseek", "openai"]
+    assert ac._active_provider() == "groq"
+
+
+def test_provider_chain_auto_without_groq_prefers_gemini(monkeypatch):
+    _keys(monkeypatch, deepseek="dk", gemini="gk", openai="ok")   # không có Groq
+    assert ac._provider_chain() == ["gemini", "deepseek", "openai"]
+    assert ac._active_provider() == "gemini"
 
 
 def test_provider_chain_auto_skips_missing_keys(monkeypatch):
