@@ -1,0 +1,15 @@
+[Unit]
+# Gọi technocore-agent.service mỗi 5 phút — khớp nhịp GitHub Actions (an toàn, không farm).
+# Khi testnet FLOP mở và muốn tăng throughput settled-inference (trong giới hạn faucet +
+# anti-sybil): rút OnUnitActiveSec xuống (vd 60s). Đừng đặt quá dày = tín hiệu bot.
+Description=Run the Technocore agent every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+# Giữ nhịp đều, KHÔNG dồn burst sau downtime (Persistent=false mặc định) để tránh pattern lạ.
+AccuracySec=30s
+Unit=technocore-agent.service
+
+[Install]
+WantedBy=timers.target

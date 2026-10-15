@@ -1,0 +1,52 @@
+[Unit]
+# Technocore agent — MỘT lần chạy (single-pass), gọi định kỳ bởi technocore-agent.timer.
+# Đúng kiến trúc agent_cron.py (chạy 1 vòng rồi thoát), hành vi y hệt GitHub Actions.
+Description=Technocore crypto agent (single pass)
+Documentation=https://github.com/thanhphuc85/technocore-crypto-agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=technocore
+Group=technocore
+
+# Mã nguồn (read-only) ở /opt; state (ghi được) ở /var/lib. Chạy script theo đường tuyệt đối
+# nên Python vẫn nạp được các module cạnh nó, còn file state tương-đối rơi vào WorkingDirectory.
+WorkingDirectory=/var/lib/technocore-agent
+ExecStart=/opt/technocore-agent/.venv/bin/python /opt/technocore-agent/agent_cron.py
+TimeoutStartSec=300
+
+# Secrets + cấu hình: /etc/technocore-agent/env (root:root 0600). KHÔNG commit vào repo.
+EnvironmentFile=/etc/technocore-agent/env
+Environment=PYTHONUTF8=1
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+# Giữ mọi file state trong /var/lib (khớp ReadWritePaths dưới). Agent cũng mirror ledger/cursor
+# lên KV technocore.chat nên vẫn liên tục qua các lần chạy / khi đổi máy.
+Environment=STATE_FILE=/var/lib/technocore-agent/state.json
+Environment=TOKEN_LEDGER_FILE=/var/lib/technocore-agent/token_ledger.json
+Environment=FLOP_PACER_FILE=/var/lib/technocore-agent/flop_pacer.json
+Environment=FLOP_FAUCET_STATE=/var/lib/technocore-agent/flop_faucet.json
+
+# Thư mục state do systemd tạo + cấp quyền cho User ở trên (/var/lib/technocore-agent).
+StateDirectory=technocore-agent
+StateDirectoryMode=0750
+
+# --- Sandbox (vừa đủ, tương thích cryptography/requests) ---
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/technocore-agent
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictSUIDSGID=true
+LockPersonality=true
+# Chặn truy cập metadata cloud (IMDS) — chống SSRF/lộ credential máy ảo.
+IPAddressDeny=169.254.169.254
+
+[Install]
+WantedBy=multi-user.target
