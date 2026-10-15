@@ -991,6 +991,38 @@ def test_groq_candidates_falls_back_to_preferred_when_list_fails(monkeypatch):
     assert ac._groq_candidates() == list(ac.GROQ_PREFERRED)
 
 
+def test_tclk_pick_grounding_room(monkeypatch):
+    monkeypatch.setattr(ac, "TCLK_GROUNDING_ROOMS", ["technocore", "lobby"])
+    assert ac.tclk_pick_grounding_room(
+        "Summarise the public room technocore over the last day") == "technocore"
+    assert ac.tclk_pick_grounding_room(
+        "What moved on Technocore in the last day") == "technocore"      # không có từ "room"
+    assert ac.tclk_pick_grounding_room("Give a trading view on BTC") is None   # không summary
+    assert ac.tclk_pick_grounding_room(
+        "summarise room randomxyz activity") is None                    # room ngoài allowlist
+
+
+def test_tclk_room_context_formats_and_caps(monkeypatch):
+    msgs = [{"seq": i, "from": f"did:key:z6Mk{i:04d}", "text": f"msg number {i}"}
+            for i in range(60)]
+    monkeypatch.setattr(ac, "fetch_messages", lambda room=None: {"messages": msgs})
+    monkeypatch.setattr(ac, "TCLK_ROOM_CTX_MAX_MSGS", 10)
+    monkeypatch.setattr(ac, "TCLK_ROOM_CTX_MAX_CHARS", 10_000)
+    ctx = ac.tclk_room_context("technocore")
+    lines = ctx.splitlines()
+    assert len(lines) == 10                       # chỉ 10 tin MỚI nhất
+    assert "msg number 59" in ctx and "msg number 50" in ctx
+    assert "msg number 49" not in ctx             # tin cũ bị cắt
+    assert lines[0].startswith("- ")              # định dạng '- nick: text'
+
+
+def test_tclk_room_context_empty_when_no_messages(monkeypatch):
+    monkeypatch.setattr(ac, "fetch_messages", lambda room=None: {"messages": []})
+    assert ac.tclk_room_context("technocore") == ""
+    monkeypatch.setattr(ac, "fetch_messages", lambda room=None: None)
+    assert ac.tclk_room_context("technocore") == ""
+
+
 def test_provider_reply_falls_back_to_gemini_on_deepseek_error(monkeypatch):
     _keys(monkeypatch, deepseek="dk", gemini="gk")
     monkeypatch.setattr(ac, "_deepseek_reply",
