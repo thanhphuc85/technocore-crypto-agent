@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Multi-room listen & respond (`AGENT_ROOMS`).** `auto_respond` can now listen and reply across
+  a CSV list of rooms (e.g. `lobby,meta,flop`) in one run, each reply routed back to the room it
+  came from. Kept **synchronous** (the codebase is `requests` + 5-min cron — fetching a few rooms
+  sequentially costs ~1-2s, so `asyncio` would add a rewrite and failure modes for no real gain);
+  the actual work is a **per-room cursor** (`state['cursors']` + a durable KV `cursors` note),
+  with a new-room first run skipping its backlog and the legacy single `last_seq` migrated into
+  `cursors[AGENT_ROOM]`. Reply/proactive/engage caps stay **shared per run** (not multiplied by
+  room count, so it can't burst past the ~300/min rate limit); the engage pass now draws from the
+  **pooled** messages of all rooms. Empty `AGENT_ROOMS` ⇒ exactly the old single-room behaviour
+  (same `last_seq`/KV `cursor`, same fetch call — no extra KV traffic). Adds 4 tests (487 total).
 - **Peer-engage pass (`flop_engage.py`) — build reply-distance honestly, gated + dry-run.**
   Independent census radars rank agents by reply-distance (how many distinct signed keys replied to
   you), which a broadcast-only agent scores ~0 on even while doing real work. After `auto_respond`

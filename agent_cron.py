@@ -98,6 +98,14 @@ def _write_summary(lines) -> None:
 # LƯU Ý QUAN TRỌNG: chỉ trỏ tới room ĐÃ tồn tại trên technocore.chat và CÓ người thật —
 # room riêng trống = 0 điểm originality (còn tệ hơn lobby). Bỏ trống -> giữ "lobby".
 ROOM = os.environ.get("AGENT_ROOM", "").strip() or "lobby"
+# (Đa room) Danh sách room NGHE/PHẢN HỒI đồng thời (CSV, vd "lobby,meta,flop"). RỖNG -> chỉ
+# ROOM (hành vi cũ, không đổi). Mỗi reply đăng về ĐÚNG room nhận tin; cursor lưu RIÊNG từng
+# room (state['cursors'] + KV note 'cursors'). Cap reply/proactive/engage DÙNG CHUNG toàn run
+# (KHÔNG nhân theo số room -> tránh burst giống spam / đập trần rate 300/phút/IP). Đồng bộ
+# (requests, cron-batch) — KHÔNG dùng asyncio: fetch tuần tự vài room chỉ tốn ~1-2s/run, không
+# đáng đổi cả kiến trúc. Chọn room THẬT, đông; KHÔNG rải telemetry đa room (lặp = boilerplate).
+AGENT_ROOMS = list(dict.fromkeys(
+    r.strip() for r in os.environ.get("AGENT_ROOMS", "").split(",") if r.strip()))
 BASE_URL = "https://technocore.chat"
 
 # --- Nhận diện CHỦ SỞ HỮU (agent tham chiếu) -------------------------------------------
@@ -2877,39 +2885,13 @@ def proactive_engage(state, frm, text, now, greeted):
     return None
 
 
-def auto_respond(private_key, did):
-    my_nick = short_nick(did)
-    now = int(time.time())
-    state = load_state()
-    last_seq = state.get("last_seq")
-    # Cursor bền vững qua KV store (dự phòng khi cache GitHub bị xóa)
-    if last_seq is None:
-        kv_cursor = kv_get("cursor")
-        if kv_cursor and kv_cursor.isdigit():
-            last_seq = int(kv_cursor)
-            print(f"[respond] khôi phục cursor từ KV -> {last_seq}")
-
-    data = fetch_messages(since=last_seq)
-    if not data or "messages" not in data:
-        print("[respond] không lấy được tin, bỏ qua vòng này.")
-        return 0, 0
-    new_last = data.get("last_seq", last_seq)
-    messages = data.get("messages", [])
-
-    # Lần chạy đầu (chưa có state): chỉ đặt con trỏ, KHÔNG trả lời cả backlog cũ.
-    if last_seq is None:
-        print(f"[respond] lần đầu — đặt cursor tại seq {new_last}, bỏ qua backlog.")
-        save_state({"last_seq": new_last})
-        kv_set(private_key, did, "cursor", str(new_last))
-        return 0, 0
-
-    replies = 0
-    proactive = 0
-    greeted = state.setdefault("greeted", [])
-    # Cursor chỉ tiến tới tin đã THỰC SỰ xét. Khi hết quota reply mà vẫn còn tin
-    # gọi đích danh chưa trả lời, DỪNG lại tại đó -> lần sau chạy tiếp, không bỏ sót.
+def _respond_room(private_key, did, room, messages, last_seq, state, now, my_nick,
+                  greeted, caps):
+    """Xử lý tin của MỘT room; trả cursor mới cho room đó. Reply/chủ-động đăng về CHÍNH
+    `room` này. `caps` = {'replies','proactive'} DÙNG CHUNG toàn run (trần toàn cục, chống
+    burst đa room). Đây là vòng xử lý CŨ của auto_respond, tách ra để chạy cho từng room."""
     cursor = last_seq
-    for m in sorted(messages, key=lambda x: x.get("seq", 0)):   # xét theo thứ tự seq tăng dần
+    for m in sorted(messages, key=lambda x: x.get("seq", 0)):   # xét theo seq tăng dần
         seq = m.get("seq", 0)
         if seq <= last_seq:
             continue                      # đã xử lý ở lần trước
@@ -2922,12 +2904,12 @@ def auto_respond(private_key, did):
         try:
             if is_addressed(text, did, my_nick):
                 # --- PHẢN HỒI (được gọi đích danh) ---
-                if replies >= MAX_REPLIES:
-                    break                 # HẾT QUOTA: dừng, KHÔNG tiến cursor qua tin chưa trả lời
+                if caps["replies"] >= MAX_REPLIES:
+                    break                 # HẾT QUOTA (toàn run): dừng, KHÔNG tiến cursor qua tin chưa trả lời
                 # CHẶN LOOP: giới hạn số lần đối đáp với cùng 1 peer trong cửa sổ
                 # -> 2 bot không thể ping-pong vô tận (reply luôn @mention người gửi).
                 if is_peer and _peer_count(state, frm, now, PEER_REPLY_WINDOW_H) >= PEER_REPLY_MAX:
-                    print(f"[respond] {short_nick(frm)} đạt trần {PEER_REPLY_MAX}/"
+                    print(f"[respond:{room}] {short_nick(frm)} đạt trần {PEER_REPLY_MAX}/"
                           f"{PEER_REPLY_WINDOW_H}h -> nghỉ (chống loop)")
                 else:
                     sender = short_nick(frm) if is_peer else "friend"
@@ -2936,39 +2918,103 @@ def auto_respond(private_key, did):
                     reply_text = build_reply(sender, text, state=state, sender_id=sender_id)
                     # (#7) Bỏ nếu ĐÃ gửi đúng câu này cho đúng peer này gần đây (echo-loop).
                     if is_dup_out(state, reply_text, now, frm):
-                        print(f"[respond] bỏ đăng trùng tin vừa gửi -> {short_nick(frm)}")
-                    elif post_message(private_key, did, reply_text):
+                        print(f"[respond:{room}] bỏ đăng trùng tin vừa gửi -> {short_nick(frm)}")
+                    elif post_message(private_key, did, reply_text, room=room):
                         note_out(state, reply_text, now, frm)
-                        replies += 1
+                        caps["replies"] += 1
                         if is_peer:
                             _peer_touch(state, frm, now)
                         time.sleep(0.3)
-            elif (PROACTIVE and is_peer and proactive < PROACTIVE_MAX_PER_RUN
+            elif (PROACTIVE and is_peer and caps["proactive"] < PROACTIVE_MAX_PER_RUN
                   and _peer_count(state, frm, now, PEER_REPLY_WINDOW_H) < PEER_REPLY_MAX):
                 # --- CHỦ ĐỘNG (không bị gọi) — chào peer mới / giúp hỏi crypto ---
                 msg = proactive_engage(state, frm, text, now, greeted)
                 # (#7) Chủ động cũng chặn trùng (vd chào/giúp lặp y hệt cùng 1 peer).
                 if msg and is_dup_out(state, msg, now, frm):
-                    print(f"[respond] bỏ chủ động trùng -> {short_nick(frm)}")
-                elif msg and post_message(private_key, did, msg):
+                    print(f"[respond:{room}] bỏ chủ động trùng -> {short_nick(frm)}")
+                elif msg and post_message(private_key, did, msg, room=room):
                     note_out(state, msg, now, frm)
-                    proactive += 1
+                    caps["proactive"] += 1
                     _peer_touch(state, frm, now)
                     time.sleep(0.3)
         except Exception as e:
             # 1 tin lỗi KHÔNG được làm sập run hay kẹt cursor (chống DoS).
-            print(f"[respond] lỗi khi xử lý seq {seq}: {str(e)[:100]}")
+            print(f"[respond:{room}] lỗi khi xử lý seq {seq}: {str(e)[:100]}")
         cursor = seq                      # đã xét xong tin này (kể cả lỗi) -> tiến cursor
+    return cursor
 
-    # (Engage, GATED) Sau khi xử lý xong tin đến: chủ động ĐẶT 1 câu hỏi thật cho MỘT peer độc
-    # lập vừa nói điều có chất -> gợi họ trả lời -> sinh cạnh reply-distance (census). Dùng lại
-    # chính `messages` vừa fetch (không gọi mạng thêm). Loại fleet nhà + cooldown dài = bề rộng,
-    # không ring. Bọc kín: lỗi engage KHÔNG được làm sập vòng auto_respond.
+
+def _load_room_cursors(state, multi):
+    """Cursor RIÊNG từng room. Ưu tiên state['cursors']; cache trống + ĐA ROOM -> KV note
+    'cursors' (JSON). Migrate cursor 1-room cũ (state['last_seq']) -> cursors[ROOM] để không
+    tụt lùi. `multi` False (1 room) -> KHÔNG đụng KV blob (giữ KV cũ chỉ 'cursor')."""
+    cursors = dict(state.get("cursors") or {})
+    if not cursors and multi:
+        raw = kv_get("cursors")
+        if raw:
+            try:
+                for k, v in json.loads(raw).items():
+                    if str(v).lstrip("-").isdigit():
+                        cursors[k] = int(v)
+            except Exception:
+                pass
+    if ROOM not in cursors and state.get("last_seq") is not None:
+        cursors[ROOM] = state["last_seq"]        # kế thừa cursor 1-room cũ
+    return cursors
+
+
+def auto_respond(private_key, did):
+    """Nghe & phản hồi trên MỘT hoặc NHIỀU room (AGENT_ROOMS). Cursor theo từng room; cap
+    reply/proactive/engage dùng chung toàn run. Room CHÍNH (ROOM) fetch KHÔNG kèm room kwarg
+    (giữ hành vi & tương thích cũ); room phụ fetch kèm room. Engage dùng tin gộp mọi room."""
+    my_nick = short_nick(did)
+    now = int(time.time())
+    state = load_state()
+    rooms = AGENT_ROOMS or [ROOM]
+    multi = len(rooms) > 1
+    greeted = state.setdefault("greeted", [])
+    caps = {"replies": 0, "proactive": 0}
+    cursors = _load_room_cursors(state, multi)
+    all_msgs = []
+    any_fetched = False
+
+    for room in rooms:
+        is_primary = (room == ROOM)
+        rc = cursors.get(room)
+        if rc is None and is_primary:            # dự phòng cursor 1-room legacy trên KV
+            kc = kv_get("cursor")
+            if kc and kc.isdigit():
+                rc = int(kc)
+                print(f"[respond:{room}] khôi phục cursor từ KV -> {rc}")
+        # Room CHÍNH: gọi KHÔNG kèm room (giữ default = ROOM, tương thích hành vi/test cũ).
+        data = fetch_messages(since=rc) if is_primary else fetch_messages(since=rc, room=room)
+        if not data or "messages" not in data:
+            print(f"[respond:{room}] không lấy được tin, bỏ qua room này.")
+            continue
+        any_fetched = True
+        msgs = data.get("messages", [])
+        new_last = data.get("last_seq", rc)
+        if rc is None:
+            # Lần đầu room này: chỉ đặt cursor, KHÔNG trả lời backlog cũ (và không đưa vào engage).
+            cursors[room] = new_last
+            print(f"[respond:{room}] lần đầu — đặt cursor tại seq {new_last}, bỏ backlog.")
+            continue
+        all_msgs.extend(msgs)
+        cursors[room] = _respond_room(private_key, did, room, msgs, rc, state, now,
+                                      my_nick, greeted, caps)
+
+    if not any_fetched:
+        print("[respond] không lấy được tin ở room nào, bỏ qua vòng này.")
+        return 0, 0
+
+    # (Engage, GATED) Sau khi xử lý tin đến: chủ động ĐẶT 1 câu hỏi thật cho MỘT peer độc lập
+    # vừa nói điều có chất -> gợi họ trả lời -> sinh cạnh reply-distance (census). Dùng tin GỘP
+    # mọi room (nhiều ứng viên hơn = bề rộng tốt hơn). Loại fleet + cooldown dài = không ring.
     if ENGAGE_ENABLED:
         try:
             import flop_engage
             n = flop_engage.run_engage_pass(
-                messages, my_did=did, deny_dids=PROACTIVE_DENY_DIDS, state=state, now=now,
+                all_msgs, my_did=did, deny_dids=PROACTIVE_DENY_DIDS, state=state, now=now,
                 cooldown_h=ENGAGE_COOLDOWN_H, max_n=ENGAGE_MAX_PER_RUN,
                 min_len=ENGAGE_MIN_MSG_LEN, max_dids=ENGAGE_MAX_DIDS, agent_name=AGENT_NAME,
                 nick_fn=short_nick, question_fn=_engage_question,
@@ -2980,14 +3026,19 @@ def auto_respond(private_key, did):
         except Exception as e:
             print(f"[engage] bỏ qua ({str(e)[:100]})")
 
-    final_cursor = max(cursor or 0, last_seq)
-    save_state({"last_seq": final_cursor, "mem": state.get("mem", {}),
-                "greeted": greeted, "peer_log": state.get("peer_log", {}),
-                "prof": state.get("prof", {}), "recent_out": state.get("recent_out", []),
-                "engaged": state.get("engaged", {})})
-    kv_set(private_key, did, "cursor", str(final_cursor))
-    print(f"[respond] trả lời {replies} tin, chủ động {proactive} | cursor -> {final_cursor}")
-    return replies, proactive
+    # Persist: cursor từng room (state + KV blob) + mirror room CHÍNH ra last_seq/KV 'cursor' cũ.
+    primary_cursor = cursors.get(ROOM)
+    save_state({"last_seq": primary_cursor, "cursors": cursors,
+                "mem": state.get("mem", {}), "greeted": greeted,
+                "peer_log": state.get("peer_log", {}), "prof": state.get("prof", {}),
+                "recent_out": state.get("recent_out", []), "engaged": state.get("engaged", {})})
+    if primary_cursor is not None:
+        kv_set(private_key, did, "cursor", str(primary_cursor))   # tương thích 1-room cũ
+    if multi:
+        kv_set(private_key, did, "cursors", json.dumps(cursors))  # durable đa room (chỉ khi >1 room)
+    print(f"[respond] reply {caps['replies']} · proactive {caps['proactive']} | "
+          f"rooms={len(rooms)} cursors={cursors}")
+    return caps["replies"], caps["proactive"]
 
 
 # --- Contribution manifest (proof of contribution, CÓ KÝ) ---

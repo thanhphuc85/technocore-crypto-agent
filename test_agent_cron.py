@@ -674,6 +674,89 @@ def test_auto_respond_restores_cursor_from_kv_and_skips_old(pk, respond_env):
     assert ac.load_state()["last_seq"] == 51
 
 
+# --- auto_respond: ĐA ROOM (AGENT_ROOMS) -----------------------------------------
+
+def _room_fetch(by_room):
+    """fetch_messages giả, trả data theo room. Room CHÍNH gọi không kèm room -> None -> ROOM."""
+    def fetch(since=None, room=None):
+        return by_room.get(room or ac.ROOM, {"messages": [], "last_seq": since})
+    return fetch
+
+
+def test_auto_respond_multiroom_per_room_cursor_and_routing(pk, respond_env):
+    did = ac.did_of(pk)
+    respond_env.setattr(ac, "ROOM", "lobby")
+    respond_env.setattr(ac, "AGENT_ROOMS", ["lobby", "meta"])
+    ac.save_state({"cursors": {"lobby": 10, "meta": 20}})
+    posted = []
+    respond_env.setattr(ac, "post_message",
+                        lambda pk_, did_, text, room=None: posted.append((text, room)) or True)
+    respond_env.setattr(ac, "fetch_messages", _room_fetch({
+        "lobby": {"messages": [_peer(11, "@bot hi")], "last_seq": 11},
+        "meta":  {"messages": [_peer(21, "@bot yo")], "last_seq": 21},
+    }))
+    r, p = ac.auto_respond(pk, did)
+    assert r == 2                                      # 1 reply mỗi room
+    assert {room for _, room in posted} == {"lobby", "meta"}   # reply về ĐÚNG room nhận tin
+    cur = ac.load_state()["cursors"]
+    assert cur == {"lobby": 11, "meta": 21}            # cursor từng room tiến RIÊNG
+    assert ac.load_state()["last_seq"] == 11           # mirror room chính (lobby)
+
+
+def test_auto_respond_multiroom_shared_reply_cap(pk, respond_env):
+    # Cap MAX_REPLIES dùng CHUNG toàn run, KHÔNG nhân theo số room.
+    did = ac.did_of(pk)
+    respond_env.setattr(ac, "ROOM", "lobby")
+    respond_env.setattr(ac, "AGENT_ROOMS", ["lobby", "meta"])
+    respond_env.setattr(ac, "MAX_REPLIES", 1)
+    ac.save_state({"cursors": {"lobby": 10, "meta": 20}})
+    posted = []
+    respond_env.setattr(ac, "post_message",
+                        lambda pk_, did_, text, room=None: posted.append(room) or True)
+    respond_env.setattr(ac, "fetch_messages", _room_fetch({
+        "lobby": {"messages": [_peer(11, "@bot a")], "last_seq": 11},
+        "meta":  {"messages": [_peer(21, "@bot b")], "last_seq": 21},
+    }))
+    r, p = ac.auto_respond(pk, did)
+    assert r == 1 and len(posted) == 1                 # chỉ 1 reply tổng, dù 2 room có mention
+    # room 'meta' chưa trả lời -> cursor của nó KHÔNG vượt qua tin chưa xử lý (giữ 20)
+    assert ac.load_state()["cursors"]["meta"] == 20
+
+
+def test_auto_respond_new_room_first_run_skips_backlog(pk, respond_env):
+    # Thêm room MỚI (chưa có cursor) -> chỉ đặt cursor, KHÔNG trả lời backlog cũ.
+    did = ac.did_of(pk)
+    respond_env.setattr(ac, "ROOM", "lobby")
+    respond_env.setattr(ac, "AGENT_ROOMS", ["lobby", "meta"])
+    ac.save_state({"cursors": {"lobby": 10}})          # 'meta' chưa từng nghe
+    posted = []
+    respond_env.setattr(ac, "post_message",
+                        lambda pk_, did_, text, room=None: posted.append(room) or True)
+    respond_env.setattr(ac, "fetch_messages", _room_fetch({
+        "lobby": {"messages": [], "last_seq": 10},
+        "meta":  {"messages": [_peer(99, "@bot old backlog")], "last_seq": 99},
+    }))
+    r, p = ac.auto_respond(pk, did)
+    assert r == 0 and posted == []                     # KHÔNG trả lời backlog room mới
+    assert ac.load_state()["cursors"] == {"lobby": 10, "meta": 99}   # chỉ đặt cursor meta
+
+
+def test_auto_respond_multiroom_migrates_legacy_last_seq(pk, respond_env):
+    # Agent 1-room cũ (chỉ có last_seq) bật đa room -> last_seq kế thừa thành cursor ROOM.
+    did = ac.did_of(pk)
+    respond_env.setattr(ac, "ROOM", "lobby")
+    respond_env.setattr(ac, "AGENT_ROOMS", ["lobby", "meta"])
+    ac.save_state({"last_seq": 30})                    # chỉ có cursor 1-room kiểu cũ
+    respond_env.setattr(ac, "fetch_messages", _room_fetch({
+        "lobby": {"messages": [_peer(31, "nothing addressed")], "last_seq": 31},
+        "meta":  {"messages": [], "last_seq": 5},
+    }))
+    ac.auto_respond(pk, did)
+    cur = ac.load_state()["cursors"]
+    assert cur["lobby"] == 31                           # kế thừa từ last_seq=30 rồi tiến tới 31
+    assert cur["meta"] == 5                             # meta lần đầu -> đặt cursor
+
+
 # --- (A1) Daily AI digest & (A2) command insight ---------------------------------
 def _stub_market(monkeypatch, provider="gemini", reply="Risk-on: BTC steady, F&G 55."):
     """Cắm data thị trường + LLM giả (không mạng) để test digest/insight."""
