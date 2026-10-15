@@ -173,6 +173,36 @@ jobs:
           FLOP_ORGANIC_ONLY: ${{ vars.FLOP_ORGANIC_ONLY }}
           FLOP_INFERENCE_COST: ${{ vars.FLOP_INFERENCE_COST }}
           FLOP_MAX_SPENDS_PER_HOUR: ${{ vars.FLOP_MAX_SPENDS_PER_HOUR }}
+          # ── TESTNET EARNING SURFACE (settled-inference = đòn earn agent airdrop). Mặc định
+          #    TẮT/rỗng -> simulation, hành vi không đổi. Chỉ flip khi FLOP mở testnet + công bố
+          #    endpoint. (Trước đây các biến này CHƯA map -> set là no-op; nay đã map.)
+          TESTNET_ENABLED: ${{ vars.TESTNET_ENABLED }}
+          FLOP_TOKEN_SYMBOL: ${{ vars.FLOP_TOKEN_SYMBOL }}
+          FLOP_UNLOCK_RATIO: ${{ vars.FLOP_UNLOCK_RATIO }}
+          FLOP_RPC_URL: ${{ vars.FLOP_RPC_URL }}
+          FLOP_SUBMIT_URL: ${{ vars.FLOP_SUBMIT_URL }}
+          FLOP_MEMPOOL_URL: ${{ vars.FLOP_MEMPOOL_URL }}
+          FLOP_TX_MODE: ${{ vars.FLOP_TX_MODE }}
+          # Spend pacing/budget (van chống-sybil bổ sung; code có mặc định nếu rỗng)
+          FLOP_PACE_JITTER_PCT: ${{ vars.FLOP_PACE_JITTER_PCT }}
+          FLOP_DAILY_BUDGET: ${{ vars.FLOP_DAILY_BUDGET }}
+          FLOP_MAX_PER_RUN: ${{ vars.FLOP_MAX_PER_RUN }}
+          FLOP_MIN_SPEND: ${{ vars.FLOP_MIN_SPEND }}
+          # Session inference (mua compute có settle). FLOP_SESSION_ENABLED=on + MODEL_HASH khi mở.
+          FLOP_SESSION_ENABLED: ${{ vars.FLOP_SESSION_ENABLED }}
+          FLOP_SESSION_MODEL_HASH: ${{ vars.FLOP_SESSION_MODEL_HASH }}
+          FLOP_SESSION_FLOPS: ${{ vars.FLOP_SESSION_FLOPS }}
+          FLOP_SESSION_MAX_LATENCY_MS: ${{ vars.FLOP_SESSION_MAX_LATENCY_MS }}
+          FLOP_SESSION_MAX_PER_RUN: ${{ vars.FLOP_SESSION_MAX_PER_RUN }}
+          # Faucet (xin test token để CÓ số dư mà chi). FLOP_FAUCET_ENABLED=on + URL khi mở.
+          FLOP_FAUCET_ENABLED: ${{ vars.FLOP_FAUCET_ENABLED }}
+          FLOP_FAUCET_URL: ${{ vars.FLOP_FAUCET_URL }}
+          FLOP_FAUCET_AMOUNT: ${{ vars.FLOP_FAUCET_AMOUNT }}
+          FLOP_FAUCET_COOLDOWN_HOURS: ${{ vars.FLOP_FAUCET_COOLDOWN_HOURS }}
+          FLOP_FAUCET_REFILL_BELOW: ${{ vars.FLOP_FAUCET_REFILL_BELOW }}
+          FLOP_FAUCET_DEMAND_ONLY: ${{ vars.FLOP_FAUCET_DEMAND_ONLY }}
+          FLOP_FAUCET_MAX_PER_DAY: ${{ vars.FLOP_FAUCET_MAX_PER_DAY }}
+          FLOP_FAUCET_JITTER_MIN: ${{ vars.FLOP_FAUCET_JITTER_MIN }}
           # VOTER cho contest sonnet của FLOP Labs (mặc định TẮT). Đặt SONNET_VOTER_ENABLED=true
           # -> agent đăng ký voter (contest sonnet-2 mặc định) rồi bỏ phiếu KHI đặt
           # SONNET_BALLOT_ENTRY=<entry_id>. SONNET_CONTEST_ID/SONNET_REFEREE_DID để override.

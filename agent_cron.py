@@ -2439,6 +2439,41 @@ def _engage_question(peer_text: str):
     return text[:ENGAGE_MAX_CHARS]
 
 
+# --- Testnet settled-inference seams (G2/G3): adapter HTTP MẶC ĐỊNH cho FLOP mempool
+#     (đăng session request) và faucet (xin test token). SCAFFOLD: POST payload ĐÃ KÝ rồi
+#     chuẩn hóa tên trường phổ biến. CHỈ chạy khi TESTNET_ENABLED + có URL thật; simulation
+#     KHÔNG bao giờ gọi chúng. Khi FLOP công bố wire-format thật -> sửa ĐÚNG 2 hàm này. ---
+def _mempool_submit_fn(req: dict) -> dict:
+    """Đăng 1 yêu cầu phiên (đã ký trong build_request) lên FLOP mempool; chuẩn hóa về
+    {session_id, miner_did, poui?}. Ném lỗi (để flop_session báo error_submit) nếu HTTP fail."""
+    url = req.get("url")
+    body = req.get("request") or {}
+    r = requests.post(url, json=body,
+                      headers={"User-Agent": UA, "Content-Type": "application/json"}, timeout=20)
+    r.raise_for_status()
+    data = r.json() if r.content else {}
+    if not isinstance(data, dict):
+        data = {}
+    return {
+        "session_id": data.get("session_id") or data.get("sessionId") or body.get("id"),
+        "miner_did": data.get("miner_did") or data.get("minerDid") or data.get("miner"),
+        "poui": data.get("poui") or data.get("PoUI") or data.get("proof"),
+    }
+
+
+def _faucet_claim_fn(req: dict) -> dict:
+    """Claim token testnet: POST payload đã ký tới faucet_url, đọc {amount}. Ném lỗi nếu
+    HTTP fail (flop_faucet.run_faucet_cycle bắt -> error_claim)."""
+    url = req.get("faucet_url")
+    r = requests.post(url, json=req.get("signed") or {},
+                      headers={"User-Agent": UA, "Content-Type": "application/json"}, timeout=20)
+    r.raise_for_status()
+    data = r.json() if r.content else {}
+    if not isinstance(data, dict):
+        data = {}
+    return {"amount": data.get("amount") or data.get("granted") or data.get("value") or req.get("amount")}
+
+
 # --- Giao thức AGENT-TO-AGENT (#5): cho agent khác "gọi API" bằng tin nhắn ---
 # Cú pháp NGẮN, máy đọc được: "@<handle> <verb> [arg]" (KHÔNG có '!'), tối đa verb+1 arg
 # sau khi bỏ mention. Trả 1 DÒNG parse được `ok <verb> ... | src=.. | t=..` (hoặc `err ...`);
@@ -3595,14 +3630,33 @@ def main():
             close_call_trade_status = "error"
             print(f"[close-call-trade] bỏ qua ({str(e)[:100]})")
 
+    # 3a8c) (Tùy chọn, GATED) FAUCET testnet — xin test token để CÓ số dư mà chi vào settled
+    #       inference (nguồn earn agent airdrop). Mặc định TẮT (FLOP_FAUCET_ENABLED) -> không đổi
+    #       hành vi. Cần FLOP_FAUCET_URL thật; thiếu/không submit_fn -> skipped_unconfigured (KHÔNG
+    #       claim đoán mò). Anti-sybil: DEMAND_ONLY/REFILL_BELOW/cooldown+jitter/MAX_PER_DAY (xem
+    #       flop_faucet). Claim thành công -> credit vào ledger. Chạy TRƯỚC session (có token rồi
+    #       mới chi). Bọc kín: lỗi bị nuốt, không làm sập run.
+    faucet_status = "off"
+    if os.environ.get("FLOP_FAUCET_ENABLED", "").strip().lower() in ("1", "true", "on", "yes"):
+        try:
+            import flop_faucet
+            fr = flop_faucet.run_faucet_cycle(claim_fn=_faucet_claim_fn,
+                                              private_key=private_key, did=did)
+            faucet_status = fr.get("outcome", "?")
+            print(f"[faucet] {faucet_status}" + (f" — {fr['reason']}" if fr.get("reason") else ""))
+        except Exception as e:
+            faucet_status = "error"
+            print(f"[faucet] bỏ qua ({str(e)[:100]})")
+
     # 3a9) (Tùy chọn, GATED) MUA PHIÊN INFERENCE từ thợ đào FLOP — đường "spend-to-earn" theo
     #      bản nháp FLOP (post session request -> PoUI -> settle -> tích lũy mở khóa 3:1).
     #      Mặc định TẮT (FLOP_SESSION_ENABLED) -> agent KHÔNG đổi hành vi. Khi bật:
     #        · SIMULATION (TESTNET_ENABLED off): chạy happy-path bằng thợ đào GIẢ (không mạng,
     #          KHÔNG tích mở khóa — đúng: chỉ chi THẬT mới tính). Dùng để kiểm wiring.
-    #        · TESTNET: cần FLOP_MEMPOOL_URL + submit_fn THẬT để đăng mempool — CHƯA có tới khi
-    #          FLOP công bố endpoint -> flop_session trả skipped_unconfigured (KHÔNG bịa thợ đào).
-    #          Chân thanh toán (settle) đi qua token_manager.spend() nên submit_tx tự nạp từ env.
+    #        · TESTNET: submit_fn HTTP mặc định (_mempool_submit_fn) ĐÃ tiêm -> đăng tới
+    #          FLOP_MEMPOOL_URL; thiếu URL -> skipped_unconfigured (KHÔNG đoán mò). Settle đi qua
+    #          spend() (submit_tx tự nạp từ env). Wire-format là SCAFFOLD -> chỉnh _mempool_submit_fn
+    #          + _faucet_claim_fn khi FLOP công bố API thật. FLOP_SESSION_MAX_PER_RUN phiên/run.
     #      Cần FLOP_SESSION_MODEL_HASH (hash trọng số mô hình); thiếu -> skip, KHÔNG bịa hash.
     #      Bọc kín: lỗi bị nuốt, không làm sập run.
     session_status = "off"
@@ -3617,15 +3671,28 @@ def main():
                 import flop_session
                 _sess_flops = int(os.environ.get("FLOP_SESSION_FLOPS", "").strip() or "1000000000")
                 _sess_lat = int(os.environ.get("FLOP_SESSION_MAX_LATENCY_MS", "").strip() or "2000")
-                r = flop_session.maybe_run_session(
-                    _sess_model, _sess_lat, _sess_flops,
-                    private_key=private_key, did=did)
-                session_status = f"{r.get('stage', '-')}/{r.get('outcome', '?')}"
+                # G4: nhiều phiên/run (earn = tuyến tính pro-rata theo spend). Mặc định 1.
+                _sess_max = max(1, int(os.environ.get("FLOP_SESSION_MAX_PER_RUN", "").strip() or "1"))
+                _settled = 0
+                _last = {}
+                for _ in range(_sess_max):
+                    # G2: tiêm submit_fn HTTP mặc định (đăng mempool). Simulation bỏ qua submit_fn
+                    # (dùng thợ đào giả); testnet dùng nó. submit_tx (settle) tự nạp từ env trong spend().
+                    r = flop_session.maybe_run_session(
+                        _sess_model, _sess_lat, _sess_flops,
+                        submit_fn=_mempool_submit_fn,
+                        private_key=private_key, did=did)
+                    _last = r
+                    if r.get("stage") == "settle" and r.get("outcome") in ("spent_onchain", "spent_simulated"):
+                        _settled += 1
+                    else:
+                        break   # off/unconfigured/no_miner/insufficient/error -> KHÔNG spin vòng
+                session_status = f"{_settled}✓ {_last.get('stage', '-')}/{_last.get('outcome', '?')}"
                 extra = ""
-                if r.get("fee"):
-                    extra += f" fee={r['fee']}"
-                if r.get("tx_hash"):
-                    extra += f" tx={str(r['tx_hash'])[:12]}…"
+                if _last.get("fee"):
+                    extra += f" fee={_last['fee']}"
+                if _last.get("tx_hash"):
+                    extra += f" tx={str(_last['tx_hash'])[:12]}…"
                 print(f"[session] {session_status}{extra}")
             except Exception as e:
                 session_status = "error"
@@ -3667,7 +3734,7 @@ def main():
         f"- tclk: **{tclk_status}** · complete: **{tclk_done_status}**",
         f"- sonnet: **{sonnet_status}**",
         f"- close-call: **{close_call_status}** · trade: **{close_call_trade_status}**",
-        f"- session: **{session_status}**",
+        f"- faucet: **{faucet_status}** · session: **{session_status}**",
         f"- replies: **{replies}** · proactive: **{proactive}**",
         f"- technocore.chat 200s: **{_server_ok_count}**",
     ]
@@ -3676,7 +3743,7 @@ def main():
           f"kibble_req={kibble_req_status} "
           f"tclk={tclk_status} tclk_done={tclk_done_status} tclk_offer={tclk_offer_status} "
           f"sonnet={sonnet_status} close_call={close_call_status} close_call_trade={close_call_trade_status} "
-          f"session={session_status} "
+          f"faucet={faucet_status} session={session_status} "
           f"replies={replies} "
           f"proactive={proactive} server200s={_server_ok_count}")
 
