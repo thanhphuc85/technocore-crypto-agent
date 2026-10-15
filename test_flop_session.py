@@ -3,6 +3,8 @@ Test cho flop_session.py — mua suy luận (đường earn airdrop chính, 3:1)
 Sổ cái dùng file tạm (path=). KHÔNG chạm mạng: simulation dùng thợ đào giả; testnet dùng
 submit_fn/submit_tx được tiêm.
 """
+import random as _random
+
 import flop_session as fsess
 import token_manager as tm
 
@@ -96,3 +98,38 @@ def test_maybe_run_session_gated(tmp_path, monkeypatch):
     monkeypatch.setenv("FLOP_SESSION_ENABLED", "true")
     out = fsess.maybe_run_session("a" * 16, 2000, 1000, [], "0.05", path=p)
     assert out["outcome"] == "spent_simulated"
+
+
+# --- Đa dạng hóa request (chống bot/sybil) ---------------------------------------
+def test_vary_request_no_jitter_keeps_base():
+    m, fl, lt, fe = fsess.vary_request(["m1"], 1000, 2000, "0.05", jitter_pct=0)
+    assert m == "m1" and fl == 1000 and lt == 2000 and fe == "0.05"
+
+
+def test_vary_request_empty_models_returns_none():
+    m, _fl, _lt, _fe = fsess.vary_request([], 1000, 2000, "0.05", jitter_pct=20)
+    assert m is None
+
+
+def test_vary_request_rotates_model_from_list():
+    rng = _random.Random(0)
+    picks = {fsess.vary_request(["a", "b", "c"], 1000, 2000, jitter_pct=0, rng=rng)[0]
+             for _ in range(40)}
+    assert picks == {"a", "b", "c"}          # xoay đủ cả list qua nhiều phiên
+
+
+def test_vary_request_jitter_within_bounds():
+    rng = _random.Random(1)
+    for _ in range(60):
+        _m, fl, lt, fe = fsess.vary_request(["m"], 1000, 2000, "0.10", jitter_pct=20, rng=rng)
+        assert 800 <= fl <= 1200             # ±20% quanh 1000
+        assert 1600 <= lt <= 2400            # ±20% quanh 2000
+        assert 0.08 - 1e-9 <= float(fe) <= 0.12 + 1e-9
+        assert fl >= 1 and lt >= 1
+
+
+def test_vary_request_produces_variety():
+    rng = _random.Random(2)
+    flops_set = {fsess.vary_request(["m"], 1000, 2000, "0.10", jitter_pct=20, rng=rng)[1]
+                 for _ in range(20)}
+    assert len(flops_set) > 1                # KHÔNG phải N phiên giống hệt

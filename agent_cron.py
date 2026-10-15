@@ -3661,8 +3661,9 @@ def main():
     #      Bọc kín: lỗi bị nuốt, không làm sập run.
     session_status = "off"
     if os.environ.get("FLOP_SESSION_ENABLED", "").strip().lower() in ("1", "true", "on", "yes"):
-        _sess_model = os.environ.get("FLOP_SESSION_MODEL_HASH", "").strip()
-        if not _sess_model:
+        # Danh sách model_hash (CSV hoặc '|') -> mỗi phiên xoay 1 cái. Thiếu -> skip, KHÔNG bịa.
+        _sess_models = [m.strip() for m in re.split(r"[,|]", os.environ.get("FLOP_SESSION_MODEL_HASH", "")) if m.strip()]
+        if not _sess_models:
             session_status = "skip-unconfigured"
             print("[session] FLOP_SESSION_ENABLED bật nhưng thiếu FLOP_SESSION_MODEL_HASH "
                   "— bỏ qua (không bịa model_hash).")
@@ -3671,15 +3672,23 @@ def main():
                 import flop_session
                 _sess_flops = int(os.environ.get("FLOP_SESSION_FLOPS", "").strip() or "1000000000")
                 _sess_lat = int(os.environ.get("FLOP_SESSION_MAX_LATENCY_MS", "").strip() or "2000")
+                _sess_fee = os.environ.get("FLOP_INFERENCE_COST", "").strip() or None
+                # Đa dạng hóa request (chống bot/sybil): xoay model + jitter ±% flops/latency/fee
+                # quanh nền -> spend trông như DEMAND THẬT, không N request giống hệt. Mặc định 20%,
+                # kẹp 0..50 (0 = tắt jitter). Nền tảng phòng thủ "manufactured activity".
+                _sess_jit = max(0.0, min(50.0, float(os.environ.get("FLOP_SESSION_JITTER_PCT", "").strip() or "20")))
                 # G4: nhiều phiên/run (earn = tuyến tính pro-rata theo spend). Mặc định 1.
                 _sess_max = max(1, int(os.environ.get("FLOP_SESSION_MAX_PER_RUN", "").strip() or "1"))
                 _settled = 0
                 _last = {}
                 for _ in range(_sess_max):
-                    # G2: tiêm submit_fn HTTP mặc định (đăng mempool). Simulation bỏ qua submit_fn
-                    # (dùng thợ đào giả); testnet dùng nó. submit_tx (settle) tự nạp từ env trong spend().
+                    # Mỗi phiên: model xoay + flops/latency/fee jitter -> đa dạng hữu cơ.
+                    _m, _fl, _lt, _fe = flop_session.vary_request(
+                        _sess_models, _sess_flops, _sess_lat, _sess_fee, jitter_pct=_sess_jit)
+                    # G2: submit_fn HTTP mặc định (đăng mempool). Simulation bỏ qua (thợ đào giả);
+                    # testnet dùng nó. submit_tx (settle) tự nạp từ env trong spend().
                     r = flop_session.maybe_run_session(
-                        _sess_model, _sess_lat, _sess_flops,
+                        _m, _lt, _fl, fee=_fe,
                         submit_fn=_mempool_submit_fn,
                         private_key=private_key, did=did)
                     _last = r

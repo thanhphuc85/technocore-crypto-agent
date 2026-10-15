@@ -194,6 +194,9 @@ jobs:
           FLOP_SESSION_FLOPS: ${{ vars.FLOP_SESSION_FLOPS }}
           FLOP_SESSION_MAX_LATENCY_MS: ${{ vars.FLOP_SESSION_MAX_LATENCY_MS }}
           FLOP_SESSION_MAX_PER_RUN: ${{ vars.FLOP_SESSION_MAX_PER_RUN }}
+          # Đa dạng hóa request (chống bot/sybil): jitter ±% flops/latency/fee + xoay model list.
+          # Mặc định 20 (code), kẹp 0..50. MODEL_HASH nhận NHIỀU hash (CSV/'|') để xoay vòng.
+          FLOP_SESSION_JITTER_PCT: ${{ vars.FLOP_SESSION_JITTER_PCT }}
           # Faucet (xin test token để CÓ số dư mà chi). FLOP_FAUCET_ENABLED=on + URL khi mở.
           FLOP_FAUCET_ENABLED: ${{ vars.FLOP_FAUCET_ENABLED }}
           FLOP_FAUCET_URL: ${{ vars.FLOP_FAUCET_URL }}

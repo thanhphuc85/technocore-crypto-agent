@@ -27,6 +27,7 @@ phiên, có commitment + chữ ký thợ đào), KHÔNG kiểm tính đúng mậ
 
 import hashlib
 import os
+import random
 import time
 
 import token_manager as tm
@@ -36,6 +37,40 @@ try:
     from agent_cron import sign_message
 except Exception:  # pragma: no cover
     sign_message = None
+
+
+def vary_request(models, flops, max_latency_ms, fee=None, *, jitter_pct=0.0, rng=None):
+    """ĐA DẠNG HÓA tham số 1 phiên (chống 'manufactured activity' / pattern máy): chọn
+    model_hash NGẪU NHIÊN từ `models` (list — mỗi phiên khác nhau), và JITTER
+    flops/max_latency_ms/fee ±jitter_pct quanh giá trị nền. Spend đa dạng trông như DEMAND
+    THẬT thay vì N request giống hệt (mà census/anti-sybil chấm là boilerplate/low-originality).
+
+    Hàm THUẦN: tiêm `rng` để test tất định; không mạng, không side-effect. Trả
+    (model_hash, flops, max_latency_ms, fee_str|None). `models` rỗng -> model_hash=None (caller
+    tự xử — thiếu model_hash là skip, KHÔNG bịa). jitter_pct<=0 -> giữ nguyên giá trị nền."""
+    rng = rng or random
+    models = [str(m).strip() for m in (models or []) if m and str(m).strip()]
+    model = rng.choice(models) if models else None
+    pct = max(0.0, float(jitter_pct or 0))
+
+    def _jit_int(base, lo=1):
+        base = int(base)
+        if pct <= 0:
+            return base
+        factor = 1.0 + rng.uniform(-pct, pct) / 100.0
+        return max(lo, int(round(base * factor)))
+
+    flops_v = _jit_int(flops)
+    lat_v = _jit_int(max_latency_ms)
+    fee_v = fee
+    if fee is not None and pct > 0:
+        try:
+            base_fee = float(fee)
+            jittered = base_fee * (1.0 + rng.uniform(-pct, pct) / 100.0)
+            fee_v = (f"{max(0.0, jittered):.6f}".rstrip("0").rstrip(".")) or "0"
+        except (TypeError, ValueError):
+            fee_v = fee
+    return model, flops_v, lat_v, fee_v
 
 
 def session_enabled() -> bool:
