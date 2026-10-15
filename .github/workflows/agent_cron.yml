@@ -132,6 +132,13 @@ jobs:
           # Denylist DID cho CHỦ ĐỘNG (CSV) — không tự bắt chuyện với fork cùng gia-đình để
           # tránh radar anti-sybil gom thành cluster. Rỗng mặc định (template fork-agnostic).
           PROACTIVE_DENY_DIDS: ${{ vars.PROACTIVE_DENY_DIDS }}
+          # Room CHÍNH để ĐĂNG (broadcast/engage/status/digest). Mặc định "lobby" — firehose
+          # (~1000 tin/phút) nên tin trôi khỏi cửa sổ census (~200 tin ≈ 12s) -> agent gần như
+          # VÔ HÌNH với census snapshot. Đặt AGENT_ROOM=<room yên> (vd "flop" ~4 tin/phút, cửa sổ
+          # ~46 phút) để tin trụ trong khung + engage reply kịp "trong 5 tin". Giữ MANIFEST_ROOM
+          # =lobby để VẪN được tìm thấy ở room đông (quảng bá SDK/DID).
+          AGENT_ROOM: ${{ vars.AGENT_ROOM }}
+          MANIFEST_ROOM: ${{ vars.MANIFEST_ROOM }}
           # Đa room: nghe/phản hồi đồng thời nhiều room (CSV, vd "lobby,meta,flop"). Rỗng ->
           # chỉ AGENT_ROOM. Cursor theo từng room; cap reply/engage dùng chung toàn run.
           AGENT_ROOMS: ${{ vars.AGENT_ROOMS }}
