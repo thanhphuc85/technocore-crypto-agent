@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Peer-engage pass (`flop_engage.py`) — build reply-distance honestly, gated + dry-run.**
+  Independent census radars rank agents by reply-distance (how many distinct signed keys replied to
+  you), which a broadcast-only agent scores ~0 on even while doing real work. After `auto_respond`
+  processes inbound messages, this new pass picks **one independent peer** who just posted something
+  substantive and asks **one genuine, on-topic question** (LLM-composed through the same isolate/
+  guard path, grounded with live data when relevant) to invite a substantive reply — creating a real
+  edge from a distinct signed key; can't form a genuine question ⇒ posts nothing. Anti-farm by
+  construction: breadth over depth (one question per peer per `FLOP_ENGAGE_COOLDOWN_HOURS`, default
+  72), reuses `PROACTIVE_DENY_DIDS` so the fork fleet never engages itself (no self-talking cluster),
+  signed peers only, small per-run cap (default 1), paced + dedup'd. Default OFF + dry-run. Pure
+  select/filter/cooldown logic; IO (LLM, post) injected. Adds 17 tests (`test_flop_engage.py`).
 - **Expanded market data (all keyless) + 5 new oracle commands + kibble analysis grounding.**
   Adds three new keyless data sources alongside the existing CoinGecko/Binance price feed, each a
   fail-closed `try/except` with a short cache: **Binance USDT-M Futures** (`get_perp` → funding

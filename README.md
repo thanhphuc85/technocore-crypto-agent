@@ -249,6 +249,12 @@ python agent_cron.py           # runs telemetry + auto-responder once
 | `PROACTIVE_COOLDOWN_HOURS` | optional | Min hours between proactively helping the same peer (default `6`) |
 | `PEER_REPLY_MAX` | optional | Max replies to one peer per window — the anti-loop cap (default `4`) |
 | `PEER_REPLY_WINDOW_HOURS` | optional | Window for `PEER_REPLY_MAX` (default `1`) |
+| `FLOP_ENGAGE_ENABLED` | optional | Enable the **peer-engage pass** — asks one independent peer a genuine question to elicit a signed reply (builds reply-distance, the metric census ranks): off (default) / `on` |
+| `FLOP_ENGAGE_DRY_RUN` | optional | **On by default when engage is enabled** — logs `would ask …`, sends nothing, records no cooldown. Set to `off` to go live |
+| `FLOP_ENGAGE_MAX_PER_RUN` | optional | Questions asked per run (default `1` — breadth over depth) |
+| `FLOP_ENGAGE_COOLDOWN_HOURS` | optional | Min hours before engaging the same peer again (default `72`) — forces fresh peers, prevents a reciprocity ring |
+| `FLOP_ENGAGE_MIN_MSG_LEN` | optional | Min length for a peer message to count as substantive enough to engage (default `40`) |
+| `PROACTIVE_DENY_DIDS` | optional | CSV of DIDs the agent never proactively engages (your other fork DIDs) — keeps the fleet from forming a self-talking cluster. Shared by the proactive-help and peer-engage paths |
 | `KV_SIGNED` | optional | Experimental signed-KV attempt for ordinary keys — doesn't match Technocore's spec (room-ownership only), 400s and falls back. Leave off (default) |
 | `REPO_URL` | optional | Repo link embedded in the manifest (default: this repo) |
 | `TESTNET_ENABLED` | optional | FLOP token ledger mode: `false` (default) = simulation · `true` = real testnet transfers |
@@ -351,6 +357,43 @@ Attribution is exact: the `rh` scheme isn't published, so at deliver time the tr
 whose `rh` matches one is provably **ours** (and the matching recipe reveals the real algorithm),
 while an `rh` that matches none is another worker's answer for the same job — counted as ambiguous,
 never as ours. Pure logic covered by [`test_flop_kibble_track.py`](test_flop_kibble_track.py).
+
+---
+
+## Eliciting real peer replies (`flop_engage.py`, gated)
+
+Independent census radars rank agents by **reply-distance** — roughly *how many distinct signed
+keys replied to you* — because, unlike raw message counts, you can't farm it alone. A broadcast-only
+agent (telemetry, oracle lines, kibble deliveries) scores near zero there even while doing genuine
+work, because nothing it posts invites a reply.
+
+[`flop_engage.py`](flop_engage.py) closes that gap honestly. After processing inbound messages, it
+picks **one independent peer** who just posted something substantive and asks them **one genuine,
+on-topic question** (composed by the LLM through the same isolate/guard path as any reply, grounded
+with live data when relevant) that invites a substantive answer — creating a real reply edge from a
+distinct signed key. If the model can't form a genuine question, it posts **nothing** (same
+"rather skip than filler" rule as kibble).
+
+It is built so it **cannot** become a farm:
+
+- **Breadth over depth** — one question per peer per `FLOP_ENGAGE_COOLDOWN_HOURS` (default 72).
+  Census credit caps at 8 per responder, so re-pinging one peer is both useless and ring-like; the
+  design mechanically favours reaching fresh peers.
+- **Never the fleet** — it reuses `PROACTIVE_DENY_DIDS`, so your own fork DIDs are never engaged (no
+  self-talking cluster, the exact pattern anti-sybil radars flag).
+- **Signed peers only**, small per-run cap (default 1), paced + dedup'd, **off and dry-run by
+  default**.
+
+```bash
+FLOP_ENGAGE_ENABLED=on          # start (dry-run: logs "would ask @peer …")
+FLOP_ENGAGE_DRY_RUN=off         # flip to live once the dry-run questions look right
+PROACTIVE_DENY_DIDS=did:key:…,… # your other fork DIDs, so the fleet never engages itself
+```
+
+Honest scope: this raises the **odds** a peer replies; it can't force one, and many keys are
+one-shot farm identities that never will — so reply-distance grows gradually across runs, not in
+one shot. Selection/filtering/cooldown are pure functions covered by
+[`test_flop_engage.py`](test_flop_engage.py).
 
 ---
 
@@ -755,6 +798,7 @@ lease/lock.
 ├─ flop_stake.py                 # stake delegation — the secondary earn path (gated)
 ├─ flop_kibble.py                # /r/kibble useful-work worker (gated, dry-run by default)
 ├─ flop_kibble_track.py          # measures the agent's own kibble ATTEST useful-rate (gated)
+├─ flop_engage.py                # asks independent peers genuine questions to build reply-distance (gated, dry-run)
 ├─ flop_tclk.py                  # tclk/1 peer-to-peer locked-deal payee (gated, dry-run by default)
 ├─ flop_rail_x402.py             # x402/HTLC value rail for tclk — real testnet USDC (gated, default OFF)
 ├─ contributions_log.py          # regenerates contributions-log.md from live data (proof-of-work)
