@@ -3595,6 +3595,42 @@ def main():
             close_call_trade_status = "error"
             print(f"[close-call-trade] bỏ qua ({str(e)[:100]})")
 
+    # 3a9) (Tùy chọn, GATED) MUA PHIÊN INFERENCE từ thợ đào FLOP — đường "spend-to-earn" theo
+    #      bản nháp FLOP (post session request -> PoUI -> settle -> tích lũy mở khóa 3:1).
+    #      Mặc định TẮT (FLOP_SESSION_ENABLED) -> agent KHÔNG đổi hành vi. Khi bật:
+    #        · SIMULATION (TESTNET_ENABLED off): chạy happy-path bằng thợ đào GIẢ (không mạng,
+    #          KHÔNG tích mở khóa — đúng: chỉ chi THẬT mới tính). Dùng để kiểm wiring.
+    #        · TESTNET: cần FLOP_MEMPOOL_URL + submit_fn THẬT để đăng mempool — CHƯA có tới khi
+    #          FLOP công bố endpoint -> flop_session trả skipped_unconfigured (KHÔNG bịa thợ đào).
+    #          Chân thanh toán (settle) đi qua token_manager.spend() nên submit_tx tự nạp từ env.
+    #      Cần FLOP_SESSION_MODEL_HASH (hash trọng số mô hình); thiếu -> skip, KHÔNG bịa hash.
+    #      Bọc kín: lỗi bị nuốt, không làm sập run.
+    session_status = "off"
+    if os.environ.get("FLOP_SESSION_ENABLED", "").strip().lower() in ("1", "true", "on", "yes"):
+        _sess_model = os.environ.get("FLOP_SESSION_MODEL_HASH", "").strip()
+        if not _sess_model:
+            session_status = "skip-unconfigured"
+            print("[session] FLOP_SESSION_ENABLED bật nhưng thiếu FLOP_SESSION_MODEL_HASH "
+                  "— bỏ qua (không bịa model_hash).")
+        else:
+            try:
+                import flop_session
+                _sess_flops = int(os.environ.get("FLOP_SESSION_FLOPS", "").strip() or "1000000000")
+                _sess_lat = int(os.environ.get("FLOP_SESSION_MAX_LATENCY_MS", "").strip() or "2000")
+                r = flop_session.maybe_run_session(
+                    _sess_model, _sess_lat, _sess_flops,
+                    private_key=private_key, did=did)
+                session_status = f"{r.get('stage', '-')}/{r.get('outcome', '?')}"
+                extra = ""
+                if r.get("fee"):
+                    extra += f" fee={r['fee']}"
+                if r.get("tx_hash"):
+                    extra += f" tx={str(r['tx_hash'])[:12]}…"
+                print(f"[session] {session_status}{extra}")
+            except Exception as e:
+                session_status = "error"
+                print(f"[session] bỏ qua ({str(e)[:100]})")
+
     # 3b) (Tùy chọn, GATED) Công khai tiến độ MỞ KHÓA MAINNET 3:1 vào KV note `unlock`
     #     để ai cũng audit được (GET /kv/<ns>/unlock). Mặc định TẮT (FLOP_PUBLISH_UNLOCK)
     #     -> agent không đổi hành vi. Bọc kín: lỗi bị nuốt, không làm sập run.
@@ -3631,6 +3667,7 @@ def main():
         f"- tclk: **{tclk_status}** · complete: **{tclk_done_status}**",
         f"- sonnet: **{sonnet_status}**",
         f"- close-call: **{close_call_status}** · trade: **{close_call_trade_status}**",
+        f"- session: **{session_status}**",
         f"- replies: **{replies}** · proactive: **{proactive}**",
         f"- technocore.chat 200s: **{_server_ok_count}**",
     ]
@@ -3639,6 +3676,7 @@ def main():
           f"kibble_req={kibble_req_status} "
           f"tclk={tclk_status} tclk_done={tclk_done_status} tclk_offer={tclk_offer_status} "
           f"sonnet={sonnet_status} close_call={close_call_status} close_call_trade={close_call_trade_status} "
+          f"session={session_status} "
           f"replies={replies} "
           f"proactive={proactive} server200s={_server_ok_count}")
 
