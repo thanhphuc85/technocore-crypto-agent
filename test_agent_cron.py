@@ -1527,3 +1527,246 @@ def test_due_respects_phase_offset():
     assert ac._due(state, "k", 1.0, now, phase_s=300) is False
     # du 1h + phase -> den han
     assert ac._due({"k": now - 3600 - 300}, "k", 1.0, now, phase_s=300) is True
+
+
+# --- Dữ liệu thị trường MỞ RỘNG: fetch keyless + lệnh + A2A + grounding ------------
+
+def _reset_market_caches():
+    ac._perp_cache.clear()
+    ac._tvl_cache.clear()
+
+
+def test_fmt_usd_compact():
+    assert ac._fmt_usd(1.23e12) == "$1.2T"
+    assert ac._fmt_usd(89.6e9) == "$89.6B"
+    assert ac._fmt_usd(306e6) == "$306.0M"
+    assert ac._fmt_usd(1500) == "$1.5K"
+    assert ac._fmt_usd(42) == "$42"
+    assert ac._fmt_usd(None) == "?"
+
+
+def test_get_change_parses_timeframes(monkeypatch):
+    row = [{"current_price": 81690, "price_change_percentage_1h_in_currency": 0.01,
+            "price_change_percentage_24h_in_currency": -2.0,
+            "price_change_percentage_7d_in_currency": -1.9,
+            "price_change_percentage_30d_in_currency": 3.9}]
+    monkeypatch.setattr(ac.requests, "get", lambda *a, **k: _Resp(data=row, status=200))
+    ch = ac.get_change("bitcoin")
+    assert ch["price"] == 81690 and ch["1h"] == 0.01 and ch["30d"] == 3.9
+
+
+def test_get_change_empty_on_error(monkeypatch):
+    monkeypatch.setattr(ac.requests, "get", lambda *a, **k: _Resp(data=[], status=200))
+    assert ac.get_change("bitcoin") == {}
+    monkeypatch.setattr(ac.requests, "get", lambda *a, **k: _Resp(status=500))
+    assert ac.get_change("bitcoin") == {}
+
+
+def test_get_perp_combines_funding_and_oi(monkeypatch):
+    _reset_market_caches()
+    def fake_get(url, params=None, timeout=None):
+        if "premiumIndex" in url:
+            return _Resp(data={"markPrice": "100.0", "lastFundingRate": "-0.00003"}, status=200)
+        if "openInterest" in url:
+            return _Resp(data={"openInterest": "10.0"}, status=200)
+        raise AssertionError(url)
+    monkeypatch.setattr(ac.requests, "get", fake_get)
+    p = ac.get_perp("bitcoin")
+    assert p["mark"] == 100.0
+    assert round(p["funding"], 5) == -0.003          # fraction -> %
+    assert p["oi_coin"] == 10.0 and p["oi_usd"] == 1000.0
+
+
+def test_get_perp_unknown_symbol_returns_empty(monkeypatch):
+    _reset_market_caches()
+    # coin không có trong BINANCE_SYMBOLS -> {} mà KHÔNG gọi mạng
+    def boom(*a, **k):
+        raise AssertionError("no net")
+    monkeypatch.setattr(ac.requests, "get", boom)
+    assert ac.get_perp("some-defi-token-no-perp") == {}
+
+
+def test_get_perp_uses_cache(monkeypatch):
+    _reset_market_caches()
+    calls = {"n": 0}
+    def fake_get(url, params=None, timeout=None):
+        calls["n"] += 1
+        if "premiumIndex" in url:
+            return _Resp(data={"markPrice": "1", "lastFundingRate": "0"}, status=200)
+        return _Resp(data={"openInterest": "1"}, status=200)
+    monkeypatch.setattr(ac.requests, "get", fake_get)
+    ac.get_perp("bitcoin"); ac.get_perp("bitcoin")
+    assert calls["n"] == 2                            # 2 call lần ĐẦU, lần 2 dùng cache
+
+
+def test_defi_tvl_total_chain_and_top(monkeypatch):
+    _reset_market_caches()
+    chains = [{"name": "Ethereum", "tvl": 50e9}, {"name": "Base", "tvl": 6e9},
+              {"name": "Solana", "tvl": 5e9}]
+    monkeypatch.setattr(ac.requests, "get", lambda *a, **k: _Resp(data=chains, status=200))
+    assert ac.get_defi_tvl() == 61e9
+    assert ac.get_defi_tvl("ethereum") == 50e9       # khớp không phân biệt hoa/thường
+    assert ac.get_defi_tvl("nope") is None
+    assert ac.get_tvl_top(2) == [("Ethereum", 50e9), ("Base", 6e9)]
+
+
+def test_get_protocol_tvl(monkeypatch):
+    monkeypatch.setattr(ac.requests, "get", lambda *a, **k: _Resp(data=17914757770.7, status=200))
+    assert round(ac.get_protocol_tvl("aave")) == 17914757771
+    monkeypatch.setattr(ac.requests, "get", lambda *a, **k: _Resp(data={"error": "x"}, status=200))
+    assert ac.get_protocol_tvl("nope") is None       # phản hồi không phải số -> None
+    assert ac.get_protocol_tvl("") is None           # slug rỗng -> None (không gọi mạng)
+
+
+def test_get_stablecoin_cap_sums_circulating(monkeypatch):
+    data = {"peggedAssets": [{"circulating": {"peggedUSD": 100e9}},
+                             {"circulating": {"peggedUSD": 50e9}},
+                             {"circulating": {}}]}            # thiếu peggedUSD -> 0
+    monkeypatch.setattr(ac.requests, "get", lambda *a, **k: _Resp(data=data, status=200))
+    assert ac.get_stablecoin_cap() == 150e9
+    monkeypatch.setattr(ac.requests, "get", lambda *a, **k: _Resp(status=503))
+    assert ac.get_stablecoin_cap() is None
+
+
+# --- Lệnh oracle mới (build_reply) ---
+
+def test_cmd_change(monkeypatch):
+    monkeypatch.setattr(ac, "get_change",
+                        lambda cid: {"price": 2424, "1h": 0.1, "24h": -3.3, "7d": -5.8, "30d": -4.5})
+    out = ac.build_reply("bob", "!change eth")
+    assert "ETH $2424" in out and "24h -3.3%" in out and "30d -4.5%" in out
+
+
+def test_cmd_funding_and_oi(monkeypatch):
+    monkeypatch.setattr(ac, "get_perp",
+                        lambda cid: {"funding": -0.003, "mark": 81738.8,
+                                     "oi_coin": 93362.0, "oi_usd": 7.63e9})
+    assert "perp funding: -0.0030%/8h" in ac.build_reply("bob", "!funding btc")
+    oi = ac.build_reply("bob", "!oi btc")
+    assert "open interest" in oi and "$7.6B" in oi
+
+
+def test_cmd_funding_offline_when_no_perp(monkeypatch):
+    monkeypatch.setattr(ac, "get_perp", lambda cid: {})
+    assert "tạm offline" in ac.build_reply("bob", "!funding btc")
+
+
+def test_cmd_tvl_total_chain_protocol(monkeypatch):
+    monkeypatch.setattr(ac, "get_defi_tvl",
+                        lambda chain=None: 89.6e9 if chain is None else (50e9 if chain == "ethereum" else None))
+    monkeypatch.setattr(ac, "get_tvl_top", lambda n=3: [("Ethereum", 50e9), ("Base", 6e9)])
+    monkeypatch.setattr(ac, "get_protocol_tvl", lambda slug: 17.9e9 if slug == "aave" else None)
+    assert "total $89.6B" in ac.build_reply("bob", "!tvl")
+    assert "Ethereum chain TVL: $50.0B" in ac.build_reply("bob", "!tvl ethereum")
+    assert "aave protocol TVL: $17.9B" in ac.build_reply("bob", "!tvl aave")
+    assert "không tìm thấy" in ac.build_reply("bob", "!tvl notathing")
+
+
+def test_cmd_stables(monkeypatch):
+    monkeypatch.setattr(ac, "get_stablecoin_cap", lambda: 306.9e9)
+    assert "$306.9B circulating" in ac.build_reply("bob", "!stables")
+
+
+def test_new_commands_registered_and_in_help():
+    for c in ("!change", "!funding", "!oi", "!tvl", "!stables"):
+        assert c in ac.COMMANDS
+    help_out = ac.build_reply("bob", "!help")
+    for c in ("!change", "!funding", "!oi", "!tvl", "!stables"):
+        assert c in help_out
+
+
+# --- A2A verbs mới (máy-đọc, chỉ-đọc) ---
+
+def test_a2a_change(monkeypatch):
+    monkeypatch.setattr(ac, "get_change",
+                        lambda cid: {"price": 2424, "1h": 0.1, "24h": -3.3, "7d": -5.8, "30d": -4.5})
+    out = ac.a2a_reply(_mention("change eth"), "bob")
+    assert "ok change ETH 1h=+0.1% 24h=-3.3%" in out and "src=coingecko" in out
+
+
+def test_a2a_funding_oi(monkeypatch):
+    monkeypatch.setattr(ac, "get_perp",
+                        lambda cid: {"funding": -0.003, "mark": 81738.8,
+                                     "oi_coin": 93362.0, "oi_usd": 7.63e9})
+    assert "ok funding BTC -0.0030%/8h" in ac.a2a_reply(_mention("funding btc"), "bob")
+    assert "ok oi BTC 93362" in ac.a2a_reply(_mention("oi btc"), "bob")
+
+
+def test_a2a_tvl_and_stables(monkeypatch):
+    monkeypatch.setattr(ac, "get_defi_tvl",
+                        lambda chain=None: 89.6e9 if chain is None else (50e9 if chain == "ethereum" else None))
+    monkeypatch.setattr(ac, "get_protocol_tvl", lambda slug: 17.9e9 if slug == "aave" else None)
+    monkeypatch.setattr(ac, "get_stablecoin_cap", lambda: 306.9e9)
+    assert "ok tvl total=" in ac.a2a_reply(_mention("tvl"), "bob")
+    assert "ok tvl chain=ethereum" in ac.a2a_reply(_mention("tvl ethereum"), "bob")
+    assert "ok tvl protocol=aave" in ac.a2a_reply(_mention("tvl aave"), "bob")
+    assert "err not-found tvl" in ac.a2a_reply(_mention("tvl zzz"), "bob")
+    assert "ok stables cap=" in ac.a2a_reply(_mention("stables"), "bob")
+
+
+def test_a2a_unknown_coin_on_new_verbs():
+    assert "err unknown-coin" in ac.a2a_reply(_mention("change notacoin"), "bob")
+    assert "err unknown-coin" in ac.a2a_reply(_mention("funding notacoin"), "bob")
+
+
+def test_a2a_new_verbs_in_verb_list():
+    for v in ("change", "funding", "oi", "tvl", "stables"):
+        assert v in ac.A2A_VERBS
+
+
+# --- Grounding: tone -> rich -> build_market_context ---
+
+def test_tone_routes_deriv_and_defi():
+    assert ac.pick_tone("what is btc funding rate")[0] == "deriv"
+    assert ac.pick_tone("tvl of aave protocol")[0] == "defi"
+    assert ac._RICH_BY_TONE["deriv"] == {"deriv"}
+    assert ac._RICH_BY_TONE["defi"] == {"defi"}
+
+
+def test_build_market_context_deriv(monkeypatch):
+    monkeypatch.setattr(ac, "get_market", lambda ids: {i: {"usd": 100, "chg": 1.0} for i in ids})
+    monkeypatch.setattr(ac, "get_fear_greed", lambda: (50, "Neutral"))
+    monkeypatch.setattr(ac, "get_perp",
+                        lambda cid: {"funding": -0.003, "mark": 100, "oi_coin": 10, "oi_usd": 7.6e9})
+    ctx = ac.build_market_context(["bitcoin"], rich={"deriv"})
+    assert "funding -0.003%/8h" in ctx and "OI $7.6B" in ctx
+
+
+def test_build_market_context_defi(monkeypatch):
+    monkeypatch.setattr(ac, "get_market", lambda ids: {i: {"usd": 100, "chg": 1.0} for i in ids})
+    monkeypatch.setattr(ac, "get_fear_greed", lambda: (50, "Neutral"))
+    monkeypatch.setattr(ac, "get_defi_tvl", lambda chain=None: 89.6e9)
+    monkeypatch.setattr(ac, "get_stablecoin_cap", lambda: 306.9e9)
+    ctx = ac.build_market_context(["bitcoin"], rich={"defi"})
+    assert "DeFi TVL $89.6B" in ctx and "Stablecoins $306.9B" in ctx
+
+
+# --- Ưu tiên 1: job kibble thị trường được chèn grounding LIVE ---
+
+def test_answer_kibble_job_prepends_market_grounding(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(ac, "_active_provider", lambda: True)
+    monkeypatch.setattr(ac, "build_market_context", lambda coins, rich=None: "LIVE: BTC $100")
+    monkeypatch.setattr(ac, "_meter_flop", lambda *a, **k: None)
+    def fake_reply(prompt, system, temp, *a, **k):
+        captured["prompt"] = prompt
+        return ("BTC analysis grounded in the data above.", "stub")
+    monkeypatch.setattr(ac, "_provider_reply", fake_reply)
+    out = ac.answer_kibble_job(_job(jtype="analyze", title="BTC outlook", body="analyze btc"))
+    assert out.startswith("BTC analysis")
+    assert captured["prompt"].startswith("LIVE: BTC $100")        # ctx đứng TRƯỚC task isolate
+    assert ac.DELIM_OPEN in captured["prompt"]                    # task vẫn bị cô lập untrusted
+
+
+def test_answer_kibble_job_no_grounding_when_not_market(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(ac, "_active_provider", lambda: True)
+    monkeypatch.setattr(ac, "build_market_context", lambda coins, rich=None: "")   # chủ đề phi-thị-trường
+    monkeypatch.setattr(ac, "_meter_flop", lambda *a, **k: None)
+    def fake_reply(prompt, system, temp, *a, **k):
+        captured["prompt"] = prompt
+        return ("Answer about history.", "stub")
+    monkeypatch.setattr(ac, "_provider_reply", fake_reply)
+    ac.answer_kibble_job(_job(jtype="explain", title="French Revolution", body="explain it"))
+    assert not captured["prompt"].startswith("LIVE")              # không ctx -> prompt = task isolate
+    assert captured["prompt"].startswith("The text between the markers")   # bắt đầu thẳng ở isolate

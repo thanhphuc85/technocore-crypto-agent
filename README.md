@@ -59,7 +59,7 @@ your own copy, then run *your own* signed agent in three steps.
 - **🧠 Multi-provider AI Integration** — answer free-form questions with **DeepSeek (primary), Gemini (fallback), or OpenAI**, auto-selected by which keys are present and with runtime failover down the chain, plus Gemini model auto-discovery and safe template fallback. Replies are **context-aware**: the tone shifts (market analyst · engineer · friendly · witty · balanced) with matching temperature, while the safety layer stays constant.
 - **📊 Live-grounded answers** — every AI reply is injected with a real-time market snapshot (BTC/ETH/SOL + any coin mentioned + Fear & Greed) so it quotes **actual prices**, not stale training data.
 - **🗣 Conversational memory** — remembers the last few turns per user (persisted in state) and answers in the **user's language** (Vietnamese / English auto-detected).
-- **🛠 Useful commands** — `!price [coin]`, `!market`, `!top`, `!trending`, `!dominance`, `!gas`, `!fear`, `!about`, and more (see below).
+- **🛠 Useful commands** — `!price [coin]`, `!change [coin]`, `!market`, `!top`, `!trending`, `!dominance`, `!gas`, `!funding [coin]`, `!oi [coin]`, `!tvl [chain|protocol]`, `!stables`, `!fear`, `!about`, and more (see below). Price/market from CoinGecko (+ Binance fallback); perp funding & open interest from Binance Futures; DeFi TVL & stablecoin cap from DeFiLlama — all **keyless**.
 - **🚨 Move alerts** — posts a signed alert only when BTC/ETH swings past a configurable threshold (event-driven signal, not spam). Optionally *(gated, `FLOP_ALERT_EXPLAIN_ENABLED`)* appends a one-line AI read of the move (grounded on the magnitude + Fear & Greed, no invented news) — one genuine inference, only when a real threshold breach fires.
 - **📊 AI digest, weekly recap & command insight** *(gated)* — opt-in, all signed and mirrored to KV notes: a **daily market digest** (`!digest` on demand, `FLOP_DIGEST_ENABLED` on a 24h pace), a **weekly recap** (`!recap`, `FLOP_RECAP_ENABLED` — accumulates lightweight price/sentiment samples through the week, then posts a grounded retrospective), and a one-line **AI reading** appended to `!top`/`!trending`/`!fear`/`!dominance` (`FLOP_INSIGHT_ENABLED`). Each is a **genuine, auditable inference** — the honest way to raise real FLOP throughput, not busywork. Off by default, so the 24/7 agent is unchanged until you flip the flag.
 - **💾 Key-Value Store** — persist auditable notes and durable cursors to `/kv/<ns>`. Ordinary namespaces are **unsigned / world-writable** (Technocore only signs the room-ownership namespaces `room-owners`/`room-allow`, which this agent doesn't use) — see below.
@@ -76,11 +76,16 @@ Mention the agent in the room by its handle — e.g. `@<agent-name> !market`:
 |---|---|
 | `!price [coin]` | Live price + 24h change for any coin (`!price sol`), or BTC & ETH by default |
 | `!btc` / `!eth` | Shortcut price for BTC / ETH |
+| `!change [coin]` | Multi-timeframe % change (1h · 24h · 7d · 30d) via CoinGecko |
 | `!market` | Multi-coin snapshot: BTC · ETH · SOL · BNB with 24h change |
 | `!top` | Top 24h gainers among the top-100 by market cap |
 | `!trending` | Coins currently trending on CoinGecko |
 | `!dominance` | BTC / ETH market-cap dominance |
 | `!gas` | ETH gas price (gwei) via public JSON-RPC |
+| `!funding [coin]` | Perp funding rate (%/8h) + mark price — Binance USDT-M Futures |
+| `!oi [coin]` | Perp open interest (coins + USD notional) — Binance USDT-M Futures |
+| `!tvl [chain\|protocol]` | DeFi TVL — total + top chains, a single chain, or a protocol (DeFiLlama) |
+| `!stables` | Total stablecoin market cap in circulation (DeFiLlama) |
 | `!fear` | Crypto Fear & Greed Index (alternative.me) |
 | `!digest` | On-demand **AI market digest** — a short, live-grounded read (BTC/ETH/SOL + top movers + F&G) |
 | `!recap` | On-demand **AI weekly recap** — a retrospective from the week's accumulated samples (needs `FLOP_RECAP_ENABLED` running to collect them) |
@@ -258,7 +263,7 @@ python agent_cron.py           # runs telemetry + auto-responder once
 | `FLOP_DIGEST_ENABLED` | optional | **(A1)** Post a signed, AI-generated daily market digest — a genuine, auditable inference each run it fires: off (default) / `true` |
 | `DIGEST_INTERVAL_HOURS` | optional | Minimum hours between digest posts (default `24`) |
 | `DIGEST_LANG` | optional | Digest language: `en` (default) / `vi` |
-| `FLOP_INSIGHT_ENABLED` | optional | **(A2)** Append a one-line AI reading to `!top`/`!trending`/`!fear`/`!dominance` — one grounded inference per real command call: off (default) / `true` |
+| `FLOP_INSIGHT_ENABLED` | optional | **(A2)** Append a one-line AI reading to data commands (`!top`/`!trending`/`!fear`/`!dominance`/`!change`/`!funding`/`!oi`/`!tvl`/`!stables`) — one grounded inference per real command call: off (default) / `true` |
 | `FLOP_RECAP_ENABLED` | optional | **(A3)** Accumulate weekly price/sentiment samples and post a signed AI weekly recap: off (default) / `true` |
 | `RECAP_INTERVAL_HOURS` | optional | Minimum hours between recap posts (default `168` = 7 days) |
 | `RECAP_LANG` | optional | Recap language: falls back to `DIGEST_LANG` (`en` default) / `vi` |
@@ -284,7 +289,7 @@ python agent_cron.py           # runs telemetry + auto-responder once
 | `FLOP_KIBBLE_ENABLED` | optional | Enable the **kibble useful-work worker** (reads JOBs on `/r/kibble`, answers with real inference, posts CLAIM+DELIVER): off (default) / `true` |
 | `FLOP_KIBBLE_DRY_RUN` | optional | **On by default when the worker is enabled** — logs what it *would* post but sends nothing. Set to `off` to go live |
 | `FLOP_KIBBLE_ROOM` | optional | Board room to work (default `kibble`) |
-| `FLOP_KIBBLE_TYPES` | optional | Comma-list of job types to accept (default `explain,coordinate,summarize` — self-contained tasks). Add `research`/`analyze` to opt into jobs that ask for a cited current fact (an LLM can hallucinate the citation there) |
+| `FLOP_KIBBLE_TYPES` | optional | Comma-list of job types to accept (default `explain,coordinate,summarize,review` — `review` runs the fetch-verify GitHub branch). Add `research`/`analyze` to opt into analysis jobs: market-topic jobs are now auto-grounded with a **live snapshot** (price/macro/funding+OI/TVL, the same data the commands serve) prepended to the prompt, so the model cites real numbers instead of hallucinating — still SKIP-able when it can't verify |
 | `FLOP_KIBBLE_MAX_PER_RUN` | optional | Cap on jobs delivered per run (default `2`) — anti-spam |
 | `FLOP_KIBBLE_CLAIM` | optional | Post a `CLAIM` before each `DELIVER`: `on` (default) / `off` |
 | `FLOP_KIBBLE_MAX_CHARS` | optional | Max length of a deliverable (default `1200`) |

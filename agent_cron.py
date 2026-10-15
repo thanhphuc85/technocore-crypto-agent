@@ -519,6 +519,17 @@ LLM_SAFETY = (
 )
 # Mỗi tone: (tên, từ khóa nhận diện, chỉ dẫn giọng điệu, temperature).
 LLM_TONES = [
+    # 'deriv'/'defi' đặt TRƯỚC 'analyst': câu "btc funding" chứa cả 'btc' (analyst) lẫn
+    # 'funding' (deriv) -> ưu tiên khung phái sinh/DeFi để grounding kéo đúng chất liệu.
+    ("deriv",
+     {"funding", "perp", "perps", "leverage", "oi", "liquidation", "liquidations",
+      "longs", "shorts", "futures", "basis"},
+     "Tone: a sharp derivatives analyst; cite funding rate / open interest. Never give financial advice.",
+     0.5),
+    ("defi",
+     {"tvl", "defi", "stablecoin", "stablecoins", "lending", "yield", "liquidity", "dex"},
+     "Tone: a precise DeFi analyst; cite TVL / stablecoin figures. Never give financial advice.",
+     0.5),
     ("analyst",
      {"price", "market", "chart", "support", "resistance", "pump", "dump", "trend",
       "bull", "bear", "btc", "eth", "sol", "buy", "sell", "dip", "rally", "gia", "giá"},
@@ -549,6 +560,8 @@ _RICH_BY_TONE = {
     "analyst": {"macro", "trending"},
     "opinion": {"macro"},
     "techie": {"gas"},
+    "deriv": {"deriv"},
+    "defi": {"defi"},
 }
 
 SEED_HEX = os.environ.get("AGENT_PRIVATE_KEY", "")
@@ -870,6 +883,157 @@ def get_eth_gas():
         except Exception:
             continue
     return None
+
+
+# --- Dữ liệu thị trường MỞ RỘNG (đều KEYLESS) --------------------------------------------
+# Thêm 3 nhóm nguồn mới, cùng triết lý no-key như CoinGecko/Binance ở trên:
+#   • Binance Futures (fapi) -> funding rate + mark + open interest (phái sinh).
+#   • CoinGecko /coins/markets -> % thay đổi nhiều khung (1h/24h/7d/30d).
+#   • DeFiLlama -> TVL DeFi (toàn thị trường / theo chain / theo protocol) + cap stablecoin.
+# Mỗi hàm bọc try/except fail-closed (lỗi -> None/{}), có cache TTL ngắn để 1 run không spam.
+
+def _fmt_usd(n) -> str:
+    """USD lớn -> chuỗi gọn: 1.23e12 -> '$1.23T', 89.6e9 -> '$89.6B', 306e6 -> '$306.0M'."""
+    if n is None:
+        return "?"
+    try:
+        n = float(n)
+    except (TypeError, ValueError):
+        return "?"
+    for div, suf in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")):
+        if abs(n) >= div:
+            return f"${n / div:.1f}{suf}"
+    return f"${n:.0f}"
+
+
+def get_change(cid):
+    """% thay đổi NHIỀU KHUNG cho 1 coingecko id (CoinGecko /coins/markets, keyless).
+    Trả {'price':.., '1h':.., '24h':.., '7d':.., '30d':..} (giá trị None nếu khung thiếu),
+    hoặc {} nếu fetch lỗi/không có coin."""
+    try:
+        r = requests.get(
+            "https://api.coingecko.com/api/v3/coins/markets",
+            params={"vs_currency": "usd", "ids": cid,
+                    "price_change_percentage": "1h,24h,7d,30d"},
+            timeout=10,
+        )
+        r.raise_for_status()
+        rows = r.json()
+    except Exception:
+        return {}
+    if not rows:
+        return {}
+    d = rows[0]
+    return {
+        "price": d.get("current_price"),
+        "1h": d.get("price_change_percentage_1h_in_currency"),
+        "24h": d.get("price_change_percentage_24h_in_currency"),
+        "7d": d.get("price_change_percentage_7d_in_currency"),
+        "30d": d.get("price_change_percentage_30d_in_currency"),
+    }
+
+
+_perp_cache = {}            # coingecko id -> (epoch, {funding/mark/oi_coin/oi_usd})
+PERP_TTL = 45               # giây: gộp các lần hỏi phái sinh trùng trong cùng 1 run
+
+
+def get_perp(cid):
+    """Phái sinh (Binance USDT-M Futures, keyless) cho 1 coingecko id: funding rate %/8h,
+    mark price, open interest (theo coin + quy ra USD notional = OI * mark). Trả dict đầy
+    đủ, hoặc {} nếu không có perp/lỗi. coin chưa map symbol (BINANCE_SYMBOLS) -> {}."""
+    sym = BINANCE_SYMBOLS.get(cid)
+    if not sym:
+        return {}
+    now = time.time()
+    c = _perp_cache.get(cid)
+    if c and now - c[0] < PERP_TTL:
+        return c[1]
+    try:
+        pi = requests.get("https://fapi.binance.com/fapi/v1/premiumIndex",
+                          params={"symbol": sym}, timeout=8)
+        pi.raise_for_status()
+        p = pi.json()
+        mark = float(p["markPrice"])
+        funding = float(p["lastFundingRate"]) * 100.0      # fraction/8h -> %/8h
+        oi = requests.get("https://fapi.binance.com/fapi/v1/openInterest",
+                          params={"symbol": sym}, timeout=8)
+        oi.raise_for_status()
+        oi_coin = float(oi.json()["openInterest"])
+    except Exception:
+        return {}
+    rec = {"funding": funding, "mark": mark,
+           "oi_coin": oi_coin, "oi_usd": oi_coin * mark}
+    _perp_cache[cid] = (now, rec)
+    return rec
+
+
+_tvl_cache = {}             # 'chains' -> (epoch, [ {name, tvl}, ... ])
+TVL_TTL = 300               # giây: TVL đổi chậm -> cache dài hơn giá
+
+
+def _fetch_tvl_chains():
+    """List TVL theo chain (DeFiLlama /v2/chains, keyless). Cache TTL dài. [] nếu lỗi."""
+    now = time.time()
+    c = _tvl_cache.get("chains")
+    if c and now - c[0] < TVL_TTL:
+        return c[1]
+    try:
+        r = requests.get("https://api.llama.fi/v2/chains", timeout=15)
+        r.raise_for_status()
+        rows = [{"name": x.get("name"), "tvl": float(x.get("tvl") or 0)}
+                for x in r.json() if x.get("name")]
+    except Exception:
+        return []
+    _tvl_cache["chains"] = (now, rows)
+    return rows
+
+
+def get_defi_tvl(chain=None):
+    """TVL DeFi (USD) qua DeFiLlama (keyless). chain=None -> tổng toàn thị trường; ngược
+    lại -> TVL của chain đó (khớp tên không phân biệt hoa/thường). None nếu lỗi/không khớp."""
+    rows = _fetch_tvl_chains()
+    if not rows:
+        return None
+    if chain is None:
+        return sum(x["tvl"] for x in rows)
+    want = chain.strip().lower()
+    for x in rows:
+        if (x["name"] or "").lower() == want:
+            return x["tvl"]
+    return None
+
+
+def get_tvl_top(n=3):
+    """Top-n chain theo TVL (DeFiLlama, keyless). List (name, tvl_usd). [] nếu lỗi."""
+    rows = sorted(_fetch_tvl_chains(), key=lambda x: x["tvl"], reverse=True)
+    return [(x["name"], x["tvl"]) for x in rows[:n]]
+
+
+def get_protocol_tvl(slug):
+    """TVL của 1 protocol DeFi (DeFiLlama /tvl/<slug>, keyless; slug kiểu 'aave','lido').
+    Trả float USD hoặc None (không có protocol / lỗi / phản hồi không phải số)."""
+    slug = (slug or "").strip().lower()
+    if not slug:
+        return None
+    try:
+        r = requests.get(f"https://api.llama.fi/tvl/{quote(slug)}", timeout=15)
+        r.raise_for_status()
+        v = r.json()
+        return float(v) if isinstance(v, (int, float)) else None
+    except Exception:
+        return None
+
+
+def get_stablecoin_cap():
+    """Tổng vốn hóa stablecoin đang lưu hành (USD) qua DeFiLlama (keyless). None nếu lỗi."""
+    try:
+        r = requests.get("https://stablecoins.llama.fi/stablecoins",
+                         params={"includePrices": "false"}, timeout=20)
+        r.raise_for_status()
+        assets = r.json().get("peggedAssets", [])
+        return sum((a.get("circulating", {}) or {}).get("peggedUSD", 0) or 0 for a in assets)
+    except Exception:
+        return None
 
 
 # --- Pacing/jitter cho ĐƯỜNG GHI ---------------------------------------------------------
@@ -1682,7 +1846,9 @@ def build_market_context(extra_ids=None, rich=None) -> str:
     chỉ bật khi câu hỏi cần chất liệu:
       'macro'    -> dominance BTC/ETH + top gainers 24h (câu phân tích/quan điểm),
       'gas'      -> giá gas ETH gwei (câu kỹ thuật on-chain),
-      'trending' -> coin đang được tìm nhiều (câu phân tích)."""
+      'trending' -> coin đang được tìm nhiều (câu phân tích),
+      'deriv'    -> funding rate + open interest coin đầu tiên (câu phái sinh),
+      'defi'     -> tổng TVL DeFi + cap stablecoin (câu DeFi)."""
     ids = ["bitcoin", "ethereum", "solana"]
     for i in (extra_ids or []):
         if i not in ids:
@@ -1712,6 +1878,18 @@ def build_market_context(extra_ids=None, rich=None) -> str:
         g = get_eth_gas()
         if g is not None:
             parts.append(f"ETH gas {g} gwei")
+    if "deriv" in rich:
+        p = get_perp(ids[0])                       # coin đầu tiên (mặc định BTC)
+        if p:
+            sym = ID_TO_SYM.get(ids[0], ids[0][:6].upper())
+            parts.append(f"{sym} funding {p['funding']:+.3f}%/8h · OI {_fmt_usd(p['oi_usd'])}")
+    if "defi" in rich:
+        tvl = get_defi_tvl()
+        if tvl is not None:
+            parts.append(f"DeFi TVL {_fmt_usd(tvl)}")
+        cap = get_stablecoin_cap()
+        if cap:
+            parts.append(f"Stablecoins {_fmt_usd(cap)}")
     if not parts:
         return ""
     return f"LIVE MARKET DATA ({time.strftime('%H:%MZ', time.gmtime())}): " + " · ".join(parts)
@@ -1913,7 +2091,13 @@ def answer_kibble_job(job: dict):
     task = f"[task type: {jtype}] {job.get('title', '').strip()}\n\n{job.get('body', '').strip()}".strip()
     if jtype == "review":                        # job factual -> đi nhánh fetch-verify, không đoán
         return _answer_review_job(job, task)
-    prompt = isolate_for_llm(task)
+    # GROUNDING: job thị trường (analyze/research/explain... nhắc coin hay chủ đề market/
+    # defi/phái sinh) được chèn SNAPSHOT LIVE do CHÍNH agent dựng -> deliverable bám số
+    # THẬT thay vì kiến thức cũ (điều kiện để job analyze/research qua được attestation).
+    # ctx là dữ liệu agent-built (TRUSTED), nối NGOÀI isolate; task vẫn bị cô lập untrusted.
+    tone, _, _ = pick_tone(task)
+    ctx = build_market_context(extract_coins(task), rich=_RICH_BY_TONE.get(tone))
+    prompt = (f"{ctx}\n\n" if ctx else "") + isolate_for_llm(task)
     try:
         raw, provider = _provider_reply(prompt, KIBBLE_SYSTEM, KIBBLE_TEMPERATURE,
                                         max_tokens=KIBBLE_MAX_TOKENS)
@@ -2203,7 +2387,7 @@ def llm_reply(user_text: str, sender_nick=None, state=None, mem_key=None):
 # câu dài/nhiều token -> KHÔNG coi là A2A, để rơi xuống LLM cho người hỏi tự nhiên.
 # CHỈ-ĐỌC theo thiết kế: không verb nào GHI state từ input untrusted (không remember/kv-set)
 # -> một peer thù địch không thể bơm dữ liệu vào bộ nhớ/hồ sơ của agent qua giao thức này.
-_A2A_VERB_LIST = "price|market|top|trending|dominance|fear|gas|help|about"
+_A2A_VERB_LIST = "price|change|market|top|trending|dominance|fear|gas|funding|oi|tvl|stables|help|about"
 A2A_VERBS = set(_A2A_VERB_LIST.split("|"))
 _A2A_PROTO = f"{HANDLE} {_A2A_VERB_LIST} [coin]"
 
@@ -2288,6 +2472,61 @@ def a2a_reply(text: str, sender_nick: str):
         if val is None:
             return line(f"err feed-offline fear | t={ts}")
         return line(f"ok fear {val}/100 {cls} | src=alternative.me | t={ts}")
+    if verb == "change":
+        if len(args) > 1:
+            return None
+        sym = args[0].lower().strip(".,:;!?()[]") if args else "btc"
+        cid = COIN_IDS.get(sym)
+        if not cid:
+            return line(f"err unknown-coin {sym[:12]} | t={ts}")
+        ch = get_change(cid)
+        if not ch or ch.get("price") is None:
+            return line(f"err feed-offline change {sym.upper()} | t={ts}")
+        def _p(x):
+            return f"{x:+.1f}%" if x is not None else "?"
+        return line(f"ok change {ID_TO_SYM.get(cid, sym.upper())} 1h={_p(ch['1h'])} "
+                    f"24h={_p(ch['24h'])} 7d={_p(ch['7d'])} 30d={_p(ch['30d'])} "
+                    f"| src=coingecko | t={ts}")
+    if verb in ("funding", "oi"):
+        if len(args) > 1:
+            return None
+        sym = args[0].lower().strip(".,:;!?()[]") if args else "btc"
+        cid = COIN_IDS.get(sym)
+        if not cid:
+            return line(f"err unknown-coin {sym[:12]} | t={ts}")
+        p = get_perp(cid)
+        if not p:
+            return line(f"err feed-offline {verb} {sym.upper()} | t={ts}")
+        s = ID_TO_SYM.get(cid, sym.upper())
+        if verb == "funding":
+            return line(f"ok funding {s} {p['funding']:+.4f}%/8h mark={p['mark']} "
+                        f"| src=binance-futures | t={ts}")
+        return line(f"ok oi {s} {p['oi_coin']:.0f} oi_usd={p['oi_usd']:.0f} "
+                    f"| src=binance-futures | t={ts}")
+    if verb == "tvl":
+        if len(args) > 1:
+            return None
+        if not args:
+            total = get_defi_tvl()
+            if total is None:
+                return line(f"err feed-offline tvl | t={ts}")
+            return line(f"ok tvl total={total:.0f} | src=defillama | t={ts}")
+        name = args[0].lower().strip(".,:;!?()[]")
+        v = get_defi_tvl(name)
+        kind = "chain"
+        if v is None:
+            v = get_protocol_tvl(name)
+            kind = "protocol"
+        if v is None:
+            return line(f"err not-found tvl {name[:16]} | t={ts}")
+        return line(f"ok tvl {kind}={name} {v:.0f} | src=defillama | t={ts}")
+    if verb == "stables":
+        if args:
+            return None
+        cap = get_stablecoin_cap()
+        if cap is None:
+            return line(f"err feed-offline stables | t={ts}")
+        return line(f"ok stables cap={cap:.0f} | src=defillama | t={ts}")
     if verb == "help":
         if args:
             return None
@@ -2324,8 +2563,9 @@ def build_reply(sender_nick: str, text: str, state=None, sender_id=None) -> str:
         return a2a
 
     if has("!help"):
-        return tag("commands: !price [coin] · !market · !top · !trending · !dominance · "
-                   "!gas · !fear · !digest · !recap · !time · !ping · !about — or just @mention "
+        return tag("commands: !price [coin] · !change [coin] · !market · !top · !trending · "
+                   "!dominance · !gas · !funding [coin] · !oi [coin] · !tvl [chain|protocol] · "
+                   "!stables · !fear · !digest · !recap · !time · !ping · !about — or just @mention "
                    "me a question and I'll answer with live-grounded AI. "
                    f"Agents: '{HANDLE} price eth' returns a machine-readable line (verbs: {_A2A_VERB_LIST}).")
     if has("!about"):
@@ -2368,6 +2608,73 @@ def build_reply(sender_nick: str, text: str, state=None, sender_id=None) -> str:
         g = get_eth_gas()
         return tag(f"ETH gas ~{g} gwei (base fee, via public RPC)" if g is not None
                    else "gas feed tạm offline, thử lại sau.")
+
+    def _arg_after(flag):
+        """ARGUMENT ngay sau 1 '!flag' (KHÔNG quét cả câu). '' nếu không có."""
+        try:
+            i = tokens.index(flag)
+        except ValueError:
+            return ""
+        return tokens[i + 1].strip(".,!?;:") if i + 1 < len(tokens) else ""
+
+    if has("!change"):
+        arg = _arg_after("!change")
+        sym = arg if arg in COIN_IDS else "btc"
+        ch = get_change(COIN_IDS[sym])
+        if not ch or ch.get("price") is None:
+            return tag(f"change feed cho {sym.upper()} tạm offline.")
+        def _p(x):
+            return f"{x:+.1f}%" if x is not None else "?"
+        facts = (f"1h {_p(ch['1h'])} · 24h {_p(ch['24h'])} · "
+                 f"7d {_p(ch['7d'])} · 30d {_p(ch['30d'])}")
+        return tag(f"{sym.upper()} ${ch['price']} — {facts} (live via CoinGecko, signed Ed25519)"
+                   + _insight(f"{sym.upper()} multi-timeframe change", facts,
+                              detect_lang(text), event_id=sender_nick))
+    if has("!funding"):
+        arg = _arg_after("!funding")
+        sym = arg if arg in COIN_IDS else "btc"
+        p = get_perp(COIN_IDS[sym])
+        if not p:
+            return tag(f"funding feed cho {sym.upper()} tạm offline (coin có thể không có perp).")
+        facts = f"{p['funding']:+.4f}%/8h (mark ${p['mark']})"
+        return tag(f"{sym.upper()} perp funding: {facts} — Binance Futures, signed Ed25519"
+                   + _insight(f"{sym.upper()} perp funding rate", facts,
+                              detect_lang(text), event_id=sender_nick))
+    if has("!oi"):
+        arg = _arg_after("!oi")
+        sym = arg if arg in COIN_IDS else "btc"
+        p = get_perp(COIN_IDS[sym])
+        if not p:
+            return tag(f"open-interest feed cho {sym.upper()} tạm offline (coin có thể không có perp).")
+        facts = f"{p['oi_coin']:,.0f} {sym.upper()} (~{_fmt_usd(p['oi_usd'])})"
+        return tag(f"{sym.upper()} perp open interest: {facts} — Binance Futures, signed Ed25519"
+                   + _insight(f"{sym.upper()} open interest", facts,
+                              detect_lang(text), event_id=sender_nick))
+    if has("!tvl"):
+        arg = _arg_after("!tvl")
+        if not arg:                                # tổng thị trường + top chains
+            total = get_defi_tvl()
+            if total is None:
+                return tag("TVL feed tạm offline, thử lại sau.")
+            top = get_tvl_top(3)
+            top_txt = (" · top: " + ", ".join(f"{n} {_fmt_usd(v)}" for n, v in top)) if top else ""
+            facts = f"total {_fmt_usd(total)}{top_txt}"
+            return tag(f"DeFi TVL — {facts} (via DeFiLlama, signed Ed25519)"
+                       + _insight("total DeFi TVL", facts, detect_lang(text), event_id=sender_nick))
+        chain_tvl = get_defi_tvl(arg)              # thử khớp CHAIN trước
+        if chain_tvl is not None:
+            return tag(f"{arg.capitalize()} chain TVL: {_fmt_usd(chain_tvl)} — via DeFiLlama, signed Ed25519")
+        proto_tvl = get_protocol_tvl(arg)          # rồi thử PROTOCOL
+        if proto_tvl is not None:
+            return tag(f"{arg} protocol TVL: {_fmt_usd(proto_tvl)} — via DeFiLlama, signed Ed25519")
+        return tag(f"TVL cho '{arg[:20]}' không tìm thấy (thử tên chain hoặc protocol, vd !tvl ethereum / !tvl aave).")
+    if has("!stables"):
+        cap = get_stablecoin_cap()
+        if cap is None:
+            return tag("stablecoin feed tạm offline, thử lại sau.")
+        facts = f"{_fmt_usd(cap)} circulating"
+        return tag(f"Stablecoin market cap: {facts} — via DeFiLlama, signed Ed25519"
+                   + _insight("stablecoin market cap", facts, detect_lang(text), event_id=sender_nick))
     if has("!price") or has("!btc") or has("!eth"):
         # !price <coin> cho bất kỳ đồng nào; !btc/!eth là lối tắt
         sym = "btc" if has("!btc") else "eth" if has("!eth") else None
@@ -2613,8 +2920,9 @@ def auto_respond(private_key, did):
 
 
 # --- Contribution manifest (proof of contribution, CÓ KÝ) ---
-COMMANDS = ["!price", "!market", "!top", "!trending", "!dominance", "!gas",
-            "!fear", "!digest", "!recap", "!about", "!time", "!ping", "!help"]
+COMMANDS = ["!price", "!market", "!change", "!top", "!trending", "!dominance", "!gas",
+            "!funding", "!oi", "!tvl", "!stables", "!fear", "!digest", "!recap",
+            "!about", "!time", "!ping", "!help"]
 
 
 def broadcast_digest(private_key, did) -> bool:

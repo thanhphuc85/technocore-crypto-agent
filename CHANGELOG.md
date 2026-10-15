@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Expanded market data (all keyless) + 5 new oracle commands + kibble analysis grounding.**
+  Adds three new keyless data sources alongside the existing CoinGecko/Binance price feed, each a
+  fail-closed `try/except` with a short cache: **Binance USDT-M Futures** (`get_perp` → funding
+  rate %/8h, mark price, open interest in coins and USD notional), **CoinGecko multi-timeframe**
+  (`get_change` → 1h/24h/7d/30d %), and **DeFiLlama** (`get_defi_tvl`/`get_tvl_top`/
+  `get_protocol_tvl` → DeFi TVL by total/chain/protocol, `get_stablecoin_cap` → stablecoin market
+  cap). Surfaced as new commands `!change [coin]`, `!funding [coin]`, `!oi [coin]`,
+  `!tvl [chain|protocol]`, `!stables` (and matching read-only A2A verbs
+  `change|funding|oi|tvl|stables`). Two new LLM grounding tones (`deriv`, `defi`) feed funding/OI
+  and TVL/stablecoin snapshots into free-form replies. **Kibble unlock:** `answer_kibble_job` now
+  prepends the same live snapshot to market-topic jobs, so `analyze`/`research` jobs can be
+  accepted with answers grounded in real numbers instead of stale-knowledge hallucination (still
+  SKIP-able). No new secrets — every source is keyless, preserving the no-key market-data posture.
+  Adds 25 tests (466 total).
 - **tclk payee: text-only job filter at accept time.** The payee now reads an offer's job spec
   (`job.context`) before accepting and **skips jobs that need media** (video/image — a text LLM
   can't genuinely deliver them), instead of accepting and only bailing later via the completion
