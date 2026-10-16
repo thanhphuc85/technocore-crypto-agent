@@ -15,6 +15,10 @@ kèm rh), nên KHÔNG được dùng rh làm cổng — làm vậy thì 'useful'
 là bug cũ khiến useful_rate kẹt mãi ở n/a). Ta vẫn tính sẵn tập hash ứng viên (candidate_hashes)
 chỉ để học recipe khi rh tình cờ khớp.
 
+Ngoài tỉ lệ theo CỬA SỔ (useful_rate, chỉ DELIVERIES_CAP bản gần nhất = vài giờ), module
+còn giữ bộ đếm CỘNG DỒN (lifetime) để đọc chất lượng thật mà không bị chu kỳ ngày-đêm
+của attestor làm nhiễu — xem lifetime().
+
 Thuần & test được: candidate_hashes / parse_attest_line / reconcile / summary là hàm THUẦN
 (không mạng). agent_cron lo phần đọc ATTEST + ghi state + publish KV note.
 """
@@ -28,6 +32,57 @@ DELIVERIES_CAP = 300              # trần số delivery giữ trong state (ch�
 _RH_RE = re.compile(r"rh:([0-9a-fA-F]{%d})" % RH_LEN)
 _ALGOS = ("sha256", "sha1", "md5", "sha3_256")
 _JOBID_RE = re.compile(r"^k[0-9a-f]{10}$")
+LIFETIME_KEY = "kibble_lifetime"   # bộ đếm CỘNG DỒN (không theo cửa sổ) trong state
+_LT_FIELDS = ("useful", "not")
+
+
+def _as_count(v) -> int:
+    """int không âm, chịu được None / chuỗi / rác trong state."""
+    try:
+        return max(0, int(v or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _bump_lifetime(state: dict, verdict: str) -> None:
+    """+1 cho bộ đếm cộng dồn khi MỘT delivery vừa chốt. Gọi đúng 1 lần/delivery vì
+    reconcile chỉ xử lý bản 'pending' rồi đổi status ngay sau đó."""
+    if verdict not in _LT_FIELDS:
+        return
+    lt = state.get(LIFETIME_KEY)
+    lt = dict(lt) if isinstance(lt, dict) else {}
+    lt[verdict] = _as_count(lt.get(verdict)) + 1
+    state[LIFETIME_KEY] = lt
+
+
+def lifetime(state: dict) -> dict:
+    """{useful, not, n, rate} từ bộ đếm cộng dồn. rate=None khi chưa có mẫu nào chốt.
+
+    Vì sao cần: `useful_rate` ở summary() chỉ tính trên DELIVERIES_CAP bản gần nhất —
+    với nhịp giao hiện tại đó là cửa sổ vài GIỜ, nên nó dao động theo việc attestor nào
+    đang thức (có attestor chấm 'not' toàn tập). Bộ đếm này cộng dồn qua mọi cửa sổ nên
+    phản ánh chất lượng THẬT theo thời gian, không bị chu kỳ ngày-đêm làm nhiễu."""
+    lt = state.get(LIFETIME_KEY)
+    lt = lt if isinstance(lt, dict) else {}
+    u, n = _as_count(lt.get("useful")), _as_count(lt.get("not"))
+    tot = u + n
+    return {"useful": u, "not": n, "n": tot,
+            "rate": (round(u / tot, 3) if tot else None)}
+
+
+def merge_lifetime(state: dict, remote) -> None:
+    """Hợp nhất bộ đếm từ nguồn khác (KV) vào state — lấy MAX từng ô vì đếm CHỈ TĂNG.
+    Dùng khi cache runner mất state.json: không để bản rỗng/cũ nuốt mất số đã tích."""
+    if not isinstance(remote, dict):
+        return
+    cur = state.get(LIFETIME_KEY)
+    cur = dict(cur) if isinstance(cur, dict) else {}
+    for f in _LT_FIELDS:
+        m = max(_as_count(cur.get(f)), _as_count(remote.get(f)))
+        if m:
+            cur[f] = m
+    if cur:
+        state[LIFETIME_KEY] = cur
 
 
 def _one_line(s: str) -> str:
@@ -134,6 +189,7 @@ def reconcile(state: dict, messages, now_ms: int, expire_ms: int = 48 * 3600 * 1
             unresolved += 1
             continue
         d["status"] = "useful" if useful_votes > not_votes else "not"
+        _bump_lifetime(state, d["status"])   # cộng dồn TRƯỚC khi bản này rơi khỏi cửa sổ
         d.setdefault("matched_by", "jobid")      # quy kết bằng jobid nếu rh không lộ recipe
         d.pop("cands", None)                      # đã chốt -> bỏ tập hash cho gọn state
     return summary(state, ambiguous_now=unresolved)
@@ -149,6 +205,9 @@ def summary(state: dict, ambiguous_now: int = 0) -> dict:
     decided = c["useful"] + c["not"]
     c["useful_rate"] = round(c["useful"] / decided, 3) if decided else None
     c["ambiguous_now"] = ambiguous_now
+    lt = lifetime(state)                      # cộng dồn: không bị cửa sổ vài giờ làm nhiễu
+    c["lt_useful"], c["lt_not"], c["lt_n"] = lt["useful"], lt["not"], lt["n"]
+    c["lifetime_rate"] = lt["rate"]
     # recipe đã học được (nếu có) — thuật toán rh thật, dùng cho các lần sau
     recipes = {d["matched_recipe"] for d in ds if d.get("matched_recipe")}
     c["recipe"] = sorted(recipes)
@@ -159,8 +218,10 @@ def summary_line(c: dict) -> str:
     """1 dòng gọn để publish (KV note / log)."""
     rate = "n/a" if c.get("useful_rate") is None else f"{c['useful_rate']*100:.0f}%"
     rec = ("|rh=" + ",".join(c["recipe"])) if c.get("recipe") else ""
+    lt = ("" if c.get("lifetime_rate") is None else
+          f" lifetime={c['lifetime_rate']*100:.0f}%/n={c.get('lt_n', 0)}")
     return (f"kibble-score delivered={c['delivered']} useful={c['useful']} not={c['not']} "
-            f"useful_rate={rate} pending={c['pending']} unattested={c['unattested']}{rec}")
+            f"useful_rate={rate} pending={c['pending']} unattested={c['unattested']}{lt}{rec}")
 
 
 if __name__ == "__main__":                        # demo offline

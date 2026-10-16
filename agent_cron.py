@@ -1395,7 +1395,10 @@ def primary_alive(now: int, within_min: float) -> bool:
 _TS_DURABLE_KEYS = ("last_seq", "last_telemetry", "last_manifest", "last_digest",
                     "last_status_feed", "last_recap", "last_weekly_sample")
 _BLOB_DURABLE_KEYS = ("weekly_samples", "last_alert_price")
-DURABLE_STATE_KEYS = _TS_DURABLE_KEYS + _BLOB_DURABLE_KEYS
+# Khóa BỘ ĐẾM cộng dồn: hợp nhất bằng MAX từng ô (đếm chỉ tăng) — KHÔNG dùng luật blob
+# "local có thì local thắng", vì state.json rỗng sau khi cache mất sẽ nuốt số đã tích.
+_COUNTER_DURABLE_KEYS = ("kibble_lifetime",)
+DURABLE_STATE_KEYS = _TS_DURABLE_KEYS + _BLOB_DURABLE_KEYS + _COUNTER_DURABLE_KEYS
 STATE_KV_KEY = "state"
 
 
@@ -1421,6 +1424,12 @@ def hydrate_durable_from_kv(state: dict) -> None:
     for k in _BLOB_DURABLE_KEYS:
         if k in remote and not state.get(k):
             state[k] = remote[k]
+    if "kibble_lifetime" in remote:              # bộ đếm cộng dồn -> MAX, không ghi đè
+        try:
+            import flop_kibble_track as kt
+            kt.merge_lifetime(state, remote["kibble_lifetime"])
+        except Exception:
+            pass
 
 
 def persist_durable_to_kv(private_key, did) -> None:
@@ -3499,7 +3508,8 @@ def main():
                     if not KIBBLE_DRY_RUN and ks.get("delivered_items"):
                         kt.record_deliveries(state, ks["delivered_items"], now * 1000)
                     sm = kt.reconcile(state, ks.get("messages", []), now * 1000)
-                    save_state({"kibble_deliveries": state.get("kibble_deliveries", [])})
+                    save_state({"kibble_deliveries": state.get("kibble_deliveries", []),
+                                "kibble_lifetime": state.get("kibble_lifetime", {})})
                     line = kt.summary_line(sm)
                     kv_set(private_key, did, "kibble-score", line)   # audit công khai 1 GET
                     kibble_status += f" | {line}"

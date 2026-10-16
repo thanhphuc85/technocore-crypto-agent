@@ -1191,6 +1191,23 @@ def test_hydrate_durable_fills_empty_local_from_kv(monkeypatch):
     assert state["weekly_samples"] == [{"p": 1}]
 
 
+def test_hydrate_durable_merges_kibble_lifetime_by_max(monkeypatch):
+    # Bộ đếm CỘNG DỒN: hợp nhất bằng MAX từng ô (đếm chỉ tăng) — khác luật blob "local thắng",
+    # vì state.json rỗng sau khi cache runner mất sẽ nuốt mất số đã tích trên KV.
+    remote = {"kibble_lifetime": {"useful": 120, "not": 40}}
+    monkeypatch.setattr(ac, "kv_get", lambda k: json.dumps(remote))
+    state = {}                                       # cache mất sạch
+    ac.hydrate_durable_from_kv(state)
+    assert state["kibble_lifetime"] == {"useful": 120, "not": 40}
+    state = {"kibble_lifetime": {"useful": 130, "not": 35}}   # local đi trước ở 'useful'
+    ac.hydrate_durable_from_kv(state)
+    assert state["kibble_lifetime"] == {"useful": 130, "not": 40}
+
+
+def test_persist_durable_includes_kibble_lifetime():
+    assert "kibble_lifetime" in ac.DURABLE_STATE_KEYS
+
+
 def test_hydrate_durable_noop_on_missing_or_bad_kv(monkeypatch):
     monkeypatch.setattr(ac, "kv_get", lambda k: None)
     state = {"last_telemetry": 7}
