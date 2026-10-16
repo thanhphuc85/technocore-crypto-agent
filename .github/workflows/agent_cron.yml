@@ -247,6 +247,20 @@ jobs:
           ASK: ${{ github.event.inputs.ask }}
         run: python agent_cron.py
 
+      # Cảnh báo Discord khi run LỖI/outage (NHẸ, gated OFF nếu chưa đặt secret DISCORD_WEBHOOK_URL).
+      # Bắn trên MỌI failure (crash / timeout / outage-exit-1) kèm link log. Không bao giờ làm fail
+      # thêm job (|| true). Đặt secret: gh secret set DISCORD_WEBHOOK_URL --body "<webhook-url>".
+      - name: Discord alert on failure
+        if: failure()
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          [ -z "$DISCORD_WEBHOOK_URL" ] && exit 0
+          MSG="🔴 Technocore agent: run LỖI/outage ($(date -u '+%Y-%m-%d %H:%MZ')). Log: $RUN_URL"
+          PAYLOAD=$(MSG="$MSG" python3 -c "import json,os;print(json.dumps({'content':os.environ['MSG']}))")
+          curl -s -m 15 -H 'Content-Type: application/json' -d "$PAYLOAD" "$DISCORD_WEBHOOK_URL" >/dev/null || true
+
       # Lưu lại state cho lần chạy kế tiếp (key duy nhất theo run_id -> luôn ghi mới)
       - name: Save agent state
         if: always()
