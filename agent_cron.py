@@ -3716,10 +3716,14 @@ def main():
                     r = flop_session.maybe_run_session(
                         _m, _lt, _fl, fee=_fe,
                         submit_fn=_mempool_submit_fn,
+                        deny_dids=PROACTIVE_DENY_DIDS,   # chốt: không settle nếu match trúng miner nhà
                         private_key=private_key, did=did)
                     _last = r
-                    if r.get("stage") == "settle" and r.get("outcome") in ("spent_onchain", "spent_simulated"):
+                    _oc = r.get("outcome")
+                    if r.get("stage") == "settle" and _oc in ("spent_onchain", "spent_simulated"):
                         _settled += 1
+                    elif _oc == "skipped_fleet_miner":
+                        continue   # trúng miner fleet -> bỏ phiên này, thử phiên khác (match khác)
                     else:
                         break   # off/unconfigured/no_miner/insufficient/error -> KHÔNG spin vòng
                 session_status = f"{_settled}✓ {_last.get('stage', '-')}/{_last.get('outcome', '?')}"

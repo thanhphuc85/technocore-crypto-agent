@@ -197,17 +197,27 @@ def dispute(request: dict, poui: dict, reason: str, *, path: str = None, log=pri
 def run_inference_session(model_hash: str, max_latency_ms: int, flops: int,
                           security_flags=None, fee: str = None, *, token: str = None,
                           path: str = None, submit_fn=None, submit_tx=None,
-                          private_key=None, did: str = None, log=print) -> dict:
+                          private_key=None, did: str = None, deny_dids=None, log=print) -> dict:
     """Mua MỘT phiên inference trọn vòng: build -> đăng mempool -> nhận PoUI -> verify ->
     settle (nếu hợp lệ) hoặc dispute (nếu sai). Trả dict có 'stage' + 'outcome' để caller
     biết dừng ở đâu. SIMULATION chạy trọn happy-path bằng thợ đào giả; TESTNET cần submit_fn
-    (đăng mempool) và submit_tx (thanh toán)."""
+    (đăng mempool) và submit_tx (thanh toán).
+
+    `deny_dids` = tập DID fleet nhà (main + fork). Nếu mempool match TRÚNG một miner trong đó
+    -> KHÔNG settle (trả 'skipped_fleet_miner'): luật FLOP 'independent demand only' không tính
+    chi cho miner cùng-nhóm + là cờ sybil. Chốt an toàn khi match tự nhiên lỡ rơi vào miner nhà."""
     req = build_request(model_hash, max_latency_ms, flops, security_flags, fee,
                         token=token, private_key=private_key, did=did)
     sub = submit_request(req, submit_fn=submit_fn, log=log)
     if sub["outcome"] != "accepted":
         return {"stage": "submit", "request_id": req["id"], **sub}
     accept = sub["accept"]
+    _miner = accept.get("miner_did")
+    if deny_dids and _miner in set(deny_dids):
+        log(f"[session] match trúng miner FLEET {str(_miner)[:16]}… -> BỎ, KHÔNG settle "
+            "(independent-demand-only, chống self-deal)")
+        return {"stage": "match", "outcome": "skipped_fleet_miner",
+                "request_id": req["id"], "miner_did": _miner}
     poui = accept.get("poui")
     if poui is None:
         # Testnet có thể trả bất đồng bộ (PoUI tới sau) -> báo pending, caller xử tiếp.
