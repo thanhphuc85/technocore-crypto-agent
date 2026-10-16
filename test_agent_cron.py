@@ -1886,3 +1886,48 @@ def test_start_jitter_varies():
     rng = _random_j.Random(2)
     vals = {round(ac.start_jitter_seconds("180", rng=rng), 3) for _ in range(20)}
     assert len(vals) > 1    # mỗi run lệch nhau -> không lockstep
+
+
+# --- LLM: lọc model TTS + nối OpenRouter + đổi thứ tự provider ---------------------
+def test_groq_non_chat_filters_tts_models():
+    def is_non_chat(mid):
+        return any(h in mid.lower() for h in ac._GROQ_NON_CHAT)
+    # TTS/audio -> PHẢI bị loại (gọi /chat/completions với chúng luôn 400)
+    assert is_non_chat("canopylabs/orpheus-v1-english")
+    assert is_non_chat("canopylabs/orpheus-arabic-saudi")
+    assert is_non_chat("playai-tts")
+    assert is_non_chat("whisper-large-v3")
+    # model chat THẬT -> KHÔNG được loại
+    assert not is_non_chat("llama-3.3-70b-versatile")
+    assert not is_non_chat("openai/gpt-oss-120b")
+    assert not is_non_chat("allam-2-7b")
+
+
+def test_provider_has_key_openrouter(monkeypatch):
+    monkeypatch.setattr(ac, "OPENROUTER_API_KEY", "")
+    assert ac._provider_has_key("openrouter") is False
+    monkeypatch.setattr(ac, "OPENROUTER_API_KEY", "sk-or-test")
+    assert ac._provider_has_key("openrouter") is True
+
+
+def test_one_reply_routes_openrouter(monkeypatch):
+    called = {}
+
+    def fake(u, s, t, m=120):
+        called["ok"] = True
+        return "hi"
+
+    monkeypatch.setattr(ac, "_openrouter_reply", fake)
+    assert ac._one_reply("openrouter", "q", "sys", 0.2) == "hi"
+    assert called.get("ok") is True
+
+
+def test_provider_chain_custom_order_includes_openrouter(monkeypatch):
+    monkeypatch.setattr(ac, "LLM_PROVIDER", "auto")
+    monkeypatch.setattr(ac, "LLM_PROVIDER_ORDER", ["gemini", "openrouter", "groq"])
+    monkeypatch.setattr(ac, "GEMINI_API_KEY", "g")
+    monkeypatch.setattr(ac, "OPENROUTER_API_KEY", "o")
+    monkeypatch.setattr(ac, "GROQ_API_KEY", "")        # không key -> bị lọc khỏi chuỗi
+    monkeypatch.setattr(ac, "DEEPSEEK_API_KEY", "")
+    monkeypatch.setattr(ac, "OPENAI_API_KEY", "")
+    assert ac._provider_chain() == ["gemini", "openrouter"]

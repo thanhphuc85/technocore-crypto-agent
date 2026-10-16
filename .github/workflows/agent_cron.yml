@@ -79,6 +79,13 @@ jobs:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          # SAN TẢI khi Groq hay 429: đổi thứ tự provider (CSV). Rỗng -> mặc định
+          # groq,gemini,openrouter,deepseek,openai. Vd dồn sang Gemini/OpenRouter:
+          #   LLM_PROVIDER_ORDER=gemini,openrouter,groq
+          LLM_PROVIDER_ORDER: ${{ vars.LLM_PROVIDER_ORDER }}
+          # Model OpenRouter (gateway nhiều model, có bản :free). Rỗng -> dùng mặc định trong code.
+          OPENROUTER_MODEL: ${{ vars.OPENROUTER_MODEL }}
           # Để trống -> tự dò model Groq hợp lệ trên key (Groq hay đổi/deprecate model).
           # Ghim model cụ thể bằng cách đặt Variable GROQ_MODEL nếu muốn.
           GROQ_MODEL: ${{ vars.GROQ_MODEL }}

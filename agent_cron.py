@@ -279,6 +279,7 @@ DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "").strip()
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "").strip()
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "").strip()  # để trống -> tự dò model hợp lệ
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
@@ -289,9 +290,19 @@ DEEPSEEK_BASE_URL = os.environ.get(
 # Endpoint Groq (OpenAI-compatible). Đổi được qua env nếu dùng proxy/gateway riêng.
 GROQ_BASE_URL = os.environ.get(
     "GROQ_BASE_URL", "https://api.groq.com/openai/v1").rstrip("/")
-# Thứ tự ưu tiên khi tự chọn provider ở chế độ auto (chỉ giữ provider có key).
-# Groq đứng chính (free tier nhanh); Gemini phụ ổn định; DeepSeek sau (hay 402 khi hết credit).
-LLM_PROVIDER_ORDER = ["groq", "gemini", "deepseek", "openai"]
+# Endpoint OpenRouter (OpenAI-compatible). Model PHẢI ghi rõ (vd "meta-llama/llama-3.3-70b-instruct:free").
+OPENROUTER_BASE_URL = os.environ.get(
+    "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
+OPENROUTER_MODEL = (os.environ.get("OPENROUTER_MODEL", "").strip()
+                    or "meta-llama/llama-3.3-70b-instruct:free")
+# Thứ tự ưu tiên khi tự chọn provider ở chế độ auto (chỉ giữ provider CÓ KEY).
+# Mặc định: Groq (free, nhanh) -> Gemini (ổn định) -> OpenRouter -> DeepSeek (hay 402) -> OpenAI.
+# ĐỔI ĐƯỢC qua env LLM_PROVIDER_ORDER (CSV) để DỒN TẢI khi Groq hay 429, ví dụ:
+#   LLM_PROVIDER_ORDER=gemini,openrouter,groq
+_DEFAULT_PROVIDER_ORDER = ["groq", "gemini", "openrouter", "deepseek", "openai"]
+LLM_PROVIDER_ORDER = [p.strip().lower() for p in
+                      os.environ.get("LLM_PROVIDER_ORDER", "").split(",")
+                      if p.strip()] or _DEFAULT_PROVIDER_ORDER
 # Thứ tự ưu tiên khi tự chọn model Gemini (chỉ dùng model thật sự có trên key)
 GEMINI_PREFERRED = [
     "gemini-2.5-flash", "gemini-2.0-flash", "gemini-flash-latest",
@@ -307,7 +318,10 @@ GROQ_PREFERRED = [
     "llama3-70b-8192", "llama3-8b-8192",
 ]
 # Model KHÔNG phải chat (bỏ khi quét danh sách live để tránh thử nhầm TTS/ASR/guard/embed).
-_GROQ_NON_CHAT = ("whisper", "tts", "guard", "embed", "distil")
+# Model KHÔNG phải chat trên Groq -> bỏ khỏi danh sách thử. "orpheus"/"playai"/"audio" là
+# TTS: gọi /chat/completions với chúng LUÔN trả 400 -> thử là phí call (tệ hơn khi đang 429).
+_GROQ_NON_CHAT = ("whisper", "tts", "guard", "embed", "distil",
+                  "orpheus", "playai", "audio")
 LLM_MAX_CHARS = 220             # giới hạn độ dài câu trả lời LLM
 
 # --- (A1) Daily AI Market Digest — nội dung CÔNG KHAI hữu ích do AI sinh (grounded).
@@ -1562,6 +1576,7 @@ def _provider_has_key(provider: str) -> bool:
         "deepseek": bool(DEEPSEEK_API_KEY),
         "gemini": bool(GEMINI_API_KEY),
         "openai": bool(OPENAI_API_KEY),
+        "openrouter": bool(OPENROUTER_API_KEY),
     }.get(provider, False)
 
 
@@ -1596,6 +1611,8 @@ def _one_reply(provider: str, user_text: str, system: str, temperature: float,
         return _deepseek_reply(user_text, system, temperature, max_tokens)
     if provider == "gemini":
         return _gemini_reply(user_text, system, temperature, max_tokens)
+    if provider == "openrouter":
+        return _openrouter_reply(user_text, system, temperature, max_tokens)
     if provider == "openai":
         return _openai_reply(user_text, system, temperature, max_tokens)
     raise RuntimeError(f"unknown provider {provider}")
@@ -1721,6 +1738,15 @@ def _deepseek_reply(user_text: str, system: str, temperature: float,
     return _openai_compatible_reply(
         f"{DEEPSEEK_BASE_URL}/chat/completions",
         DEEPSEEK_API_KEY, DEEPSEEK_MODEL, user_text, system, temperature, max_tokens)
+
+
+def _openrouter_reply(user_text: str, system: str, temperature: float,
+                      max_tokens: int = 120) -> str:
+    """OpenRouter dùng chung schema OpenAI (chat/completions + Bearer). Gateway nhiều model
+    (có bản :free) -> dùng để SAN TẢI khi Groq bị 429. Đặt OPENROUTER_MODEL cho model mong muốn."""
+    return _openai_compatible_reply(
+        f"{OPENROUTER_BASE_URL}/chat/completions",
+        OPENROUTER_API_KEY, OPENROUTER_MODEL, user_text, system, temperature, max_tokens)
 
 
 _groq_model_cache = None
