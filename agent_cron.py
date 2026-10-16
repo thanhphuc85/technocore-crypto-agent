@@ -3487,6 +3487,7 @@ def main():
                 dry_run=TCLK_DRY_RUN,
                 now_ms=now * 1000,
                 job_spec_fn=tclk_job_spec,       # bộ lọc chỉ-nhận-text: bỏ job media ngay ở accept
+                deny_dids=PROACTIVE_DENY_DIDS,   # KHÔNG nhận offer của fleet nhà -> chống tự-mua-bán (sybil)
             )
             save_state({"tclk_cursor": state.get("tclk_cursor"),
                         "tclk_accepted": state.get("tclk_accepted", []),

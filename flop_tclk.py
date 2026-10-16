@@ -179,14 +179,18 @@ def encode_frame(frame: dict) -> str:
 
 # ── Chọn offer đáng nhận (vai PAYEE) ─────────────────────────────────────────
 def select_offers(messages, accepted_set, my_did, now_ms, allow_rails,
-                  min_claim_window_ms, min_refund_gap_ms, max_n):
+                  min_claim_window_ms, min_refund_gap_ms, max_n, deny_dids=None):
     """Lọc offer để NHẬN (payee). Điều kiện, tất cả phải đúng:
-      - frame offer hợp lệ, KHÔNG do mình đăng, chưa nhận (id chưa trong accepted_set),
+      - frame offer hợp lệ, KHÔNG do mình đăng, KHÔNG do fleet nhà (deny_dids) đăng,
+      - chưa nhận (id chưa trong accepted_set),
       - role='payer' (bên gửi TRẢ TIỀN -> mình làm việc), lock='hash',
       - có rail giao nhau với allow_rails, còn hạn (expiresMs>now), deadline đủ margin,
       - offer_id tính lại KHỚP id trong frame (chống offer bịa id).
-    Hàm THUẦN — không mạng, không side-effect. Trả list (tối đa max_n) kèm seq để tiến cursor."""
+    `deny_dids` = tập DID fleet nhà (main + fork) để KHÔNG tự-mua-bán nội bộ (luật FLOP
+    'independent demand only': chi giữa ví cùng-nhóm = không tính + cờ sybil). Hàm THUẦN —
+    không mạng, không side-effect. Trả list (tối đa max_n) kèm seq để tiến cursor."""
     allow = {r.strip().lower() for r in (allow_rails or []) if r and r.strip()}
+    deny = set(deny_dids or ())
     picked = []
     for m in sorted(messages, key=lambda x: x.get("seq", 0)):
         if len(picked) >= max_n:
@@ -194,7 +198,7 @@ def select_offers(messages, accepted_set, my_did, now_ms, allow_rails,
         o = parse_frame(m.get("text", ""))
         if not o or not _valid_offer_shape(o):
             continue
-        if o.get("from") == my_did or o.get("role") != "payer" or o.get("lock") != "hash":
+        if o.get("from") == my_did or o.get("from") in deny or o.get("role") != "payer" or o.get("lock") != "hash":
             continue
         if o["id"] in accepted_set:
             continue
@@ -235,7 +239,7 @@ def is_media_job(spec: str) -> bool:
 # ── Worker (DRY-RUN mặc định) ────────────────────────────────────────────────
 def run_tclk_payee(fetch_fn, post_fn, state, *, my_did, allow_rails,
                    min_claim_window_ms, min_refund_gap_ms, max_per_run=2,
-                   dry_run=True, now_ms=None, job_spec_fn=None, log=print):
+                   dry_run=True, now_ms=None, job_spec_fn=None, deny_dids=None, log=print):
     """Quét tclk-offers, chọn offer đáng nhận, dựng `accept`.
       fetch_fn(since)   -> data JSON như /r/tclk-offers?format=json
       post_fn(text)     -> bool (chỉ gọi khi dry_run=False, và CHỈ để post `accept`)
@@ -254,7 +258,8 @@ def run_tclk_payee(fetch_fn, post_fn, state, *, my_did, allow_rails,
     messages = data.get("messages", [])
     accepted_set = set(state.get("tclk_accepted", []))
     picks = select_offers(messages, accepted_set, my_did, now_ms, allow_rails,
-                          min_claim_window_ms, min_refund_gap_ms, max_per_run)
+                          min_claim_window_ms, min_refund_gap_ms, max_per_run,
+                          deny_dids=deny_dids)
 
     accepted, skipped = [], 0
     cursor = last or 0
