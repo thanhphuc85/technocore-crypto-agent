@@ -1853,3 +1853,36 @@ def test_answer_kibble_job_no_grounding_when_not_market(monkeypatch):
     ac.answer_kibble_job(_job(jtype="explain", title="French Revolution", body="explain it"))
     assert not captured["prompt"].startswith("LIVE")              # không ctx -> prompt = task isolate
     assert captured["prompt"].startswith("The text between the markers")   # bắt đầu thẳng ở isolate
+
+
+# --- Jitter khởi động (chống lockstep runner/fork) ---------------------------------
+import random as _random_j
+
+
+def test_start_jitter_off_by_default():
+    assert ac.start_jitter_seconds(None) == 0.0
+    assert ac.start_jitter_seconds("") == 0.0
+    assert ac.start_jitter_seconds("0") == 0.0
+
+
+def test_start_jitter_invalid_returns_zero():
+    assert ac.start_jitter_seconds("abc") == 0.0
+    assert ac.start_jitter_seconds("-5") == 0.0   # âm -> kẹp 0
+
+
+def test_start_jitter_within_bounds_and_clamped():
+    rng = _random_j.Random(0)
+    for _ in range(100):
+        v = ac.start_jitter_seconds("180", rng=rng)
+        assert 0.0 <= v <= 180.0
+    # kẹp trần 280 dù set lớn
+    rng = _random_j.Random(1)
+    for _ in range(100):
+        v = ac.start_jitter_seconds("9999", rng=rng)
+        assert 0.0 <= v <= 280.0
+
+
+def test_start_jitter_varies():
+    rng = _random_j.Random(2)
+    vals = {round(ac.start_jitter_seconds("180", rng=rng), 3) for _ in range(20)}
+    assert len(vals) > 1    # mỗi run lệch nhau -> không lockstep

@@ -120,6 +120,10 @@ jobs:
           FLOP_POST_JITTER_MS: ${{ vars.FLOP_POST_JITTER_MS }}
           FLOP_POST_RETRY_429: ${{ vars.FLOP_POST_RETRY_429 }}
           FLOP_POST_RETRY_429_MAX_S: ${{ vars.FLOP_POST_RETRY_429_MAX_S }}
+          # Jitter khởi động: ngủ ngẫu nhiên 0..N giây đầu run -> chống LOCKSTEP giữa các runner/
+          # fork cùng nhịp (post lệch giờ nhau, giảm tín hiệu cluster). Mặc định 0 (tắt). Mỗi
+          # runner/fork đặt giá trị KHÁC nhau. Chạy trên GitHub Actions, không cần VPS.
+          FLOP_START_JITTER_MAX_SEC: ${{ vars.FLOP_START_JITTER_MAX_SEC }}
           # Auto-reply CHỌN LỌC (2 chiều): chào peer mới 1 lần + trả lời khi peer hỏi câu crypto
           # (LLM thật). Mặc định BẬT. Tăng tương tác để tích trục "được-trả-lời" của census, nhưng
           # GIỮ trần chống-loop: PEER_REPLY_MAX/PEER_REPLY_WINDOW_HOURS (mỗi peer) + COOLDOWN.

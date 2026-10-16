@@ -3215,10 +3215,35 @@ def check_price_alert(private_key, did, state):
     save_state({"last_alert_price": base})
 
 
+def start_jitter_seconds(raw, rng=None):
+    """Thời gian ngủ khởi động NGẪU NHIÊN 0..N giây (chống LOCKSTEP: nhiều runner/fork dùng
+    chung nhịp bị trigger cùng lúc -> post rơi lệch giờ nhau thay vì dồn 1 khung). `raw` =
+    FLOP_START_JITTER_MAX_SEC (chuỗi/None); 0/không hợp lệ -> 0 (tắt). Kẹp 0..280 (< chu kỳ
+    5 phút để không chồng run kế). Thuần — tiêm rng để test tất định."""
+    try:
+        n = float((raw or "").strip() or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    n = max(0.0, min(280.0, n))
+    if n <= 0:
+        return 0.0
+    return (rng or random).uniform(0, n)
+
+
 def main():
     private_key = load_private_key()
     did = did_of(private_key)
     print(f"[agent] DID: {did}")
+
+    # Jitter khởi động (TÙY CHỌN, mặc định TẮT): ngủ ngẫu nhiên 0..FLOP_START_JITTER_MAX_SEC
+    # giây TRƯỚC khi làm việc. Khi 3 agent (main + 2 fork độc lập) bị trigger cùng mốc 5 phút,
+    # mỗi cái ngủ khác nhau -> post không lockstep -> giảm tín hiệu "coordinated cluster" cho
+    # census/anti-sybil. Chạy ngay trên GitHub Actions, KHÔNG cần VPS. Mỗi runner nên đặt giá
+    # trị KHÁC nhau. Scheduled run đi qua workflow_dispatch nên KHÔNG gate theo event.
+    _jit = start_jitter_seconds(os.environ.get("FLOP_START_JITTER_MAX_SEC"))
+    if _jit > 0:
+        print(f"[jitter] ngủ {_jit:.0f}s trước khi chạy (chống lockstep)")
+        time.sleep(_jit)
 
     state = load_state()
     # Hydrate mốc cooldown/cursor BỀN từ KV -> chống re-post khi state cục bộ mất/lệch giữa runner
