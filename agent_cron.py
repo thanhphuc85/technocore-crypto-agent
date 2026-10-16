@@ -1658,21 +1658,39 @@ def _gemini_list_models():
 
 
 def _gemini_candidates():
-    """Danh sách model để thử lần lượt, xếp theo độ ưu tiên."""
-    if GEMINI_MODEL:                     # user ép model cụ thể -> thử trước, NHƯNG
-        # vẫn xếp GEMINI_PREFERRED phía sau làm fallback nếu model ghim fail.
-        return [GEMINI_MODEL] + [p for p in GEMINI_PREFERRED if p != GEMINI_MODEL]
+    """SINH (generator) model để thử lần lượt, xếp theo ưu tiên — và CHỈ model THỰC SỰ có
+    trên key (tránh phí call vào model không tồn tại -> 404).
+
+    LƯỜI có chủ đích: model ghim (GEMINI_MODEL) được yield TRƯỚC khi gọi list models, nên
+    happy-path (ghim/cache chạy được) KHÔNG tốn thêm call nào. Chỉ khi model ghim FAIL,
+    generator mới chạy tiếp -> lúc đó mới list để lọc 404 cho các fallback."""
+    pinned = GEMINI_MODEL
+    if pinned:
+        yield pinned                     # thử model ghim trước — chưa cần list
+    # Tới đây = ghim đã fail (hoặc không ghim) -> giờ mới list để lọc model không tồn tại.
     try:
         models = _gemini_list_models()
     except Exception as e:
         print(f"[llm:gemini] list models failed | {e}")
-        return list(GEMINI_PREFERRED)    # đoán khi không list được
+        for p in GEMINI_PREFERRED:       # không list được -> đành đoán (hành vi cũ)
+            if p != pinned:
+                yield p
+        return
     print(f"[llm:gemini] available ({len(models)}): {', '.join(models[:12])}"
           + (" ..." if len(models) > 12 else ""))
-    ordered = [p for p in GEMINI_PREFERRED if p in models]
-    ordered += [m for m in models if "flash" in m and m not in ordered]
-    ordered += [m for m in models if m not in ordered]
-    return ordered or list(GEMINI_PREFERRED)
+    seen = {pinned} if pinned else set()
+    for p in GEMINI_PREFERRED:           # ưu tiên trước — nhưng CHỈ cái có trên key
+        if p in models and p not in seen:
+            seen.add(p)
+            yield p
+    for m in models:                     # rồi tới các model 'flash' khác trên key
+        if "flash" in m and m not in seen:
+            seen.add(m)
+            yield m
+    for m in models:                     # cuối cùng là phần còn lại trên key
+        if m not in seen:
+            seen.add(m)
+            yield m
 
 
 def _gemini_call(model: str, user_text: str, system: str, temperature: float,

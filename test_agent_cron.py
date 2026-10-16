@@ -1931,3 +1931,55 @@ def test_provider_chain_custom_order_includes_openrouter(monkeypatch):
     monkeypatch.setattr(ac, "DEEPSEEK_API_KEY", "")
     monkeypatch.setattr(ac, "OPENAI_API_KEY", "")
     assert ac._provider_chain() == ["gemini", "openrouter"]
+
+
+# --- Gemini: lọc model không có trên key (tránh 404) + LƯỜI ở happy-path ----------
+def test_gemini_candidates_pinned_first_and_lazy(monkeypatch):
+    """Model ghim yield TRƯỚC và KHÔNG gọi list models -> happy-path không tốn call."""
+    calls = {"n": 0}
+
+    def fake_list():
+        calls["n"] += 1
+        return ["gemini-flash-lite-latest", "gemini-pro-x"]
+
+    monkeypatch.setattr(ac, "GEMINI_MODEL", "gemini-flash-lite-latest")
+    monkeypatch.setattr(ac, "_gemini_list_models", fake_list)
+    gen = ac._gemini_candidates()
+    assert next(gen) == "gemini-flash-lite-latest"
+    assert calls["n"] == 0                      # LƯỜI: chưa hề list
+
+
+def test_gemini_candidates_drops_models_not_on_key(monkeypatch):
+    """Khi ghim fail -> fallback CHỈ gồm model có trên key (hết 404)."""
+    monkeypatch.setattr(ac, "GEMINI_MODEL", "gemini-flash-lite-latest")
+    monkeypatch.setattr(ac, "GEMINI_PREFERRED",
+                        ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-flash-latest"])
+    monkeypatch.setattr(ac, "_gemini_list_models",
+                        lambda: ["gemini-flash-lite-latest", "gemini-flash-latest"])
+    out = list(ac._gemini_candidates())
+    assert out[0] == "gemini-flash-lite-latest"       # ghim thử trước
+    assert "gemini-2.5-flash" not in out              # không có trên key -> loại
+    assert "gemini-1.5-flash" not in out              # không có trên key -> loại
+    assert "gemini-flash-latest" in out               # có trên key -> giữ
+    assert len(out) == len(set(out))                  # không lặp model
+
+
+def test_gemini_candidates_list_fails_falls_back_to_preferred(monkeypatch):
+    def boom():
+        raise RuntimeError("no network")
+
+    monkeypatch.setattr(ac, "GEMINI_MODEL", "")
+    monkeypatch.setattr(ac, "GEMINI_PREFERRED", ["a-flash", "b-flash"])
+    monkeypatch.setattr(ac, "_gemini_list_models", boom)
+    assert list(ac._gemini_candidates()) == ["a-flash", "b-flash"]
+
+
+def test_gemini_candidates_no_pin_orders_available(monkeypatch):
+    monkeypatch.setattr(ac, "GEMINI_MODEL", "")
+    monkeypatch.setattr(ac, "GEMINI_PREFERRED", ["p-flash", "missing-flash"])
+    monkeypatch.setattr(ac, "_gemini_list_models",
+                        lambda: ["p-flash", "other-flash", "z-pro"])
+    out = list(ac._gemini_candidates())
+    assert out[0] == "p-flash"                  # preferred CÓ trên key -> ưu tiên
+    assert "missing-flash" not in out           # preferred KHÔNG có trên key -> loại
+    assert "other-flash" in out and "z-pro" in out
