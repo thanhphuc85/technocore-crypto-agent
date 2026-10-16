@@ -2023,3 +2023,56 @@ def test_gemini_list_models_drops_non_chat(monkeypatch):
 
     monkeypatch.setattr(ac.requests, "get", lambda *a, **k: FakeResp())
     assert ac._gemini_list_models() == ["gemini-2.5-flash", "gemini-flash-lite-latest"]
+
+
+# --- Gemini: ghi nhớ model 404 (vĩnh viễn) nhưng KHÔNG nhớ 503/429 (tạm thời) ------
+class _FakeHTTPError(Exception):
+    def __init__(self, status):
+        super().__init__(f"{status} error")
+        self.response = type("R", (), {"status_code": status})()
+
+
+def test_is_http_404_uses_status_code_not_string():
+    assert ac._is_http_404(_FakeHTTPError(404)) is True
+    assert ac._is_http_404(_FakeHTTPError(503)) is False
+    assert ac._is_http_404(_FakeHTTPError(429)) is False
+    assert ac._is_http_404(RuntimeError("chuỗi có 404 nhưng không phải HTTP")) is False
+
+
+def test_gemini_note_404_only_remembers_permanent(monkeypatch):
+    monkeypatch.setattr(ac, "_gemini_404", set())
+    ac._gemini_note_404("ghost-model", _FakeHTTPError(404))
+    assert "ghost-model" in ac._gemini_404
+    # 503/429 là TẠM THỜI -> tuyệt đối KHÔNG ghi nhớ (model có thể sống lại)
+    ac._gemini_note_404("busy-model", _FakeHTTPError(503))
+    ac._gemini_note_404("rate-model", _FakeHTTPError(429))
+    assert "busy-model" not in ac._gemini_404
+    assert "rate-model" not in ac._gemini_404
+
+
+def test_gemini_note_404_respects_cap(monkeypatch):
+    monkeypatch.setattr(ac, "_gemini_404", {f"m{i}" for i in range(ac.GEMINI_404_MAX)})
+    ac._gemini_note_404("one-too-many", _FakeHTTPError(404))
+    assert "one-too-many" not in ac._gemini_404      # chạm trần -> không thêm nữa
+
+
+def test_gemini_candidates_skips_remembered_404(monkeypatch):
+    monkeypatch.setattr(ac, "GEMINI_MODEL", "pinned-flash")
+    monkeypatch.setattr(ac, "GEMINI_PREFERRED", ["ghost-flash", "good-flash"])
+    monkeypatch.setattr(ac, "_gemini_list_models",
+                        lambda: ["pinned-flash", "ghost-flash", "good-flash"])
+    monkeypatch.setattr(ac, "_gemini_404", {"ghost-flash"})
+    out = list(ac._gemini_candidates())
+    assert out[0] == "pinned-flash"
+    assert "ghost-flash" not in out          # đã 404 -> không thử lại nữa
+    assert "good-flash" in out
+
+
+def test_gemini_candidates_skips_pinned_when_it_404ed(monkeypatch):
+    monkeypatch.setattr(ac, "GEMINI_MODEL", "pinned-flash")
+    monkeypatch.setattr(ac, "GEMINI_PREFERRED", ["good-flash"])
+    monkeypatch.setattr(ac, "_gemini_list_models", lambda: ["pinned-flash", "good-flash"])
+    monkeypatch.setattr(ac, "_gemini_404", {"pinned-flash"})
+    out = list(ac._gemini_candidates())
+    assert "pinned-flash" not in out         # ghim nhưng đã 404 -> bỏ luôn
+    assert out[0] == "good-flash"
