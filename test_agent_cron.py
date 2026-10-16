@@ -1983,3 +1983,43 @@ def test_gemini_candidates_no_pin_orders_available(monkeypatch):
     assert out[0] == "p-flash"                  # preferred CÓ trên key -> ưu tiên
     assert "missing-flash" not in out           # preferred KHÔNG có trên key -> loại
     assert "other-flash" in out and "z-pro" in out
+
+
+# --- Gemini: lọc model không-chat (tts/ảnh/embed) --------------------------------
+def test_gemini_non_chat_filters_tts_image_but_keeps_chat():
+    def is_non_chat(mid):
+        return any(h in mid.lower() for h in ac._GEMINI_NON_CHAT)
+    # Không-chat -> PHẢI loại (đây là thủ phạm 400/429 trong log)
+    assert is_non_chat("gemini-2.5-flash-preview-tts")
+    assert is_non_chat("gemini-2.5-flash-image")
+    assert is_non_chat("imagen-3.0-generate-002")
+    assert is_non_chat("text-embedding-004")
+    assert is_non_chat("gemini-pro-vision")
+    # Chat THẬT -> KHÔNG được loại nhầm
+    assert not is_non_chat("gemini-2.5-flash")
+    assert not is_non_chat("gemini-2.5-pro")
+    assert not is_non_chat("gemini-flash-lite-latest")
+    assert not is_non_chat("gemini-3-flash-preview")
+
+
+def test_gemini_list_models_drops_non_chat(monkeypatch):
+    class FakeResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"models": [
+                {"name": "models/gemini-2.5-flash",
+                 "supportedGenerationMethods": ["generateContent"]},
+                {"name": "models/gemini-2.5-flash-preview-tts",      # TTS -> loại
+                 "supportedGenerationMethods": ["generateContent"]},
+                {"name": "models/gemini-2.5-flash-image",            # ảnh -> loại
+                 "supportedGenerationMethods": ["generateContent"]},
+                {"name": "models/text-embedding-004",                # không generateContent
+                 "supportedGenerationMethods": ["embedContent"]},
+                {"name": "models/gemini-flash-lite-latest",
+                 "supportedGenerationMethods": ["generateContent"]},
+            ]}
+
+    monkeypatch.setattr(ac.requests, "get", lambda *a, **k: FakeResp())
+    assert ac._gemini_list_models() == ["gemini-2.5-flash", "gemini-flash-lite-latest"]

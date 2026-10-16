@@ -320,6 +320,11 @@ GROQ_PREFERRED = [
 # Model KHÔNG phải chat (bỏ khi quét danh sách live để tránh thử nhầm TTS/ASR/guard/embed).
 # Model KHÔNG phải chat trên Groq -> bỏ khỏi danh sách thử. "orpheus"/"playai"/"audio" là
 # TTS: gọi /chat/completions với chúng LUÔN trả 400 -> thử là phí call (tệ hơn khi đang 429).
+# Model KHÔNG phải chat trên Gemini -> bỏ khỏi danh sách thử. ListModels của Google TRẢ VỀ
+# cả model tts/ảnh/embed (vd gemini-2.5-flash-preview-tts -> 400, gemini-2.5-flash-image ->
+# 429) và heuristic "flash" lại kéo chúng vào -> phí call. Cùng bản chất với TTS bên Groq.
+_GEMINI_NON_CHAT = ("tts", "image", "imagen", "embed", "vision",
+                    "audio", "aqa", "veo")
 _GROQ_NON_CHAT = ("whisper", "tts", "guard", "embed", "distil",
                   "orpheus", "playai", "audio")
 LLM_MAX_CHARS = 220             # giới hạn độ dài câu trả lời LLM
@@ -1644,17 +1649,22 @@ _gemini_model_cache = None
 
 
 def _gemini_list_models():
-    """Danh sách model hỗ trợ generateContent trên key hiện tại (đã strip 'models/')."""
+    """Model hỗ trợ generateContent trên key hiện tại (đã strip 'models/'), ĐÃ LỌC model
+    không-chat (tts/ảnh/embed/...) — gọi chat với chúng chỉ tốn call vô ích (400/429)."""
     r = requests.get(
         f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}&pageSize=1000",
         timeout=15,
     )
     r.raise_for_status()
-    return [
-        m["name"].split("/")[-1]
-        for m in r.json().get("models", [])
-        if "generateContent" in m.get("supportedGenerationMethods", [])
-    ]
+    out = []
+    for m in r.json().get("models", []):
+        if "generateContent" not in (m.get("supportedGenerationMethods") or []):
+            continue
+        mid = (m.get("name") or "").split("/")[-1]
+        if not mid or any(h in mid.lower() for h in _GEMINI_NON_CHAT):
+            continue
+        out.append(mid)
+    return out
 
 
 def _gemini_candidates():
