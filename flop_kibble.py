@@ -126,6 +126,45 @@ def parse_kibble_msg(text: str):
     return None
 
 
+# --- Chống bàn giao na ná nhau -------------------------------------------------------
+# Vì sao: board có requester nhả HÀNG LOẠT job gần như y hệt (chỉ khác hậu tố id). Trả lời
+# cả loạt sinh ra nhiều deliverable na ná từ CÙNG một DID — đúng tín hiệu `boilerplate` /
+# `self_repeat` mà census chấm điểm, và là thứ "manufactured activity" nhắm tới. Nên nhớ
+# vân tay vài job gần nhất rồi bỏ job gần trùng. Thuần, không mạng, không side-effect.
+DUP_KEEP = 40                     # số vân tay giữ lại (đủ phủ vài giờ ở nhịp hiện tại)
+_WORD_RE = re.compile(r"[a-z0-9]+")
+
+
+def job_fingerprint(title: str, body: str) -> list:
+    """Vân tay 1 job = tập TỪ chuẩn hoá (sorted, không trùng) của title+body."""
+    return sorted(set(_WORD_RE.findall(f"{title or ''} {body or ''}".lower())))
+
+
+def similarity(a, b) -> float:
+    """Jaccard giữa 2 vân tay: |giao| / |hợp|. 1.0 = trùng hẳn, 0.0 = không chung từ nào.
+    Chọn Jaccard vì nó bỏ qua thứ tự từ — loạt job cùng template chỉ khác hậu tô id vẫn
+    ra ~0.95+, trong khi 2 job khác chủ đề rơi xuống rất thấp."""
+    sa, sb = set(a or []), set(b or [])
+    if not sa or not sb:
+        return 0.0
+    return len(sa & sb) / len(sa | sb)
+
+
+def is_near_duplicate(fp, recent, threshold: float) -> bool:
+    """True nếu fp giống >= threshold với BẤT KỲ vân tay nào trong recent.
+    threshold <= 0 -> TẮT hẳn (luôn False) để có thể vô hiệu hoá bằng config."""
+    if not fp or threshold <= 0:
+        return False
+    return any(similarity(fp, r) >= threshold for r in (recent or []))
+
+
+def remember_fingerprint(recent, fp, keep: int = DUP_KEEP) -> list:
+    """Trả list MỚI: fp lên đầu, bỏ bản cũ trùng hệt, cắt còn `keep`."""
+    if not fp:
+        return list(recent or [])
+    return ([list(fp)] + [r for r in (recent or []) if list(r) != list(fp)])[: max(0, int(keep))]
+
+
 def format_claim(jobid: str) -> str:
     return f"CLAIM v1 | {jobid} | worker"
 

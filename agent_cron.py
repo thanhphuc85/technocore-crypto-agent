@@ -432,6 +432,11 @@ KIBBLE_DO_CLAIM = os.environ.get("FLOP_KIBBLE_CLAIM", "on").strip().lower() not 
 # CHÍNH mình (baseline chất lượng kibble). Mặc định TẮT; chỉ đọc/ghi 1 KV note khi bật.
 KIBBLE_TRACK_ENABLED = os.environ.get("FLOP_KIBBLE_TRACK_ENABLED", "").strip().lower() in (
     "1", "true", "on", "yes")
+# Ngưỡng Jaccard coi 2 job là "gần trùng" -> bỏ job sau. 0 = TẮT. Mặc định 0.85: loạt job
+# cùng template (chỉ khác hậu tố id) đo được ~0.95+, còn 2 job khác chủ đề thấp hơn nhiều.
+KIBBLE_DUP_SIM = _env_float("FLOP_KIBBLE_DUP_SIM", 0.85)
+_kibble_recent_fps = []              # vân tay job VỪA TRẢ LỜI (nạp từ state trong main)
+_REVIEW_NO_TARGET = object()         # sentinel: review không có đích GitHub -> rơi nhánh thường
 KIBBLE_TEMPERATURE = _env_float("FLOP_KIBBLE_TEMPERATURE", 0.3)
 # Ngân sách token ĐẦU RA cho việc kibble/tclk: reply lobby chỉ cần ~120, nhưng deliverable
 # công việc cần nhiều hơn để ĐẦY ĐỦ (nếu không sẽ bị cắt cụt bất kể KIBBLE_MAX_CHARS).
@@ -2153,11 +2158,26 @@ def _resolve_github_repo(text: str):
 
 def _answer_review_job(job: dict, task: str):
     """Làm job REVIEW cho 1 repo GitHub: xác định repo (slug/URL hoặc resolve TÊN dự án) ->
-    fetch dữ kiện thật -> LLM soạn CHỈ từ dữ kiện đó -> đính kèm dòng [verified]. Không rõ
-    repo / fetch fail / model từ chối -> None (SKIP)."""
-    target = _resolve_github_repo(f"{job.get('title','')} {job.get('body','')}")
+    fetch dữ kiện thật -> LLM soạn CHỈ từ dữ kiện đó -> đính kèm dòng [verified].
+    Fetch fail / model từ chối -> None (SKIP). CÓ nhắc GitHub mà không xác định được repo
+    -> cũng None: job đòi dữ kiện repo, đoán là bịa. KHÔNG nhắc GitHub -> _REVIEW_NO_TARGET
+    để caller thử nhánh thường (job kiến thức bị gắn nhầm nhãn 'review')."""
+    _txt = f"{job.get('title','')} {job.get('body','')}"
+    _mentions_gh = "github" in _txt.lower()
+    target = _resolve_github_repo(_txt)
     if not target:
-        print(f"[kibble] review skip {job.get('jobid')} — không xác định repo GitHub cụ thể")
+        if not _mentions_gh:
+            # KHÔNG hề nhắc GitHub -> job bị gắn nhãn 'review' nhưng thực chất là CÂU HỎI
+            # KIẾN THỨC. Báo caller thử nhánh thường thay vì bỏ trắng.
+            print(f"[kibble] review {job.get('jobid')} không nhắc GitHub "
+                  f"-> để nhánh thường xử lý")
+            return _REVIEW_NO_TARGET
+        # CÓ đòi dữ kiện GitHub mà không xác định được repo -> SKIP. TUYỆT ĐỐI không rơi
+        # xuống nhánh thường: làm vậy là mời model bịa số liệu repo.
+        why = ("nhắc GitHub nhưng không rút được tên dự án"
+               if not _extract_project_name(_txt) else
+               "search GitHub không khớp tên chính xác")
+        print(f"[kibble] review skip {job.get('jobid')} — {why}")
         return None
     facts = _github_repo_facts(*target)
     if not facts:
@@ -2188,6 +2208,24 @@ def _answer_review_job(job: dict, task: str):
     return text
 
 
+def _kibble_fp(job: dict):
+    """Vân tay chống-trùng của 1 job (tập từ chuẩn hoá của title+body)."""
+    import flop_kibble as _fk
+    return _fk.job_fingerprint(job.get("title", ""), job.get("body", ""))
+
+
+def _kibble_is_dup(fp) -> bool:
+    """True nếu job gần trùng một job VỪA trả lời (ngưỡng KIBBLE_DUP_SIM; 0 = tắt)."""
+    import flop_kibble as _fk
+    return _fk.is_near_duplicate(fp, _kibble_recent_fps, KIBBLE_DUP_SIM)
+
+
+def _kibble_remember(fp) -> None:
+    """Ghi vân tay job VỪA TRẢ LỜI vào bộ nhớ chống-trùng (tại chỗ, có trần)."""
+    import flop_kibble as _fk
+    _kibble_recent_fps[:] = _fk.remember_fingerprint(_kibble_recent_fps, fp)
+
+
 def answer_kibble_job(job: dict):
     """Sinh nội dung bàn giao cho MỘT job kibble. Nội dung job là UNTRUSTED (do agent lạ
     đăng) -> BẮT BUỘC đi qua isolate_for_llm + guard_output như reply cho người lạ. Trả None
@@ -2198,8 +2236,23 @@ def answer_kibble_job(job: dict):
         return None
     jtype = (job.get("type") or "").strip()
     task = f"[task type: {jtype}] {job.get('title', '').strip()}\n\n{job.get('body', '').strip()}".strip()
+    # Loạt job cùng template -> trả lời hết sẽ sinh nhiều deliverable na ná từ CÙNG 1 DID
+    # (đúng tín hiệu boilerplate/self_repeat mà census chấm). Bỏ job gần trùng job vừa làm.
+    fp = _kibble_fp(job)
+    if _kibble_is_dup(fp):
+        print(f"[kibble] skip {job.get('jobid')} — gần trùng job vừa làm "
+              f"(sim>={KIBBLE_DUP_SIM:.2f})")
+        return None
     if jtype == "review":                        # job factual -> đi nhánh fetch-verify, không đoán
-        return _answer_review_job(job, task)
+        r = _answer_review_job(job, task)
+        if r is not _REVIEW_NO_TARGET:           # có đích GitHub, hoặc model đã chủ động SKIP
+            if r:
+                _kibble_remember(fp)
+            return r
+        # Không có đích GitHub -> job này thực chất là CÂU HỎI KIẾN THỨC bị gắn nhãn
+        # 'review'. Rơi xuống nhánh thường: vẫn isolate untrusted + guard_output, và
+        # KIBBLE_SYSTEM vẫn buộc model trả SKIP khi không kiểm chứng được dữ kiện.
+        print(f"[kibble] review {job.get('jobid')} -> thử nhánh thường (câu hỏi kiến thức)")
     # GROUNDING: job thị trường (analyze/research/explain... nhắc coin hay chủ đề market/
     # defi/phái sinh) được chèn SNAPSHOT LIVE do CHÍNH agent dựng -> deliverable bám số
     # THẬT thay vì kiến thức cũ (điều kiện để job analyze/research qua được attestation).
@@ -2229,6 +2282,7 @@ def answer_kibble_job(job: dict):
     text = text[:KIBBLE_MAX_CHARS]
     _meter_flop(f"{provider} kibble:{jtype}", event_id=job.get("jobid"))
     print(f"[kibble:{provider}] answered {job.get('jobid')} ({jtype})")
+    _kibble_remember(fp)
     return text
 
 
@@ -3338,6 +3392,8 @@ def main():
     hydrate_ledger_from_kv()          # sổ cái token BỀN qua KV -> metering tích luỹ, không mất mỗi run
     # Nạp danh sách model Gemini đã 404 (vĩnh viễn) -> run này khỏi thử lại, không phí call.
     _gemini_404.update(state.get("gemini_404") or [])
+    # Nạp vân tay job đã trả lời -> chống-trùng hiệu lực XUYÊN run, không chỉ trong 1 run.
+    _kibble_recent_fps[:] = [list(x) for x in (state.get("kibble_recent_fps") or []) if x]
     now = int(time.time())
     # Run thủ công (workflow_dispatch) luôn phát để dễ kiểm chứng.
     force = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
@@ -3497,7 +3553,8 @@ def main():
                 dry_run=KIBBLE_DRY_RUN,
             )
             save_state({"kibble_cursor": state.get("kibble_cursor"),
-                        "kibble_done": state.get("kibble_done", [])})
+                        "kibble_done": state.get("kibble_done", []),
+                        "kibble_recent_fps": _kibble_recent_fps})
             mode = "dry" if KIBBLE_DRY_RUN else "live"
             kibble_status = f"{mode} {len(ks['delivered'])}✓/{ks['skipped']}skip/{ks['scanned']}scan"
             # Tracker ATTEST (GATED): ghi DELIVER thật của mình + đối chiếu rh của ATTEST trong

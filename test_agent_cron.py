@@ -498,6 +498,15 @@ def _job(jtype="explain", title="T", body="B", jobid="kaaaaaaaaaa"):
     return {"jobid": jobid, "type": jtype, "title": title, "body": body}
 
 
+@pytest.fixture(autouse=True)
+def _clear_kibble_dup_memory():
+    """`_kibble_recent_fps` là global của module -> dọn quanh MỖI test, nếu không một test
+    trả lời job sẽ làm test sau bị chặn vì 'gần trùng' và pass vì lý do sai."""
+    ac._kibble_recent_fps[:] = []
+    yield
+    ac._kibble_recent_fps[:] = []
+
+
 def test_answer_kibble_job_none_without_provider(monkeypatch):
     monkeypatch.setattr(ac, "_provider_chain", lambda: [])
     assert ac.answer_kibble_job(_job()) is None
@@ -1346,12 +1355,17 @@ def test_review_job_grounds_on_verified_facts(monkeypatch):
     assert "VERIFIED FACTS" in seen["prompt"]            # LLM được grounded bằng facts
 
 
-def test_review_job_skips_when_no_github_target(monkeypatch):
+def test_review_job_without_github_mention_falls_through(monkeypatch):
+    # ĐỔI HỢP ĐỒNG: job 'review' KHÔNG nhắc GitHub = câu hỏi kiến thức gắn nhầm nhãn ->
+    # xử lý bằng nhánh thường (vẫn isolate + guard + model tự SKIP), không bỏ trắng nữa.
     monkeypatch.setattr(ac, "_active_provider", lambda: True)
-    monkeypatch.setattr(ac, "_provider_reply", lambda *a, **k: ("should not be called", "stub"))
+    monkeypatch.setattr(ac, "_provider_chain", lambda: ["stub"])
+    monkeypatch.setattr(ac, "_provider_reply", lambda *a, **k: ("A grounded answer.", "stub"))
+    monkeypatch.setattr(ac, "_meter_flop", lambda *a, **k: None)
+    monkeypatch.setattr(ac, "build_market_context", lambda *a, **k: "")
     out = ac.answer_kibble_job({"type": "review", "title": "Verify lobby freq",
                                 "body": "watch 5 mins", "jobid": "kdef0123456"})
-    assert out is None                                    # không rõ repo -> SKIP, không đoán
+    assert out == "A grounded answer."
 
 
 def test_review_job_skips_when_fetch_fails(monkeypatch):
@@ -2093,3 +2107,104 @@ def test_gemini_candidates_skips_pinned_when_it_404ed(monkeypatch):
     out = list(ac._gemini_candidates())
     assert "pinned-flash" not in out         # ghim nhưng đã 404 -> bỏ luôn
     assert out[0] == "good-flash"
+
+
+# --- review fallback + chống job gần trùng (A) ----------------------------------------
+
+def _review_job(jobid="k0000000001", title="", body=""):
+    return {"jobid": jobid, "type": "review", "title": title, "body": body}
+
+
+def test_review_without_github_target_falls_through_to_normal_path(monkeypatch):
+    """Job gắn nhãn 'review' nhưng KHÔNG nhắc GitHub = câu hỏi kiến thức -> phải trả lời
+    bằng nhánh thường, không còn bị bỏ trắng."""
+    monkeypatch.setattr(ac, "_provider_chain", lambda: ["gemini"])
+    monkeypatch.setattr(ac, "_gemini_reply", lambda *a, **k:
+                        "Replay protection needs a nonce cache plus a bounded clock-skew window.")
+    monkeypatch.setattr(ac, "_meter_flop", lambda *a, **k: None)
+    monkeypatch.setattr(ac, "build_market_context", lambda *a, **k: "")
+    out = ac.answer_kibble_job(_review_job(
+        title="Replay Protection in Ephemeral Agent Protocols",
+        body="Review nonce and timestamp window constraints across relays with clock skew."))
+    assert out and out.startswith("Replay protection needs a nonce cache")
+
+
+def test_review_with_github_target_still_uses_verified_path(monkeypatch):
+    """Có đích GitHub -> VẪN đi nhánh fetch-verify (không bị fallback nuốt mất)."""
+    monkeypatch.setattr(ac, "_provider_chain", lambda: ["gemini"])
+    monkeypatch.setattr(ac, "_meter_flop", lambda *a, **k: None)
+    called = {}
+
+    def _fake_review(job, task):
+        called["hit"] = True
+        return "duckdb/duckdb — last commit: 2026-10-01 [verified]"
+
+    monkeypatch.setattr(ac, "_answer_review_job", _fake_review)
+    out = ac.answer_kibble_job(_review_job(title="Check DuckDB's GitHub", body="last commit?"))
+    assert called.get("hit") and out.startswith("duckdb/duckdb")
+
+
+def test_review_fetch_failure_does_not_fall_through(monkeypatch):
+    """Xác định được repo nhưng fetch GitHub hỏng -> _answer_review_job trả None. None KHÁC
+    sentinel, nên KHÔNG được rơi xuống nhánh thường để đoán bừa dữ kiện GitHub."""
+    monkeypatch.setattr(ac, "_provider_chain", lambda: ["gemini"])
+    monkeypatch.setattr(ac, "_answer_review_job", lambda job, task: None)
+    monkeypatch.setattr(ac, "_gemini_reply", lambda *a, **k: "FABRICATED facts about the repo")
+    monkeypatch.setattr(ac, "_meter_flop", lambda *a, **k: None)
+    assert ac.answer_kibble_job(_review_job(title="Check DuckDB's GitHub")) is None
+
+
+def test_review_no_target_returns_sentinel_not_none(monkeypatch):
+    monkeypatch.setattr(ac, "_resolve_github_repo", lambda t: None)
+    r = ac._answer_review_job(_review_job(title="no repo here"), "task")
+    assert r is ac._REVIEW_NO_TARGET and r is not None
+
+
+def test_near_duplicate_job_is_skipped(monkeypatch):
+    """Loạt job cùng template (chỉ khác hậu tố id) -> chỉ job ĐẦU được trả lời."""
+    monkeypatch.setattr(ac, "_provider_chain", lambda: ["gemini"])
+    monkeypatch.setattr(ac, "_gemini_reply", lambda *a, **k: "A real, grounded technical answer.")
+    monkeypatch.setattr(ac, "_meter_flop", lambda *a, **k: None)
+    monkeypatch.setattr(ac, "build_market_context", lambda *a, **k: "")
+    body = ("Review whether posting many ATTEST lines with distinct job_id but identical "
+            "reason templates would hit technocore dupe_filter (5 copies per 60s).")
+    first = ac.answer_kibble_job({"jobid": "k0000000001", "type": "explain",
+                                  "title": "Review dupe-filter risk (mvbmaxua-2)", "body": body})
+    second = ac.answer_kibble_job({"jobid": "k0000000002", "type": "explain",
+                                   "title": "Review dupe-filter risk (mvbmc37c-2)", "body": body})
+    assert first and second is None
+
+
+def test_different_jobs_are_not_treated_as_duplicates(monkeypatch):
+    monkeypatch.setattr(ac, "_provider_chain", lambda: ["gemini"])
+    monkeypatch.setattr(ac, "_gemini_reply", lambda *a, **k: "A real, grounded technical answer.")
+    monkeypatch.setattr(ac, "_meter_flop", lambda *a, **k: None)
+    monkeypatch.setattr(ac, "build_market_context", lambda *a, **k: "")
+    a = ac.answer_kibble_job({"jobid": "k0000000001", "type": "explain",
+                              "title": "Explain the one-time pad",
+                              "body": "Why is perfect secrecy impractical in deployment?"})
+    b = ac.answer_kibble_job({"jobid": "k0000000002", "type": "explain",
+                              "title": "Ed25519 signature sizes",
+                              "body": "How large is a signature and why does that matter on chain?"})
+    assert a and b
+
+
+def test_dup_guard_disabled_when_threshold_zero(monkeypatch):
+    monkeypatch.setattr(ac, "KIBBLE_DUP_SIM", 0.0)
+    monkeypatch.setattr(ac, "_provider_chain", lambda: ["gemini"])
+    monkeypatch.setattr(ac, "_gemini_reply", lambda *a, **k: "A real, grounded technical answer.")
+    monkeypatch.setattr(ac, "_meter_flop", lambda *a, **k: None)
+    monkeypatch.setattr(ac, "build_market_context", lambda *a, **k: "")
+    j = {"jobid": "k1", "type": "explain", "title": "same", "body": "identical body text here"}
+    assert ac.answer_kibble_job(j) and ac.answer_kibble_job(dict(j, jobid="k2"))
+
+
+def test_skipped_job_is_not_remembered(monkeypatch):
+    """Job bị model SKIP -> KHÔNG ghi vân tay, nếu không nó sẽ chặn oan job tương tự sau đó."""
+    monkeypatch.setattr(ac, "_provider_chain", lambda: ["gemini"])
+    monkeypatch.setattr(ac, "_gemini_reply", lambda *a, **k: "SKIP")
+    monkeypatch.setattr(ac, "_meter_flop", lambda *a, **k: None)
+    monkeypatch.setattr(ac, "build_market_context", lambda *a, **k: "")
+    assert ac.answer_kibble_job({"jobid": "k1", "type": "explain",
+                                 "title": "t", "body": "some body"}) is None
+    assert ac._kibble_recent_fps == []

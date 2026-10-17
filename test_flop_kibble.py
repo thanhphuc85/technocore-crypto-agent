@@ -233,3 +233,60 @@ def test_requester_empty_pool_posts_nothing():
                                 log=lambda *_: None, gen=lambda: "kdddddddddd")
     assert posts == [] and rs["posted"] == [] and rs["would_post"] == []
     assert "kibble_requested" not in st
+
+
+# --- vân tay / chống job gần trùng (thuần) --------------------------------------------
+
+_TPL = ("Review whether posting many ATTEST lines with distinct job_id but identical reason "
+        "templates would hit technocore dupe_filter (5 copies per 60s). Tape lines sampled=200.")
+
+
+def test_job_fingerprint_is_normalized_word_set():
+    fp = k.job_fingerprint("Ed25519  Signature Sizes!", "How LARGE is a signature?")
+    assert fp == sorted(set(fp))                      # sorted + không trùng
+    assert "ed25519" in fp and "large" in fp          # hạ chữ thường, bỏ dấu câu
+    # thứ tự từ không đổi vân tay
+    assert k.job_fingerprint("a b", "c") == k.job_fingerprint("c b", "a")
+
+
+def test_similarity_bounds():
+    a = k.job_fingerprint("one time pad", "perfect secrecy")
+    assert k.similarity(a, a) == 1.0
+    assert k.similarity(a, k.job_fingerprint("gas fees", "rollup finality")) == 0.0
+    assert k.similarity(a, []) == 0.0 and k.similarity([], []) == 0.0
+
+
+def test_template_family_is_near_duplicate_but_distinct_jobs_are_not():
+    # 4 job cùng template, chỉ khác hậu tố id (đúng thứ quan sát được trên board)
+    a = k.job_fingerprint("Review dupe-filter risk for validator attests (mvbmaxua-2)", _TPL)
+    b = k.job_fingerprint("Review dupe-filter risk for validator attests (mvbmc37c-2)", _TPL)
+    assert k.similarity(a, b) >= 0.85
+    c = k.job_fingerprint("Explain the one-time pad",
+                           "Why is perfect secrecy impractical to deploy at scale?")
+    assert k.similarity(a, c) < 0.85
+    assert k.is_near_duplicate(b, [a], 0.85) is True
+    assert k.is_near_duplicate(c, [a], 0.85) is False
+
+
+def test_is_near_duplicate_disabled_at_zero_threshold():
+    a = k.job_fingerprint("same", "same body")
+    assert k.is_near_duplicate(a, [a], 0.0) is False     # 0 = tắt hẳn
+    assert k.is_near_duplicate([], [a], 0.85) is False   # vân tay rỗng -> không chặn
+
+
+def test_remember_fingerprint_caps_and_dedupes():
+    recent = []
+    for i in range(k.DUP_KEEP + 10):
+        recent = k.remember_fingerprint(recent, k.job_fingerprint(f"job {i}", "body"))
+    assert len(recent) == k.DUP_KEEP
+    fp = k.job_fingerprint("job 0", "body")
+    once = k.remember_fingerprint(k.remember_fingerprint(recent, fp), fp)
+    assert sum(1 for r in once if list(r) == list(fp)) == 1    # không nhân bản
+    assert list(once[0]) == list(fp)                            # mới nhất lên đầu
+
+
+def test_remember_fingerprint_is_pure():
+    recent = [k.job_fingerprint("a", "b")]
+    snapshot = [list(x) for x in recent]
+    k.remember_fingerprint(recent, k.job_fingerprint("c", "d"))
+    assert recent == snapshot                                   # không sửa đầu vào
