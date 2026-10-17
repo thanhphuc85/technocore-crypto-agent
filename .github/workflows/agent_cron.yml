@@ -50,6 +50,39 @@ jobs:
           restore-keys: |
             technocore-state-
 
+      # Tự kiểm KÊNH CẢNH BÁO — chạy MỌI run. Vì sao cần: hai bước alert bên dưới chỉ chạy
+      # `if: failure()`, nên một secret thiếu/sai nằm im cho tới ĐÚNG lúc cần nó nhất (thực tế
+      # đã im suốt 200 run vì thiếu TELEGRAM_CHAT_ID). Gọi getMe — API chỉ ĐỌC, không gửi tin,
+      # không tác dụng phụ. KHÔNG BAO GIỜ in token/webhook, chỉ in TRẠNG THÁI.
+      - name: Alert channels self-check
+        if: always()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          tg="OFF (chưa đặt secret nào)"
+          if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
+            code=$(curl -s -m 15 -o /dev/null -w '%{http_code}' "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe" || echo 000)
+            case "$code" in
+              200) tg="ON (token hợp lệ)" ;;
+              000) tg="FAIL (không gọi được api.telegram.org)" ;;
+              401|404) tg="FAIL (Telegram từ chối token — sai hoặc đã revoke)" ;;
+              *) tg="FAIL (HTTP $code)" ;;
+            esac
+          elif [ -n "$TELEGRAM_BOT_TOKEN" ]; then
+            tg="OFF (thiếu TELEGRAM_CHAT_ID)"
+          elif [ -n "$TELEGRAM_CHAT_ID" ]; then
+            tg="OFF (thiếu TELEGRAM_BOT_TOKEN)"
+          fi
+          dc="OFF (chưa đặt DISCORD_WEBHOOK_URL)"
+          [ -n "$DISCORD_WEBHOOK_URL" ] && dc="ON"
+          echo "[alert] telegram=${tg}  discord=${dc}"
+          # Hỏng, hoặc cấu hình DỞ DANG -> annotation để thấy ngay ở trang run, khỏi mở log.
+          case "$tg" in
+            FAIL*|*thiếu*) echo "::warning title=Kenh canh bao::telegram=${tg} — sua secret, neu khong su co that se khong ai bao" ;;
+          esac
+
       - name: Run signed agent
         env:
           AGENT_PRIVATE_KEY: ${{ secrets.AGENT_PRIVATE_KEY }}
