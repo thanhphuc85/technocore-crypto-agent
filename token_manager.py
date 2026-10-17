@@ -491,6 +491,20 @@ def available_today(token: str = None, now: int = None, path: str = None) -> str
     Chỉ tính entry 'spend' có ts nằm trong NGÀY UTC hiện tại; entry thiếu/hỏng ts bị bỏ
     qua (không đoán thời điểm)."""
     token = (token or default_token())
+    bal = _parse_amount(check_balance(token, path)) or Decimal(0)
+    return _fmt(max(Decimal(0), bal) + spent_today_amount(token, now, path))
+
+
+def spent_today_amount(token: str = None, now: int = None, path: str = None) -> Decimal:
+    """Tổng đã CHI trong NGÀY UTC hiện tại, đọc từ SỔ CÁI.
+
+    Vì sao đọc từ sổ cái: nhịp chi của pacer nằm trong `flop_pacer.json`, mà file đó
+    KHÔNG được cache qua run (workflow chỉ cache `state.json`) — nên mỗi run pacer tưởng
+    hôm nay chưa chi gì và không bao giờ hãm lại. Sổ cái thì bền qua KV, nên nó mới là
+    nguồn đúng để biết "hôm nay đã chi bao nhiêu".
+
+    Entry thiếu/hỏng `ts` bị bỏ qua (không đoán thời điểm)."""
+    token = (token or default_token())
     now = int(now if now is not None else time.time())
     start = now - (now % 86400)                      # 00:00 UTC hôm nay
     spent = Decimal(0)
@@ -501,8 +515,7 @@ def available_today(token: str = None, now: int = None, path: str = None) -> str
         if ts is None or ts < start:
             continue
         spent += _parse_amount(e.get("amount")) or Decimal(0)
-    bal = _parse_amount(check_balance(token, path)) or Decimal(0)
-    return _fmt(max(Decimal(0), bal) + spent)
+    return spent
 
 
 def spend_stats(token: str = None, now: int = None, path: str = None) -> dict:

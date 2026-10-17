@@ -377,3 +377,23 @@ def test_cumulative_tolerates_garbage():
     assert tm.cumulative_spent({"spent_cumulative": "rác"}) == Decimal(0)
     assert tm.cumulative_spent({"spent_cumulative": {"FLOP": None}}) == Decimal(0)
     assert tm.cumulative_spent({}) == Decimal(0) and tm.cumulative_spent(None) == Decimal(0)
+
+
+def test_spent_today_amount_only_counts_today(tmp_path):
+    import time as _t
+    p = str(tmp_path / "l.json")
+    tm.credit("100", memo="seed", path=p)
+    tm.spend("7", memo="x", path=p)
+    assert tm.spent_today_amount(path=p) == Decimal("7")
+    now = int(_t.time())
+    tomorrow = now - (now % 86400) + 86400 + 60
+    assert tm.spent_today_amount(now=tomorrow, path=p) == Decimal("0")
+
+
+def test_spent_today_amount_skips_entries_without_timestamp(tmp_path):
+    p = str(tmp_path / "l.json")
+    tm.credit("100", memo="seed", path=p)
+    led = tm.load_ledger(p)
+    led["entries"].append({"kind": "spend", "token": "FLOP", "amount": "5"})
+    tm.save_ledger(led, p)
+    assert tm.spent_today_amount(path=p) == Decimal("0")

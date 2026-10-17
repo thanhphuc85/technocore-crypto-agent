@@ -181,3 +181,63 @@ def test_pacing_status_reports_auto_budget(tmp_path, monkeypatch):
     led = _seed_ledger(tmp_path, "48")
     st = fp.pacing_status(now=NOON, path=str(tmp_path / "p.json"), ledger_path=led)
     assert st["enabled"] is True and st["daily_budget"] == "48" and st["target_now"] == "24"
+
+
+# --- pacer MẤT TRÍ NHỚ: flop_pacer.json không được cache qua run --------------------
+
+def _ledger_with_today(tmp_path, spends):
+    """Sổ cái thật có `spends` lần chi trong NGÀY HÔM NAY."""
+    import token_manager as tm
+    led = str(tmp_path / "led.json")
+    tm.credit("1000", memo="seed", path=led)
+    for amt in spends:
+        tm.spend(amt, memo="x", path=led)
+    return led
+
+
+def test_pacer_throttles_even_when_its_own_file_is_lost(tmp_path, monkeypatch):
+    """LỖI THẬT: workflow chỉ cache state.json, nên flop_pacer.json rỗng MỖI run ->
+    pacer tưởng hôm nay chưa chi gì -> chi kịch trần mãi mãi. Sổ cái phải cứu."""
+    monkeypatch.setenv("FLOP_DAILY_BUDGET", "24")
+    led = _ledger_with_today(tmp_path, ["12"])          # đã chi đúng mục tiêu giữa trưa
+    fresh = str(tmp_path / "chua-ton-tai.json")          # file pacer rỗng, như trên runner
+    assert fp.next_spend_amount(now=NOON, path=fresh, ledger_path=led) == "0"
+
+
+def test_pacer_still_spends_when_ledger_shows_a_deficit(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLOP_DAILY_BUDGET", "24")
+    monkeypatch.setenv("FLOP_MAX_PER_RUN", "0.5")
+    led = _ledger_with_today(tmp_path, ["2"])            # mới chi 2, mục tiêu 12
+    out = fp.next_spend_amount(now=NOON, path=str(tmp_path / "x.json"), ledger_path=led)
+    assert out == "0.5"                                   # còn thiếu -> chi kịch trần
+
+
+def test_catches_up_after_a_gap(tmp_path, monkeypatch):
+    """Đúng kịch bản được hỏi: nhiều run lỗi -> run sau phải chi bù, không bỏ sót."""
+    monkeypatch.setenv("FLOP_DAILY_BUDGET", "24")
+    led = _ledger_with_today(tmp_path, ["2"])            # 18h mà mới chi 2 (mục tiêu 18)
+    six_pm = MIDNIGHT + 18 * 3600
+    due = fp.next_spend_amount(now=six_pm, path=str(tmp_path / "x.json"), ledger_path=led)
+    assert Decimal(due) == Decimal("16")                 # 18 - 2, không kẹp trần
+
+
+def test_falls_back_to_pacer_record_when_ledger_unreadable(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLOP_DAILY_BUDGET", "24")
+    import token_manager as tm
+
+    def _boom(*a, **k):
+        raise RuntimeError("sổ cái hỏng")
+
+    monkeypatch.setattr(tm, "spent_today_amount", _boom)
+    pf = str(tmp_path / "p.json")
+    fp.record_spend("12", now=NOON, path=pf)
+    assert fp.next_spend_amount(now=NOON, path=pf) == "0"   # vẫn dùng bản ghi của pacer
+
+
+def test_takes_the_larger_of_the_two_sources(tmp_path, monkeypatch):
+    """Lấy MAX: bản ghi pacer (vd trên VPS có đĩa bền) không được bị sổ cái nuốt."""
+    monkeypatch.setenv("FLOP_DAILY_BUDGET", "24")
+    led = _ledger_with_today(tmp_path, ["1"])
+    pf = str(tmp_path / "p.json")
+    fp.record_spend("12", now=NOON, path=pf)             # pacer nhớ nhiều hơn sổ cái
+    assert fp.next_spend_amount(now=NOON, path=pf, ledger_path=led) == "0"

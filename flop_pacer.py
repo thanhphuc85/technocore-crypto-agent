@@ -143,6 +143,26 @@ def _rec_for(state: dict, token: str, now: int) -> dict:
 
 # --- API --------------------------------------------------------------------------
 
+def _spent_today(rec: dict, token: str, now: int, ledger_path: str = None) -> Decimal:
+    """Đã chi hôm nay = MAX(bản ghi của pacer, tổng chi hôm nay trong SỔ CÁI).
+
+    Vì sao lấy MAX chứ không chỉ đọc file pacer: `flop_pacer.json` KHÔNG được cache qua
+    run (workflow chỉ cache `state.json`), nên trên runner nó luôn rỗng -> pacer tưởng
+    hôm nay chưa chi gì -> `due` luôn bằng cả mục tiêu -> chi kịch trần MỌI run và KHÔNG
+    BAO GIỜ hãm. Đo được: ở mốc giữa trưa ngân sách 24, bản nhớ dừng đúng 12.0 còn bản
+    quên chi 20.0 (vượt mục tiêu 67%).
+
+    Sổ cái bền qua KV nên nó là nguồn đúng; vẫn lấy MAX để bản ghi pacer (khi có, vd khi
+    chạy trên VPS có đĩa bền) không bị bỏ qua."""
+    mine = _dec(rec.get("spent_today", "0")) or Decimal(0)
+    try:
+        import token_manager as _tm        # import TRỄ: tránh vòng lặp import
+        led = _tm.spent_today_amount(token=token, now=now, path=ledger_path)
+    except Exception:
+        return mine                        # không đọc được sổ cái -> dùng bản ghi pacer
+    return mine if mine > led else led
+
+
 def next_spend_amount(token: str = None, now: int = None, path: str = None, rng=None,
                       ledger_path: str = None):
     """Số FLOP NÊN chi lần chạy này để bám lịch rải đều. Trả:
@@ -156,7 +176,7 @@ def next_spend_amount(token: str = None, now: int = None, path: str = None, rng=
     now = int(now if now is not None else time.time())
     token = _token(token)
     rec = _rec_for(_load(path), token, now)
-    spent_today = _dec(rec.get("spent_today", "0")) or Decimal(0)
+    spent_today = _spent_today(rec, token, now, ledger_path)
 
     # mục tiêu tuyến tính tới thời điểm này = budget * (giây đã trôi trong ngày / 86400)
     target = budget * Decimal(_seconds_into_day(now)) / Decimal(86400)
@@ -196,7 +216,7 @@ def pacing_status(token: str = None, now: int = None, path: str = None,
     now = int(now if now is not None else time.time())
     token = _token(token)
     rec = _rec_for(_load(path), token, now)
-    spent = _dec(rec.get("spent_today", "0")) or Decimal(0)
+    spent = _spent_today(rec, token, now, ledger_path)
     target = (budget * Decimal(_seconds_into_day(now)) / Decimal(86400)) if budget else Decimal(0)
     return {
         "token": token, "enabled": budget is not None,
