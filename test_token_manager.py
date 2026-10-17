@@ -9,6 +9,8 @@ meter_inference gating.
 import json
 import pytest
 
+from decimal import Decimal
+
 import token_manager as tm
 
 
@@ -332,3 +334,46 @@ def test_available_today_skips_entries_without_timestamp(tmp_path):
     led["entries"].append({"kind": "spend", "token": "FLOP", "amount": "5"})   # thiếu ts
     tm.save_ledger(led, p)
     assert tm.available_today(path=p) == "10"           # không đoán thời điểm
+
+
+# --- spent_cumulative: mốc CHỈ TĂNG để hydrate không tua ngược sổ cái -----------------
+
+def test_cumulative_accrues_on_simulation_spend(tmp_path):
+    p = str(tmp_path / "l.json")
+    tm.credit("100", memo="seed", path=p)
+    assert tm.cumulative_spent(tm.load_ledger(p)) == Decimal(0)
+    tm.spend("3", memo="x", path=p)
+    tm.spend("2", memo="x", path=p)
+    assert tm.cumulative_spent(tm.load_ledger(p)) == Decimal("5")
+    assert tm.check_balance(path=p) == "95"
+
+
+def test_cumulative_only_grows_while_balance_falls(tmp_path):
+    """Đây CHÍNH LÀ lý do cần nó: số dư đi xuống nên không dùng làm thước tiến độ được."""
+    p = str(tmp_path / "l.json")
+    tm.credit("100", memo="seed", path=p)
+    prev_bal, prev_cum = Decimal("100"), Decimal(0)
+    for _ in range(5):
+        tm.spend("1", memo="x", path=p)
+        bal = Decimal(tm.check_balance(path=p))
+        cum = tm.cumulative_spent(tm.load_ledger(p))
+        assert bal < prev_bal and cum > prev_cum
+        prev_bal, prev_cum = bal, cum
+
+
+def test_cumulative_survives_entry_log_trimming(tmp_path):
+    """Cắt log KHÔNG được làm mốc tụt — nó là tổng chạy, không suy từ entries."""
+    p = str(tmp_path / "l.json")
+    tm.credit("100", memo="seed", path=p)
+    for _ in range(4):
+        tm.spend("1", memo="x", path=p)
+    led = tm.load_ledger(p)
+    led["entries"] = []                              # giả lập publish đã cắt hết log
+    tm.save_ledger(led, p)
+    assert tm.cumulative_spent(tm.load_ledger(p)) == Decimal("4")
+
+
+def test_cumulative_tolerates_garbage():
+    assert tm.cumulative_spent({"spent_cumulative": "rác"}) == Decimal(0)
+    assert tm.cumulative_spent({"spent_cumulative": {"FLOP": None}}) == Decimal(0)
+    assert tm.cumulative_spent({}) == Decimal(0) and tm.cumulative_spent(None) == Decimal(0)

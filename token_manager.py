@@ -216,6 +216,34 @@ def _unlock_state(state: dict) -> dict:
     return u
 
 
+def _accrue_cumulative(state: dict, token: str, amount: Decimal) -> None:
+    """Cộng dồn MỌI lần chi (cả simulation lẫn testnet) vào `spent_cumulative`.
+
+    Vì sao cần một đại lượng CHỈ TĂNG: khi so hai bản sổ cái (local vs KV) để chọn bản
+    "đi xa hơn", không thể dùng |số dư| — ví được NẠP thì số dư dương và GIẢM dần khi
+    chi, nên bản cũ lại có |số dư| lớn hơn và sẽ thắng, kéo sổ cái tua ngược mỗi lần
+    hydrate. `spent_cumulative` chỉ tăng nên so sánh luôn đúng chiều.
+
+    Khác `unlock.spent_testnet`: cái đó CHỈ cộng khi chi on-chain thật, nên bằng 0 ở
+    simulation — không dùng để so bản được."""
+    cm = state.setdefault("spent_cumulative", {})
+    prev = _parse_amount(cm.get(token, "0")) or Decimal(0)
+    cm[token] = _fmt(prev + amount)
+
+
+def cumulative_spent(state: dict, token: str = None) -> Decimal:
+    """Tổng đã chi tích luỹ. `token=None` -> cộng mọi token (dùng để so hai bản sổ cái)."""
+    cm = (state or {}).get("spent_cumulative")
+    if not isinstance(cm, dict):
+        return Decimal(0)
+    if token is not None:
+        return _parse_amount(cm.get(token, "0")) or Decimal(0)
+    total = Decimal(0)
+    for v in cm.values():
+        total += _parse_amount(v) or Decimal(0)
+    return total
+
+
 def _accrue_unlock(state: dict, token: str, amount: Decimal) -> None:
     """Cộng dồn chi testnet THẬT vào quyền mở khóa. Gọi CHỈ khi spent_onchain."""
     u = _unlock_state(state)
@@ -394,6 +422,7 @@ def spend(amount, memo, token: str = None, *, path: str = None,
             "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         })
         _accrue_unlock(state, token, amt)     # chi testnet THẬT -> tăng quyền mở khóa 3:1
+        _accrue_cumulative(state, token, amt)  # mốc CHỈ TĂNG -> hydrate chọn đúng bản
         _save_ledger(state, path)
         short = (tx_hash or "")[:12]
         log(f"[ledger] spent {_fmt(amt)} {token} for {memo} (tx {short}…)")
@@ -408,6 +437,7 @@ def spend(amount, memo, token: str = None, *, path: str = None,
         "mode": mode, "balance_after": new_bal,
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     })
+    _accrue_cumulative(state, token, amt)      # mốc CHỈ TĂNG -> hydrate chọn đúng bản
     _save_ledger(state, path)
     log(f"[SIMULATION] Spent {_fmt(amt)} MOCK_{token} for {memo}")
     return {**base, "outcome": "spent_simulated", "balance_after": new_bal,

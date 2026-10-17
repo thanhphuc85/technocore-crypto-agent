@@ -1463,13 +1463,28 @@ LEDGER_ENTRY_CAP = 500
 
 
 def _ledger_spent_magnitude(led) -> float:
-    """|balance| gộp các token = tổng đã CHI (mock: spend làm balance âm). Thước tích luỹ
-    KHÔNG suy từ entries -> sống sót khi cắt log. Dùng để chọn bản ledger 'đầy' hơn khi hydrate."""
+    """Luật CŨ: |balance| gộp các token, đúng khi ví CHỈ chi (số dư âm dần). Giữ lại làm
+    đường lui cho sổ cái cũ chưa có `spent_cumulative`. KHÔNG dùng một mình: ví có NẠP thì
+    số dư dương và GIẢM khi chi, nên bản cũ lại thắng -> sổ cái bị tua ngược."""
     try:
         bals = led.get("balances", {}) if isinstance(led, dict) else {}
         return sum(abs(float(v)) for v in bals.values() if v not in (None, ""))
     except Exception:
         return 0.0
+
+
+def _ledger_progress(led) -> tuple:
+    """Thước 'bản nào ĐI XA HƠN' để hydrate không bao giờ tua ngược sổ cái.
+
+    Ưu tiên `spent_cumulative` (CHỈ TĂNG, không suy từ entries nên cắt log không sai).
+    Sổ cái cũ chưa có field này -> cả hai bên rơi về luật |balance| như trước. Trả tuple
+    để so sánh theo thứ tự: (có mốc cộng dồn, mốc đó, |balance|)."""
+    try:
+        import token_manager
+        cum = float(token_manager.cumulative_spent(led if isinstance(led, dict) else {}))
+    except Exception:
+        cum = 0.0
+    return (1 if cum > 0 else 0, cum, _ledger_spent_magnitude(led))
 
 
 def hydrate_ledger_from_kv() -> None:
@@ -1488,7 +1503,10 @@ def hydrate_ledger_from_kv() -> None:
         return
     try:
         import token_manager
-        if _ledger_spent_magnitude(remote) >= _ledger_spent_magnitude(token_manager.load_ledger()):
+        local = token_manager.load_ledger()
+        # CHẶT CHẼ (>) chứ không phải >=: hoà nhau thì GIỮ bản local. Bản local là bản vừa
+        # được ghi trong run này, lấy bản KV khi hoà chỉ tạo thêm cơ hội tua ngược.
+        if _ledger_progress(remote) > _ledger_progress(local):
             token_manager.save_ledger(remote)
     except Exception as e:
         print(f"[ledger] hydrate bỏ qua ({str(e)[:80]})")
@@ -1553,6 +1571,9 @@ def persist_ledger_to_kv(private_key, did) -> None:
         # người đọc ngoài sẽ hiểu thành chi tiêu THẬT — đó là số liệu gây hiểu nhầm.
         payload = {"mode": token_manager.ledger_mode(),
                    "balances": led.get("balances", {}),
+                   # BẮT BUỘC đẩy kèm: thiếu nó thì mốc chỉ-tăng không bao giờ tới KV và
+                   # hydrate lại rơi về luật |balance| cũ (tua ngược).
+                   "spent_cumulative": led.get("spent_cumulative", {}),
                    "entries": (led.get("entries", []) or [])[-LEDGER_ENTRY_CAP:]}
         kv_set(private_key, did, LEDGER_KV_KEY, json.dumps(payload, ensure_ascii=False))
     except Exception as e:

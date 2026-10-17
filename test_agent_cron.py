@@ -2313,3 +2313,83 @@ def test_daily_report_compacts_only_the_kibble_extra(monkeypatch):
     assert "pending=223" not in sent[0]
     assert "faucet: off" in sent[0]
     assert extras == before                      # không sửa dict của caller
+
+
+# --- hydrate sổ cái: KHÔNG BAO GIỜ tua ngược (bug ví dương + giảm dần) ----------------
+
+def _led(balance, cum=None, entries=None):
+    d = {"balances": {"FLOP": balance}, "entries": entries or []}
+    if cum is not None:
+        d["spent_cumulative"] = {"FLOP": cum}
+    return d
+
+
+def test_hydrate_keeps_local_when_kv_is_stale(monkeypatch):
+    """Lỗi THẬT quan sát được: KV cũ còn 91.1 (đã chi 8.9), local mới còn 89.6 (đã chi 10.4).
+    Luật |balance| cũ chọn KV -> số dư TĂNG trở lại mỗi run. Luật mới phải GIỮ local."""
+    stale = _led("91.107", "8.893")
+    fresh = _led("89.607", "10.393")
+    monkeypatch.setattr(ac, "kv_get", lambda k: json.dumps(stale))
+    import token_manager as tm
+    monkeypatch.setattr(tm, "load_ledger", lambda *a, **k: fresh)
+    saved = []
+    monkeypatch.setattr(tm, "save_ledger", lambda led, *a, **k: saved.append(led))
+    ac.hydrate_ledger_from_kv()
+    assert saved == []                                # không ghi đè -> giữ bản local
+
+
+def test_hydrate_takes_kv_when_it_is_genuinely_ahead(monkeypatch):
+    ahead = _led("80", "20")
+    behind = _led("90", "10")
+    monkeypatch.setattr(ac, "kv_get", lambda k: json.dumps(ahead))
+    import token_manager as tm
+    monkeypatch.setattr(tm, "load_ledger", lambda *a, **k: behind)
+    saved = []
+    monkeypatch.setattr(tm, "save_ledger", lambda led, *a, **k: saved.append(led))
+    ac.hydrate_ledger_from_kv()
+    assert len(saved) == 1 and saved[0]["balances"]["FLOP"] == "80"
+
+
+def test_hydrate_recovers_full_ledger_when_local_is_empty(monkeypatch):
+    """Cache runner mất -> local rỗng -> phải kéo bản KV về, nếu không mất hết tích luỹ."""
+    remote = _led("50", "50")
+    monkeypatch.setattr(ac, "kv_get", lambda k: json.dumps(remote))
+    import token_manager as tm
+    monkeypatch.setattr(tm, "load_ledger", lambda *a, **k: {"balances": {}, "entries": []})
+    saved = []
+    monkeypatch.setattr(tm, "save_ledger", lambda led, *a, **k: saved.append(led))
+    ac.hydrate_ledger_from_kv()
+    assert len(saved) == 1
+
+
+def test_hydrate_keeps_local_on_a_tie(monkeypatch):
+    same = _led("90", "10")
+    monkeypatch.setattr(ac, "kv_get", lambda k: json.dumps(same))
+    import token_manager as tm
+    monkeypatch.setattr(tm, "load_ledger", lambda *a, **k: _led("90", "10"))
+    saved = []
+    monkeypatch.setattr(tm, "save_ledger", lambda led, *a, **k: saved.append(led))
+    ac.hydrate_ledger_from_kv()
+    assert saved == []                                # hoà -> giữ local
+
+
+def test_hydrate_falls_back_to_old_rule_for_legacy_ledgers(monkeypatch):
+    """Sổ cái CŨ (chỉ chi, số dư âm, chưa có spent_cumulative) phải giữ hành vi cũ."""
+    monkeypatch.setattr(ac, "kv_get", lambda k: json.dumps(_led("-9")))
+    import token_manager as tm
+    monkeypatch.setattr(tm, "load_ledger", lambda *a, **k: _led("-4"))
+    saved = []
+    monkeypatch.setattr(tm, "save_ledger", lambda led, *a, **k: saved.append(led))
+    ac.hydrate_ledger_from_kv()
+    assert len(saved) == 1 and saved[0]["balances"]["FLOP"] == "-9"   # |9| > |4|
+
+
+def test_published_ledger_carries_the_cumulative_marker(monkeypatch):
+    """Thiếu field này trong payload thì mốc không bao giờ tới KV -> bug quay lại."""
+    import token_manager as tm
+    monkeypatch.setattr(tm, "load_ledger", lambda *a, **k: _led("90", "10"))
+    monkeypatch.setattr(tm, "ledger_mode", lambda: "simulation")
+    seen = {}
+    monkeypatch.setattr(ac, "kv_set", lambda pk, did, k, v: seen.update({k: v}))
+    ac.persist_ledger_to_kv(None, "did:key:zTest")
+    assert json.loads(seen[ac.LEDGER_KV_KEY])["spent_cumulative"] == {"FLOP": "10"}
