@@ -2457,3 +2457,21 @@ def test_failed_kv_write_is_announced(tmp_path, monkeypatch, capsys):
     ac.persist_ledger_to_kv("pk", "did")
     out = capsys.readouterr().out
     assert "ĐẨY KV THẤT BẠI" in out and "tua ngược" in out
+
+
+def test_miner_stats_accumulate_across_runs(tmp_path, monkeypatch):
+    """LỖI THẬT: `_miner_stats.clear()` chạy TRƯỚC `dict(_miner_stats)` nên mọi lần ghi
+    bắt đầu lại từ 0 — production báo '1 người/1 phiên' ở mọi run suốt nhiều giờ."""
+    import flop_miners as fm
+    monkeypatch.setattr(ac, "STATE_FILE", str(tmp_path / "state.json"))
+    for run in range(1, 4):
+        st = ac.load_state()
+        ac._miner_stats.clear()
+        ac._miner_stats.update(st.get("miner_stats") or {})
+        new = fm.record_settled(dict(ac._miner_stats), "did:key:zMINER%02d" % (run % 2))
+        ac._miner_stats.clear()
+        ac._miner_stats.update(new)
+        ac.save_state({"miner_stats": ac._miner_stats})
+    summ = fm.summarize(ac.load_state()["miner_stats"])
+    assert summ["total"] == 3 and summ["distinct"] == 2       # tích luỹ, không reset
+    ac._miner_stats.clear()

@@ -4068,13 +4068,16 @@ def main():
                     if r.get("stage") == "settle" and _oc in ("spent_onchain", "spent_simulated"):
                         _settled += 1
                         # Ghi thợ đào ĐÃ settle -> đo độ phân tán (independent-demand).
+                        # TÍNH TRƯỚC rồi mới clear: clear() trước làm dict(_miner_stats)
+                        # thành rỗng, nên mọi lần ghi đều bắt đầu lại từ 0.
+                        _new = _fm.record_settled(dict(_miner_stats), r.get("miner_did"))
                         _miner_stats.clear()
-                        _miner_stats.update(_fm.record_settled(dict(_miner_stats),
-                                                               r.get("miner_did")))
+                        _miner_stats.update(_new)
                     elif _oc == "skipped_fleet_miner":
                         # Chốt chặn fleet bắn -> ĐẾM, trước đây nó chạy hoàn toàn âm thầm.
+                        _new = _fm.record_denied(dict(_miner_stats))   # tính TRƯỚC khi clear
                         _miner_stats.clear()
-                        _miner_stats.update(_fm.record_denied(dict(_miner_stats)))
+                        _miner_stats.update(_new)
                         continue   # trúng miner fleet -> bỏ phiên này, thử phiên khác (match khác)
                     else:
                         break   # off/unconfigured/no_miner/insufficient/error -> KHÔNG spin vòng
