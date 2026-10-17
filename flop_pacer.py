@@ -64,9 +64,29 @@ def daily_budget(token: str = None, ledger_path: str = None):
     return d if (d is not None and d > 0) else None
 
 
-def max_per_run():
-    d = _dec(os.environ.get("FLOP_MAX_PER_RUN", ""))
-    return d if (d is not None and d > 0) else None
+def max_per_run(budget=None):
+    """Trần cho MỘT lần chi. Nhận hai dạng:
+
+      "2.5"  -> số TUYỆT ĐỐI (hành vi cũ)
+      "2%"   -> PHẦN TRĂM ngân sách ngày
+
+    Vì sao cần dạng %: trần tuyệt đối không co giãn. Đặt 0.5 cho ví 100 FLOP là hợp lý,
+    nhưng khi faucet cấp 100.000/ngày thì nó bóp xuống còn 576/ngày (0,576% ngân sách) —
+    và bóp trong IM LẶNG, cuối ngày mới biết thiếu 99%.
+
+    Rỗng -> KHÔNG trần (giữ đúng hợp đồng cũ của module). Lưu ý vận hành: không trần
+    nghĩa là sau một sự cố dài, phần thiếu dồn lại có thể bị chi hết trong MỘT lần —
+    đúng hình dạng dump mà pacer sinh ra để tránh. Hãy luôn đặt một trần."""
+    raw = os.environ.get("FLOP_MAX_PER_RUN", "").strip()
+    if raw.endswith("%"):
+        pct = _dec(raw[:-1])
+        if pct is None or pct <= 0 or not budget or budget <= 0:
+            return None
+        return budget * pct / Decimal(100)
+    d = _dec(raw)
+    if d is not None and d > 0:
+        return d
+    return None                               # rỗng, hoặc rác/không dương -> không trần
 
 
 def min_spend() -> Decimal:
@@ -188,7 +208,7 @@ def next_spend_amount(token: str = None, now: int = None, path: str = None, rng=
     due = target - spent_today
     if due <= 0:
         return "0"
-    cap = max_per_run()
+    cap = max_per_run(budget)
     if cap is not None and due > cap:
         due = cap
     due = _apply_jitter(due, rng)                    # chống sybil: phá nhịp tuyến tính robot

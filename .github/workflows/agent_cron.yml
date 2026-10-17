@@ -246,6 +246,8 @@ jobs:
           # Spend pacing/budget (van chống-sybil bổ sung; code có mặc định nếu rỗng)
           FLOP_PACE_JITTER_PCT: ${{ vars.FLOP_PACE_JITTER_PCT }}
           FLOP_DAILY_BUDGET: ${{ vars.FLOP_DAILY_BUDGET }}
+          # Trần MỖI LẦN chi. Nhận số tuyệt đối ('0.5') hoặc PHẦN TRĂM ngân sách ngày
+          # ('2%'). Dùng % để trần tự co giãn khi faucet đổi mức cấp.
           FLOP_MAX_PER_RUN: ${{ vars.FLOP_MAX_PER_RUN }}
           FLOP_MIN_SPEND: ${{ vars.FLOP_MIN_SPEND }}
           # Session inference (mua compute có settle). FLOP_SESSION_ENABLED=on + MODEL_HASH khi mở.

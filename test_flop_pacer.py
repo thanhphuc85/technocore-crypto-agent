@@ -241,3 +241,49 @@ def test_takes_the_larger_of_the_two_sources(tmp_path, monkeypatch):
     pf = str(tmp_path / "p.json")
     fp.record_spend("12", now=NOON, path=pf)             # pacer nhớ nhiều hơn sổ cái
     assert fp.next_spend_amount(now=NOON, path=pf, ledger_path=led) == "0"
+
+
+# --- trần MỖI LẦN CHI theo PHẦN TRĂM: co giãn theo ngân sách --------------------------
+
+def test_absolute_cap_unchanged(monkeypatch):
+    monkeypatch.setenv("FLOP_MAX_PER_RUN", "0.5")
+    assert fp.max_per_run(Decimal("100")) == Decimal("0.5")
+    assert fp.max_per_run(Decimal("100000")) == Decimal("0.5")     # KHÔNG co giãn (cố ý)
+
+
+def test_percent_cap_scales_with_budget():
+    """Lỗi THẬT: trần tuyệt đối 0.5 với ngân sách 100k chỉ cho tiêu 0,576%/ngày."""
+    import os
+    os.environ["FLOP_MAX_PER_RUN"] = "2%"
+    try:
+        assert fp.max_per_run(Decimal("100")) == Decimal("2")
+        assert fp.max_per_run(Decimal("100000")) == Decimal("2000")
+    finally:
+        os.environ.pop("FLOP_MAX_PER_RUN", None)
+
+
+def test_percent_cap_needs_a_budget(monkeypatch):
+    monkeypatch.setenv("FLOP_MAX_PER_RUN", "2%")
+    assert fp.max_per_run(None) is None
+    assert fp.max_per_run(Decimal("0")) is None
+
+
+def test_unset_means_no_cap_contract_unchanged(monkeypatch):
+    """Giữ NGUYÊN hợp đồng cũ: rỗng = không trần. (Vận hành thì nên luôn đặt một trần —
+    không trần nghĩa là sau sự cố dài phần thiếu có thể bị chi hết trong MỘT lần.)"""
+    monkeypatch.delenv("FLOP_MAX_PER_RUN", raising=False)
+    assert fp.max_per_run(Decimal("100000")) is None
+    assert fp.max_per_run(None) is None
+
+
+def test_bad_or_zero_values_mean_no_cap(monkeypatch):
+    for bad in ("rác", "-5", "0", "0%", "-2%", "%"):
+        monkeypatch.setenv("FLOP_MAX_PER_RUN", bad)
+        assert fp.max_per_run(Decimal("100")) is None
+
+
+def test_percent_cap_bounds_a_real_spend(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLOP_DAILY_BUDGET", "100000")
+    monkeypatch.setenv("FLOP_MAX_PER_RUN", "2%")
+    due = fp.next_spend_amount(now=NOON, path=str(tmp_path / "p.json"))
+    assert Decimal(due) == Decimal("2000")        # đến hạn 50.000 nhưng kẹp 2% = 2.000
