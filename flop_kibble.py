@@ -131,7 +131,8 @@ def parse_kibble_msg(text: str):
 # cả loạt sinh ra nhiều deliverable na ná từ CÙNG một DID — đúng tín hiệu `boilerplate` /
 # `self_repeat` mà census chấm điểm, và là thứ "manufactured activity" nhắm tới. Nên nhớ
 # vân tay vài job gần nhất rồi bỏ job gần trùng. Thuần, không mạng, không side-effect.
-DUP_KEEP = 40                     # số vân tay giữ lại (đủ phủ vài giờ ở nhịp hiện tại)
+DUP_KEEP = 40                     # số vân tay giữ lại (trần chống phình state)
+DUP_TTL_MS = 6 * 3600 * 1000      # vân tay HẾT HẠN sau 6h -> chống loạt, không cấm vĩnh viễn
 _WORD_RE = re.compile(r"[a-z0-9]+")
 
 
@@ -142,7 +143,7 @@ def job_fingerprint(title: str, body: str) -> list:
 
 def similarity(a, b) -> float:
     """Jaccard giữa 2 vân tay: |giao| / |hợp|. 1.0 = trùng hẳn, 0.0 = không chung từ nào.
-    Chọn Jaccard vì nó bỏ qua thứ tự từ — loạt job cùng template chỉ khác hậu tô id vẫn
+    Chọn Jaccard vì nó bỏ qua thứ tự từ — loạt job cùng template chỉ khác hậu tố id vẫn
     ra ~0.95+, trong khi 2 job khác chủ đề rơi xuống rất thấp."""
     sa, sb = set(a or []), set(b or [])
     if not sa or not sb:
@@ -150,19 +151,58 @@ def similarity(a, b) -> float:
     return len(sa & sb) / len(sa | sb)
 
 
-def is_near_duplicate(fp, recent, threshold: float) -> bool:
-    """True nếu fp giống >= threshold với BẤT KỲ vân tay nào trong recent.
-    threshold <= 0 -> TẮT hẳn (luôn False) để có thể vô hiệu hoá bằng config."""
+def _live_fingerprints(recent, now_ms: int, ttl_ms: int):
+    """Sinh các vân tay CHƯA hết hạn. ttl_ms <= 0 -> không bao giờ hết hạn.
+
+    Mục ở ĐỊNH DẠNG CŨ (list trần, chưa có mốc thời gian) bị coi như ĐÃ hết hạn: state cũ
+    không mang timestamp nên không thể biết nó bao lâu rồi, và giữ nó lại chính là lỗi đã
+    làm throughput về 0 (vân tay sống mãi -> mọi job cùng template bị cấm vĩnh viễn)."""
+    for r in (recent or []):
+        if isinstance(r, dict):
+            fp, ts = r.get("fp") or [], int(r.get("ts") or 0)
+        else:
+            fp, ts = r, 0
+        if not fp:
+            continue
+        if ttl_ms > 0 and (int(now_ms) - ts) > ttl_ms:
+            continue
+        yield list(fp)
+
+
+def is_near_duplicate(fp, recent, threshold: float, *,
+                      now_ms: int = 0, ttl_ms: int = DUP_TTL_MS) -> bool:
+    """True nếu fp giống >= threshold với một vân tay CÒN HẠN trong recent.
+    threshold <= 0 -> TẮT hẳn (luôn False)."""
     if not fp or threshold <= 0:
         return False
-    return any(similarity(fp, r) >= threshold for r in (recent or []))
+    return any(similarity(fp, r) >= threshold
+               for r in _live_fingerprints(recent, now_ms, ttl_ms))
 
 
-def remember_fingerprint(recent, fp, keep: int = DUP_KEEP) -> list:
-    """Trả list MỚI: fp lên đầu, bỏ bản cũ trùng hệt, cắt còn `keep`."""
+def remember_fingerprint(recent, fp, keep: int = DUP_KEEP, *,
+                         now_ms: int = 0, ttl_ms: int = DUP_TTL_MS) -> list:
+    """Trả list MỚI: fp (kèm mốc thời gian) lên đầu, bỏ mục hết hạn + mục cũ trùng hệt,
+    cắt còn `keep`."""
     if not fp:
-        return list(recent or [])
-    return ([list(fp)] + [r for r in (recent or []) if list(r) != list(fp)])[: max(0, int(keep))]
+        fp_l = None
+    else:
+        fp_l = list(fp)
+    out = []
+    for r in (recent or []):
+        if isinstance(r, dict):
+            rfp, ts = r.get("fp") or [], int(r.get("ts") or 0)
+        else:
+            rfp, ts = list(r), 0
+        if not rfp:
+            continue
+        if ttl_ms > 0 and (int(now_ms) - ts) > ttl_ms:
+            continue                          # hết hạn -> dọn luôn
+        if fp_l is not None and list(rfp) == fp_l:
+            continue                          # bản cũ của chính fp này -> thay bằng bản mới
+        out.append({"fp": list(rfp), "ts": ts})
+    if fp_l is not None:
+        out.insert(0, {"fp": fp_l, "ts": int(now_ms)})
+    return out[: max(0, int(keep))]
 
 
 def format_claim(jobid: str) -> str:
@@ -175,7 +215,8 @@ def format_deliver(jobid: str, answer: str) -> str:
     return f"DELIVER v1 | {jobid} | {one_line}"
 
 
-def select_jobs(messages, done_set, allow_types, max_n, my_did=None):
+def select_jobs(messages, done_set, allow_types, max_n, my_did=None, *,
+                recent_fps=None, dup_sim=0.0, now_ms: int = 0, ttl_ms: int = DUP_TTL_MS):
     """Từ danh sách message (mỗi cái {seq, from/did, text}) chọn ra các JOB nên làm:
       - verb JOB, type nằm trong allow_types,
       - jobid CHƯA có trong done_set (chưa từng deliver),
@@ -209,7 +250,25 @@ def select_jobs(messages, done_set, allow_types, max_n, my_did=None):
         if prev is None or seq >= prev.get("seq", 0):
             jobs[jobid] = parsed
     ordered = sorted(jobs.values(), key=lambda j: j.get("seq", 0), reverse=True)
-    return ordered[: max(0, int(max_n))]
+    cap = max(0, int(max_n))
+    if dup_sim <= 0:
+        return ordered[:cap]
+    # Lọc gần-trùng NGAY LÚC CHỌN (không phải lúc trả lời). Vì sao: một requester nhả
+    # job theo TỪNG ĐỢT, nên "max_n job mới nhất" thường TOÀN một họ. Nếu chỉ bỏ lúc trả
+    # lời thì cả quota bị đốt sạch và vòng chạy về 0 job, dù board vẫn còn job KHÁC ở sâu
+    # hơn. Lọc ở đây cho phép đào tiếp tới khi đủ `max_n` job thật sự khác nhau.
+    live = list(_live_fingerprints(recent_fps, now_ms, ttl_ms))
+    picked, picked_fps = [], []
+    for j in ordered:
+        if len(picked) >= cap:
+            break
+        fp = job_fingerprint(j.get("title", ""), j.get("body", ""))
+        if any(similarity(fp, r) >= dup_sim for r in live):
+            continue                       # trùng job đã làm gần đây
+        if any(similarity(fp, r) >= dup_sim for r in picked_fps):
+            continue                       # trùng job khác TRONG CÙNG đợt này
+        picked.append(j); picked_fps.append(fp)
+    return picked
 
 
 def _max_seq(messages, fallback=None):
@@ -219,7 +278,9 @@ def _max_seq(messages, fallback=None):
 
 def run_kibble_worker(fetch_fn, answer_fn, post_fn, state, *,
                       allow_types=None, max_per_run=2, do_claim=True,
-                      dry_run=True, log=print):
+                      dry_run=True, log=print,
+                      recent_fps=None, dup_sim=0.0, now_ms: int = 0,
+                      ttl_ms: int = DUP_TTL_MS):
     """Chạy MỘT vòng worker. Phụ thuộc được TIÊM vào để test không cần mạng/LLM:
       fetch_fn(since)   -> dict {"messages":[...], "last_seq":int} (như API technocore)
       answer_fn(job)    -> str | None  (None = bỏ job, KHÔNG đăng rác)
@@ -240,7 +301,9 @@ def run_kibble_worker(fetch_fn, answer_fn, post_fn, state, *,
     done_set = set(done)
 
     jobs = select_jobs(messages, done_set, allow_types, max_per_run,
-                       my_did=state.get("kibble_did"))
+                       my_did=state.get("kibble_did"),
+                       recent_fps=recent_fps, dup_sim=dup_sim,
+                       now_ms=now_ms, ttl_ms=ttl_ms)
 
     delivered, committed, skipped = [], [], 0
     delivered_items = []          # {jobid, answer} cho các DELIVER THẬT (dùng cho tracker ATTEST)

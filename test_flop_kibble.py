@@ -264,8 +264,9 @@ def test_template_family_is_near_duplicate_but_distinct_jobs_are_not():
     c = k.job_fingerprint("Explain the one-time pad",
                            "Why is perfect secrecy impractical to deploy at scale?")
     assert k.similarity(a, c) < 0.85
-    assert k.is_near_duplicate(b, [a], 0.85) is True
-    assert k.is_near_duplicate(c, [a], 0.85) is False
+    recent = k.remember_fingerprint([], a, now_ms=1_000)
+    assert k.is_near_duplicate(b, recent, 0.85, now_ms=1_000) is True
+    assert k.is_near_duplicate(c, recent, 0.85, now_ms=1_000) is False
 
 
 def test_is_near_duplicate_disabled_at_zero_threshold():
@@ -281,8 +282,8 @@ def test_remember_fingerprint_caps_and_dedupes():
     assert len(recent) == k.DUP_KEEP
     fp = k.job_fingerprint("job 0", "body")
     once = k.remember_fingerprint(k.remember_fingerprint(recent, fp), fp)
-    assert sum(1 for r in once if list(r) == list(fp)) == 1    # không nhân bản
-    assert list(once[0]) == list(fp)                            # mới nhất lên đầu
+    assert sum(1 for r in once if r["fp"] == fp) == 1           # không nhân bản
+    assert once[0]["fp"] == fp                                  # mới nhất lên đầu
 
 
 def test_remember_fingerprint_is_pure():
@@ -290,3 +291,105 @@ def test_remember_fingerprint_is_pure():
     snapshot = [list(x) for x in recent]
     k.remember_fingerprint(recent, k.job_fingerprint("c", "d"))
     assert recent == snapshot                                   # không sửa đầu vào
+
+
+# --- HẠN SỐNG của vân tay (sửa lỗi chặn vĩnh viễn làm throughput về 0) ----------------
+
+_H = 3600 * 1000
+
+
+def test_fingerprint_expires_after_ttl():
+    """Chặn trả lời CẢ LOẠT trong một đợt, KHÔNG cấm vĩnh viễn một template."""
+    a = k.job_fingerprint("Review dupe-filter risk (mvbmaxua-2)", _TPL)
+    b = k.job_fingerprint("Review dupe-filter risk (mvbmc37c-2)", _TPL)
+    recent = k.remember_fingerprint([], a, now_ms=0)
+    ttl = 6 * _H
+    assert k.is_near_duplicate(b, recent, 0.85, now_ms=1 * _H, ttl_ms=ttl) is True   # trong hạn
+    assert k.is_near_duplicate(b, recent, 0.85, now_ms=7 * _H, ttl_ms=ttl) is False  # hết hạn
+
+
+def test_zero_ttl_never_expires():
+    a = k.job_fingerprint("x", _TPL)
+    recent = k.remember_fingerprint([], a, now_ms=0, ttl_ms=0)
+    assert k.is_near_duplicate(a, recent, 0.85, now_ms=999 * _H, ttl_ms=0) is True
+
+
+def test_legacy_bare_list_entries_are_treated_as_expired():
+    """State cũ (list trần, không mốc) chính là thứ đã khoá cứng throughput -> phải
+    KHÔNG còn chặn nữa, và bị dọn ở lần ghi kế tiếp."""
+    now = 1_790_000_000_000                        # mốc epoch ms thật (prod luôn >> ttl)
+    a = k.job_fingerprint("x", _TPL)
+    legacy = [a]                                   # định dạng trước khi có timestamp: ts=0
+    assert k.is_near_duplicate(a, legacy, 0.85, now_ms=now) is False
+    out = k.remember_fingerprint(legacy, k.job_fingerprint("y", "khác hẳn"), now_ms=now)
+    assert all(isinstance(r, dict) for r in out) and len(out) == 1
+
+
+def test_remember_prunes_expired_entries():
+    old = k.remember_fingerprint([], k.job_fingerprint("cũ", _TPL), now_ms=0)
+    out = k.remember_fingerprint(old, k.job_fingerprint("mới", "nội dung khác"),
+                                 now_ms=7 * _H, ttl_ms=6 * _H)
+    assert len(out) == 1 and out[0]["fp"] == k.job_fingerprint("mới", "nội dung khác")
+
+
+def test_entries_keep_their_own_timestamp():
+    r = k.remember_fingerprint([], k.job_fingerprint("a", "b"), now_ms=5_000)
+    r = k.remember_fingerprint(r, k.job_fingerprint("c", "d"), now_ms=9_000)
+    assert [x["ts"] for x in r] == [9_000, 5_000]
+
+
+# --- lọc gần-trùng LÚC CHỌN (đợt job toàn một họ không được đốt hết quota) -------------
+
+def _job_msg(seq, jobid, title, body, jtype="explain"):
+    return {"seq": seq, "from": "did:key:zSomeoneElse",
+            "text": f"JOB v1 | {jobid} | {jtype} | {title} | {body}"}
+
+
+def _burst_then_distinct():
+    """Mô phỏng board thật: 1 requester nhả 6 job CÙNG HỌ (mới nhất), rồi 3 job khác hẳn."""
+    msgs = []
+    for i in range(6):
+        msgs.append(_job_msg(1000 + i, "k%010x" % (i + 1),
+                             f"Review dupe-filter risk (mvbo1fuy-{i})", _TPL))
+    for i, (t, b) in enumerate([
+            ("One-time pad perfect secrecy", "Why is it impractical to deploy at scale?"),
+            ("Solana SVM account locking", "How does parallel transaction scheduling work?"),
+            ("PostgreSQL covering index", "When does an index-only scan actually trigger?")]):
+        msgs.append(_job_msg(900 + i, "k%010x" % (100 + i), t, b))
+    return msgs
+
+
+def test_select_jobs_digs_past_a_single_family_burst():
+    """Đây CHÍNH LÀ lỗi làm throughput về 0: 5 job mới nhất toàn một họ. Lọc lúc chọn phải
+    lấy 1 đại diện của họ rồi ĐÀO TIẾP xuống các job khác, không trả về đợt toàn trùng."""
+    picked = k.select_jobs(_burst_then_distinct(), set(), ["explain"], 5,
+                           recent_fps=[], dup_sim=0.85, now_ms=1_000)
+    assert len(picked) == 4                       # 1 đại diện họ + 3 job khác nhau
+    titles = [p["title"] for p in picked]
+    assert sum(1 for t in titles if "dupe-filter" in t) == 1
+    assert len(set(titles)) == 4
+
+
+def test_select_jobs_unchanged_when_dup_filter_off():
+    picked = k.select_jobs(_burst_then_distinct(), set(), ["explain"], 5, dup_sim=0)
+    assert len(picked) == 5                       # hành vi cũ: 5 job mới nhất, kể cả trùng
+    assert all("dupe-filter" in p["title"] for p in picked)
+
+
+def test_select_jobs_skips_family_already_answered_recently():
+    recent = k.remember_fingerprint(
+        [], k.job_fingerprint("Review dupe-filter risk (mvbmaxua-2)", _TPL), now_ms=1_000)
+    picked = k.select_jobs(_burst_then_distinct(), set(), ["explain"], 5,
+                           recent_fps=recent, dup_sim=0.85, now_ms=1_000)
+    assert all("dupe-filter" not in p["title"] for p in picked)      # họ đã làm -> bỏ qua
+    assert len(picked) == 3                                          # còn 3 job khác
+
+
+def test_select_jobs_takes_family_again_after_ttl():
+    recent = k.remember_fingerprint(
+        [], k.job_fingerprint("Review dupe-filter risk (mvbmaxua-2)", _TPL), now_ms=0)
+    late = 7 * 3600 * 1000
+    picked = k.select_jobs(_burst_then_distinct(), set(), ["explain"], 5,
+                           recent_fps=recent, dup_sim=0.85, now_ms=late,
+                           ttl_ms=6 * 3600 * 1000)
+    assert sum(1 for p in picked if "dupe-filter" in p["title"]) == 1   # hết hạn -> làm lại

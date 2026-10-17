@@ -435,6 +435,10 @@ KIBBLE_TRACK_ENABLED = os.environ.get("FLOP_KIBBLE_TRACK_ENABLED", "").strip().l
 # Ngưỡng Jaccard coi 2 job là "gần trùng" -> bỏ job sau. 0 = TẮT. Mặc định 0.85: loạt job
 # cùng template (chỉ khác hậu tố id) đo được ~0.95+, còn 2 job khác chủ đề thấp hơn nhiều.
 KIBBLE_DUP_SIM = _env_float("FLOP_KIBBLE_DUP_SIM", 0.85)
+# Vân tay chống-trùng HẾT HẠN sau ngần này giờ. Mục đích là chặn trả lời CẢ LOẠT trong
+# một đợt, KHÔNG phải cấm vĩnh viễn một template: board hiện gần như chỉ còn vài họ job
+# lặp, nên vân tay sống mãi khiến throughput về 0. <=0 = không hết hạn (hành vi cũ).
+KIBBLE_DUP_HOURS = _env_float("FLOP_KIBBLE_DUP_HOURS", 6)
 _kibble_recent_fps = []              # vân tay job VỪA TRẢ LỜI (nạp từ state trong main)
 _REVIEW_NO_TARGET = object()         # sentinel: review không có đích GitHub -> rơi nhánh thường
 KIBBLE_TEMPERATURE = _env_float("FLOP_KIBBLE_TEMPERATURE", 0.3)
@@ -2208,6 +2212,11 @@ def _answer_review_job(job: dict, task: str):
     return text
 
 
+def _kibble_dup_ttl_ms() -> int:
+    """Hạn sống của vân tay, mili-giây. <=0 -> không hết hạn."""
+    return int(max(0.0, KIBBLE_DUP_HOURS) * 3600 * 1000)
+
+
 def _kibble_fp(job: dict):
     """Vân tay chống-trùng của 1 job (tập từ chuẩn hoá của title+body)."""
     import flop_kibble as _fk
@@ -2215,15 +2224,20 @@ def _kibble_fp(job: dict):
 
 
 def _kibble_is_dup(fp) -> bool:
-    """True nếu job gần trùng một job VỪA trả lời (ngưỡng KIBBLE_DUP_SIM; 0 = tắt)."""
+    """True nếu job gần trùng một job trả lời trong KIBBLE_DUP_HOURS giờ qua
+    (ngưỡng KIBBLE_DUP_SIM; 0 = tắt)."""
     import flop_kibble as _fk
-    return _fk.is_near_duplicate(fp, _kibble_recent_fps, KIBBLE_DUP_SIM)
+    return _fk.is_near_duplicate(fp, _kibble_recent_fps, KIBBLE_DUP_SIM,
+                                 now_ms=int(time.time() * 1000),
+                                 ttl_ms=_kibble_dup_ttl_ms())
 
 
 def _kibble_remember(fp) -> None:
-    """Ghi vân tay job VỪA TRẢ LỜI vào bộ nhớ chống-trùng (tại chỗ, có trần)."""
+    """Ghi vân tay job VỪA TRẢ LỜI (kèm mốc thời gian) + dọn mục hết hạn."""
     import flop_kibble as _fk
-    _kibble_recent_fps[:] = _fk.remember_fingerprint(_kibble_recent_fps, fp)
+    _kibble_recent_fps[:] = _fk.remember_fingerprint(
+        _kibble_recent_fps, fp, now_ms=int(time.time() * 1000),
+        ttl_ms=_kibble_dup_ttl_ms())
 
 
 def answer_kibble_job(job: dict):
@@ -3393,7 +3407,9 @@ def main():
     # Nạp danh sách model Gemini đã 404 (vĩnh viễn) -> run này khỏi thử lại, không phí call.
     _gemini_404.update(state.get("gemini_404") or [])
     # Nạp vân tay job đã trả lời -> chống-trùng hiệu lực XUYÊN run, không chỉ trong 1 run.
-    _kibble_recent_fps[:] = [list(x) for x in (state.get("kibble_recent_fps") or []) if x]
+    # Mục ĐỊNH DẠNG CŨ (list trần, không mốc) được giữ nguyên ở đây; _live_fingerprints
+    # coi chúng là đã hết hạn nên chúng không chặn gì, và lần remember kế tiếp dọn sạch.
+    _kibble_recent_fps[:] = [x for x in (state.get("kibble_recent_fps") or []) if x]
     now = int(time.time())
     # Run thủ công (workflow_dispatch) luôn phát để dễ kiểm chứng.
     force = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
@@ -3551,6 +3567,9 @@ def main():
                 max_per_run=KIBBLE_MAX_PER_RUN,
                 do_claim=KIBBLE_DO_CLAIM,
                 dry_run=KIBBLE_DRY_RUN,
+                # Lọc gần-trùng NGAY LÚC CHỌN -> đợt job toàn một họ không đốt hết quota.
+                recent_fps=_kibble_recent_fps, dup_sim=KIBBLE_DUP_SIM,
+                now_ms=int(time.time() * 1000), ttl_ms=_kibble_dup_ttl_ms(),
             )
             save_state({"kibble_cursor": state.get("kibble_cursor"),
                         "kibble_done": state.get("kibble_done", []),
