@@ -2273,3 +2273,27 @@ def test_published_ledger_is_labelled_with_mode(monkeypatch):
     monkeypatch.setattr(ac, "kv_set", lambda pk, did, k, v: seen.update({k: v}))
     ac.persist_ledger_to_kv(None, "did:key:zTest")
     assert json.loads(seen[ac.LEDGER_KV_KEY])["mode"] == "simulation"
+
+
+# --- hiển thị lý do metering bị bỏ qua (trước đây im lặng hoàn toàn) ------------------
+
+def test_meter_skips_are_collected_and_printed(capsys):
+    ac._meter_skips.clear()
+    ac._note_meter_skip({"outcome": "skipped_insufficient", "reason": "số dư 0 < 0.001"})
+    ac._note_meter_skip({"outcome": "skipped_insufficient", "reason": "số dư 0 < 0.001"})
+    ac._note_meter_skip({"outcome": "skipped_synthetic", "reason": "thiếu event_id"})
+    ac.print_meter_skips()
+    out = capsys.readouterr().out
+    assert "skipped_insufficient×2" in out and "số dư 0" in out
+    assert "skipped_synthetic×1" in out
+    ac._meter_skips.clear()
+
+
+def test_meter_skip_ignores_deliberate_off(capsys):
+    """'skipped_off' là lựa chọn cấu hình, không phải sự cố -> không đếm, không in."""
+    ac._meter_skips.clear()
+    ac._note_meter_skip({"outcome": "skipped_off", "reason": "FLOP_METER_ENABLED tắt"})
+    ac._note_meter_skip({"outcome": "spent_simulated"})
+    ac._note_meter_skip(None)
+    ac.print_meter_skips()
+    assert capsys.readouterr().out == "" and ac._meter_skips == {}

@@ -2068,6 +2068,31 @@ def build_market_context(extra_ids=None, rich=None) -> str:
     return f"LIVE MARKET DATA ({time.strftime('%H:%MZ', time.gmtime())}): " + " · ".join(parts)
 
 
+_meter_skips = {}            # outcome -> [số lần, lý do gần nhất]; gom rồi in 1 lần/run
+
+
+def _note_meter_skip(res) -> None:
+    """Gom các lần metering bị BỎ QUA có ý nghĩa. 'skipped_off' là lựa chọn cấu hình
+    (tắt metering) nên KHÔNG đếm; phần còn lại (hết tiền / không gắn sự kiện / chạm trần)
+    là thứ người vận hành cần biết."""
+    oc = (res or {}).get("outcome") or ""
+    if not oc.startswith("skipped_") or oc == "skipped_off":
+        return
+    row = _meter_skips.setdefault(oc, [0, ""])
+    row[0] += 1
+    row[1] = (res or {}).get("reason") or row[1]
+
+
+def print_meter_skips() -> None:
+    """In MỘT dòng tổng kết cuối run. Trước đây các lần bỏ qua này hoàn toàn im lặng —
+    sổ cái rỗng mà không ai biết vì sao (đúng lớp lỗi đã khiến Telegram câm 200 run)."""
+    if not _meter_skips:
+        return
+    parts = [f"{oc}×{n}" + (f" ({why})" if why else "")
+             for oc, (n, why) in sorted(_meter_skips.items())]
+    print("[meter] bỏ qua — " + " · ".join(parts))
+
+
 def _meter_flop(memo: str, event_id: str = None) -> None:
     """(Tùy chọn, GATED) Ghi nhận 'trả FLOP cho 1 lần suy luận' vào sổ cái token.
     Mặc định TẮT (FLOP_METER_ENABLED off) -> không đổi hành vi. Bọc kín: mọi lỗi bị
@@ -2077,9 +2102,9 @@ def _meter_flop(memo: str, event_id: str = None) -> None:
     tổng hợp này bị skipped_synthetic (đúng ý đồ chống burn-loop). Xem token_manager.py."""
     try:
         import token_manager
-        token_manager.meter_inference(memo=memo, event_id=event_id)
+        _note_meter_skip(token_manager.meter_inference(memo=memo, event_id=event_id))
     except Exception as e:
-        print(f"[meter] bỏ qua ({str(e)[:80]})")
+        print(f"[meter] lỗi ({str(e)[:80]})")
 
 
 def _llm_generate(prompt: str, system: str, temperature: float, memo: str,
@@ -3882,6 +3907,18 @@ def main():
     #       claim đoán mò). Anti-sybil: DEMAND_ONLY/REFILL_BELOW/cooldown+jitter/MAX_PER_DAY (xem
     #       flop_faucet). Claim thành công -> credit vào ledger. Chạy TRƯỚC session (có token rồi
     #       mới chi). Bọc kín: lỗi bị nuốt, không làm sập run.
+    # Hạt giống MÔ PHỎNG (GATED, chỉ khi TESTNET_ENABLED tắt): faucet thật chưa có spec
+    # nên số dư luôn 0 -> metering luôn skipped_insufficient. Nạp hạt giống để chạy thử
+    # chuỗi chi -> pacer -> báo cáo TRƯỚC ngày testnet mở. token_manager từ chối cứng
+    # khi testnet bật, nên đường này không thể chạm sổ cái thật.
+    try:
+        import token_manager as _tm
+        _seed = _tm.maybe_sim_credit()
+        if _seed.get("outcome") not in ("credited", "skipped_disabled"):
+            print(f"[sim-credit] {_seed.get('outcome')} — {_seed.get('reason', '')}")
+    except Exception as e:
+        print(f"[sim-credit] bỏ qua ({str(e)[:80]})")
+
     faucet_status = "off"
     if os.environ.get("FLOP_FAUCET_ENABLED", "").strip().lower() in ("1", "true", "on", "yes"):
         try:
@@ -4026,6 +4063,7 @@ def main():
             "kibble": kibble_status, "faucet": faucet_status, "session": session_status}):
         save_state({"last_daily_report": now})
         print("[report] đã gửi tóm tắt chi tiêu qua Telegram")
+    print_meter_skips()                      # vì sao sổ cái không nhúc nhích -> nói ra, đừng im
     try:                                     # telemetry: đo đóng góp inference tích luỹ (mock/testnet)
         import token_manager
         _st = token_manager.spend_stats()

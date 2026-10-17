@@ -239,3 +239,61 @@ def test_spend_stats_24h_window(ledger):
     st = tm.spend_stats(now=now, path=ledger)
     assert st["spend_count_total"] == 2              # cả 2 spend, bỏ credit
     assert st["spend_count_24h"] == 1                # chỉ entry trong 24h
+
+
+# --- hạt giống MÔ PHỎNG (chỉ simulation) ---------------------------------------------
+
+def test_sim_credit_off_by_default(tmp_path, monkeypatch):
+    monkeypatch.delenv("FLOP_SIM_CREDIT", raising=False)
+    r = tm.maybe_sim_credit(path=str(tmp_path / "l.json"))
+    assert r["outcome"] == "skipped_disabled"
+
+
+def test_sim_credit_refuses_on_testnet(tmp_path, monkeypatch):
+    """Chốt quan trọng nhất: hạt giống mô phỏng KHÔNG BAO GIỜ chạm sổ cái testnet thật."""
+    monkeypatch.setenv("FLOP_SIM_CREDIT", "100")
+    monkeypatch.setenv("TESTNET_ENABLED", "true")
+    p = str(tmp_path / "l.json")
+    assert tm.maybe_sim_credit(path=p)["outcome"] == "skipped_testnet"
+    assert tm.check_balance(path=p) == "0"          # không nạp gì cả
+
+
+def test_sim_credit_seeds_once_then_stops(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLOP_SIM_CREDIT", "100")
+    monkeypatch.delenv("TESTNET_ENABLED", raising=False)
+    p = str(tmp_path / "l.json")
+    assert tm.maybe_sim_credit(path=p, log=lambda *a: None)["outcome"] == "credited"
+    assert tm.check_balance(path=p) == "100"
+    r2 = tm.maybe_sim_credit(path=p, log=lambda *a: None)       # đã có tiền -> không chồng
+    assert r2["outcome"] == "skipped_has_balance"
+    assert tm.check_balance(path=p) == "100"
+
+
+def test_sim_credit_rejects_bad_amount(tmp_path, monkeypatch):
+    monkeypatch.delenv("TESTNET_ENABLED", raising=False)
+    p = str(tmp_path / "l.json")
+    for bad in ("khong-phai-so", "-5", "0", "NaN"):
+        monkeypatch.setenv("FLOP_SIM_CREDIT", bad)
+        assert tm.maybe_sim_credit(path=p)["outcome"] == "skipped_bad_amount"
+    assert tm.check_balance(path=p) == "0"
+
+
+def test_sim_credit_memo_says_it_is_simulated(tmp_path, monkeypatch):
+    """Sổ cái được publish CÔNG KHAI -> dòng credit phải tự nói nó là mô phỏng."""
+    monkeypatch.setenv("FLOP_SIM_CREDIT", "50")
+    monkeypatch.delenv("TESTNET_ENABLED", raising=False)
+    p = str(tmp_path / "l.json")
+    tm.maybe_sim_credit(path=p, log=lambda *a: None)
+    memo = tm.load_ledger(p)["entries"][0]["memo"].lower()
+    assert "simulation" in memo and "faucet that" in memo
+
+
+def test_metering_works_after_seed(tmp_path, monkeypatch):
+    """Chuỗi đầy đủ: hạt giống -> metering hết skipped_insufficient."""
+    monkeypatch.setenv("FLOP_SIM_CREDIT", "10")
+    monkeypatch.setenv("FLOP_METER_ENABLED", "on")
+    monkeypatch.delenv("TESTNET_ENABLED", raising=False)
+    p = str(tmp_path / "l.json")
+    assert tm.meter_inference(memo="x", event_id="k1", path=p)["outcome"] == "skipped_insufficient"
+    tm.maybe_sim_credit(path=p, log=lambda *a: None)
+    assert tm.meter_inference(memo="x", event_id="k1", path=p)["outcome"] == "spent_simulated"

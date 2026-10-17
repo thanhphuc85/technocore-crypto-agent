@@ -228,6 +228,9 @@ jobs:
           FLOP_ORGANIC_ONLY: ${{ vars.FLOP_ORGANIC_ONLY }}
           FLOP_INFERENCE_COST: ${{ vars.FLOP_INFERENCE_COST }}
           FLOP_MAX_SPENDS_PER_HOUR: ${{ vars.FLOP_MAX_SPENDS_PER_HOUR }}
+          # Hạt giống MÔ PHỎNG để chạy thử đường ống khi faucet thật chưa có spec.
+          # token_manager TỪ CHỐI CỨNG khi TESTNET_ENABLED bật -> không chạm sổ cái thật.
+          FLOP_SIM_CREDIT: ${{ vars.FLOP_SIM_CREDIT }}
           # ── TESTNET EARNING SURFACE (settled-inference = đòn earn agent airdrop). Mặc định
           #    TẮT/rỗng -> simulation, hành vi không đổi. Chỉ flip khi FLOP mở testnet + công bố
           #    endpoint. (Trước đây các biến này CHƯA map -> set là no-op; nay đã map.)

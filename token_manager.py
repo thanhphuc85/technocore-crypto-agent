@@ -462,6 +462,44 @@ def spend_stats(token: str = None, now: int = None, path: str = None) -> dict:
     return {"token": token, "spend_count_total": total, "spend_count_24h": last_24h}
 
 
+# --- Hạt giống MÔ PHỎNG: để chạy thử đường ống khi faucet thật chưa tồn tại --------
+
+def maybe_sim_credit(path: str = None, log=print) -> dict:
+    """(GATED, CHỈ simulation) Nạp một hạt giống MÔ PHỎNG khi số dư = 0.
+
+    Vì sao cần: faucet THẬT chưa có spec (FLOP chưa công bố), nên số dư luôn 0 và MỌI
+    lần metering trả skipped_insufficient -> không có cách nào chạy thử chuỗi
+    chi -> pacer -> báo cáo trước ngày testnet mở. Hạt giống này lấp đúng chỗ đó.
+
+    BA chốt chặn, theo thứ tự:
+      1. Phải đặt FLOP_SIM_CREDIT (mặc định rỗng -> tắt hoàn toàn).
+      2. TỪ CHỐI CỨNG khi testnet_enabled() — hạt giống mô phỏng KHÔNG BAO GIỜ
+         được chạm vào sổ cái testnet thật, kể cả khi ai đó quên tắt cờ.
+      3. Chỉ nạp khi số dư <= 0 -> không chồng thêm vào ví đang có tiền.
+
+    memo ghi RÕ đây là hạt giống mô phỏng: sổ cái được publish công khai, nên một dòng
+    credit không nhãn sẽ bị đọc thành nạp thật."""
+    raw = os.environ.get("FLOP_SIM_CREDIT", "").strip()
+    if not raw:
+        return {"outcome": "skipped_disabled", "reason": "FLOP_SIM_CREDIT chưa đặt"}
+    if testnet_enabled():
+        return {"outcome": "skipped_testnet",
+                "reason": "TESTNET_ENABLED bật — từ chối nạp hạt giống mô phỏng"}
+    amt = _parse_amount(raw)
+    if amt is None or amt <= 0:
+        return {"outcome": "skipped_bad_amount", "reason": f"FLOP_SIM_CREDIT không hợp lệ: {raw!r}"}
+    token = default_token()
+    cur = _parse_amount(check_balance(token, path)) or Decimal(0)
+    if cur > 0:
+        return {"outcome": "skipped_has_balance", "reason": f"số dư {_fmt(cur)} > 0"}
+    res = credit(amt, token=token, memo="SIMULATION seed (khong phai faucet that)", path=path)
+    if res.get("ok"):
+        log(f"[sim-credit] nạp hạt giống MÔ PHỎNG {_fmt(amt)} {token} "
+            f"(sổ cái mode=simulation, không phải token thật)")
+        return {"outcome": "credited", "amount": _fmt(amt), "token": token}
+    return {"outcome": "error_credit", "reason": str(res)}
+
+
 # --- Tiện ích: đo phí 1 lần suy luận LLM (ví dụ dùng trong agent, GATED) -----------
 
 def meter_inference(amount: str = None, memo: str = "Gemini Inference",
