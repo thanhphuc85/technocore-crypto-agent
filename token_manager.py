@@ -216,6 +216,25 @@ def _unlock_state(state: dict) -> dict:
     return u
 
 
+DAY_KEEP = 7                 # giữ 7 ngày gần nhất (đủ cho pacer + báo cáo), chặn phình
+
+
+def _accrue_day(state: dict, token: str, amount: Decimal, now: int = None) -> None:
+    """Cộng dồn chi theo NGÀY UTC vào `spent_by_day`: {token: {'YYYY-MM-DD': tổng}}.
+
+    Vì sao không đếm từ `entries`: bản đẩy lên KV phải cắt log cho vừa giới hạn 8192 ký
+    tự của technocore.chat, nên entries KHÔNG còn là nguồn đáng tin để biết "hôm nay đã
+    chi bao nhiêu". Tổng chạy thì cắt log bao nhiêu cũng không sai."""
+    now = int(now if now is not None else time.time())
+    day = time.strftime("%Y-%m-%d", time.gmtime(now))
+    by = state.setdefault("spent_by_day", {})
+    tok = by.setdefault(token, {})
+    prev = _parse_amount(tok.get(day, "0")) or Decimal(0)
+    tok[day] = _fmt(prev + amount)
+    for d in sorted(tok)[:-DAY_KEEP]:        # chỉ giữ DAY_KEEP ngày gần nhất
+        tok.pop(d, None)
+
+
 def _accrue_cumulative(state: dict, token: str, amount: Decimal) -> None:
     """Cộng dồn MỌI lần chi (cả simulation lẫn testnet) vào `spent_cumulative`.
 
@@ -423,6 +442,7 @@ def spend(amount, memo, token: str = None, *, path: str = None,
         })
         _accrue_unlock(state, token, amt)     # chi testnet THẬT -> tăng quyền mở khóa 3:1
         _accrue_cumulative(state, token, amt)  # mốc CHỈ TĂNG -> hydrate chọn đúng bản
+        _accrue_day(state, token, amt)         # tổng theo ngày -> pacer không cần entries
         _save_ledger(state, path)
         short = (tx_hash or "")[:12]
         log(f"[ledger] spent {_fmt(amt)} {token} for {memo} (tx {short}…)")
@@ -438,6 +458,7 @@ def spend(amount, memo, token: str = None, *, path: str = None,
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     })
     _accrue_cumulative(state, token, amt)      # mốc CHỈ TĂNG -> hydrate chọn đúng bản
+    _accrue_day(state, token, amt)             # tổng theo ngày -> pacer không cần entries
     _save_ledger(state, path)
     log(f"[SIMULATION] Spent {_fmt(amt)} MOCK_{token} for {memo}")
     return {**base, "outcome": "spent_simulated", "balance_after": new_bal,
@@ -506,9 +527,15 @@ def spent_today_amount(token: str = None, now: int = None, path: str = None) -> 
     Entry thiếu/hỏng `ts` bị bỏ qua (không đoán thời điểm)."""
     token = (token or default_token())
     now = int(now if now is not None else time.time())
+    led = load_ledger(path)
+    day = time.strftime("%Y-%m-%d", time.gmtime(now))
+    by = (led.get("spent_by_day") or {}).get(token) if isinstance(led.get("spent_by_day"), dict) else None
+    if isinstance(by, dict) and day in by:
+        return _parse_amount(by.get(day)) or Decimal(0)   # tổng chạy: chính xác kể cả khi cắt log
+    # Đường lui cho sổ cái CŨ (chưa có spent_by_day): cộng từ entries.
     start = now - (now % 86400)                      # 00:00 UTC hôm nay
     spent = Decimal(0)
-    for e in load_ledger(path).get("entries", []):
+    for e in led.get("entries", []):
         if not isinstance(e, dict) or e.get("kind") != "spend" or e.get("token") != token:
             continue
         ts = _parse_ts(e.get("ts"))

@@ -397,3 +397,37 @@ def test_spent_today_amount_skips_entries_without_timestamp(tmp_path):
     led["entries"].append({"kind": "spend", "token": "FLOP", "amount": "5"})
     tm.save_ledger(led, p)
     assert tm.spent_today_amount(path=p) == Decimal("0")
+
+
+def test_spent_by_day_is_a_running_total_not_derived_from_entries(tmp_path):
+    """Nguồn đúng khi bản KV bị cắt log: tổng chạy theo ngày."""
+    p = str(tmp_path / "l.json")
+    tm.credit("100", memo="seed", path=p)
+    tm.spend("3", memo="x", path=p)
+    tm.spend("4", memo="x", path=p)
+    assert tm.spent_today_amount(path=p) == Decimal("7")
+    led = tm.load_ledger(p)
+    led["entries"] = []                                  # giả lập bản đã cắt sạch log
+    tm.save_ledger(led, p)
+    assert tm.spent_today_amount(path=p) == Decimal("7")   # vẫn đúng
+
+
+def test_spent_by_day_keeps_only_recent_days(tmp_path):
+    p = str(tmp_path / "l.json")
+    tm.credit("100", memo="seed", path=p)
+    led = tm.load_ledger(p)
+    led["spent_by_day"] = {"FLOP": {f"2026-01-{d:02d}": "1" for d in range(1, 21)}}
+    tm.save_ledger(led, p)
+    tm.spend("1", memo="x", path=p)
+    days = tm.load_ledger(p)["spent_by_day"]["FLOP"]
+    assert len(days) <= tm.DAY_KEEP + 1                  # cắt bớt, không phình vô hạn
+
+
+def test_legacy_ledger_without_spent_by_day_still_works(tmp_path):
+    """Sổ cái CŨ chưa có spent_by_day -> rơi về cộng từ entries."""
+    import time as _t
+    p = str(tmp_path / "l.json")
+    ts = _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime())
+    tm.save_ledger({"balances": {"FLOP": "9"}, "entries": [
+        {"kind": "spend", "token": "FLOP", "amount": "2", "ts": ts}]}, p)
+    assert tm.spent_today_amount(path=p) == Decimal("2")

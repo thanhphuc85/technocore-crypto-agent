@@ -1453,7 +1453,9 @@ def test_persist_ledger_caps_entries_but_keeps_balance(tmp_path, monkeypatch):
     monkeypatch.setattr(ac, "kv_set", lambda pk, did, k, v: sent.update({k: v}) or True)
     ac.persist_ledger_to_kv("pk", "did")
     payload = json.loads(sent["token_ledger"])
-    assert len(payload["entries"]) == ac.LEDGER_ENTRY_CAP        # bounded
+    # Bản ĐẨY LÊN KV cắt mạnh hơn bản trên đĩa: service từ chối value > 8192 ký tự.
+    assert len(payload["entries"]) == ac.LEDGER_KV_ENTRY_CAP
+    assert len(sent["token_ledger"]) <= ac.KV_VALUE_MAX
     assert payload["balances"] == {"FLOP": "-0.6"}               # tổng chạy KHÔNG mất khi cắt log
 
 
@@ -2393,3 +2395,65 @@ def test_published_ledger_carries_the_cumulative_marker(monkeypatch):
     monkeypatch.setattr(ac, "kv_set", lambda pk, did, k, v: seen.update({k: v}))
     ac.persist_ledger_to_kv(None, "did:key:zTest")
     assert json.loads(seen[ac.LEDGER_KV_KEY])["spent_cumulative"] == {"FLOP": "10"}
+
+
+# --- KV từ chối value > 8192 ký tự: sổ cái phải vừa, và thất bại phải LÊN TIẾNG --------
+
+def _big_ledger(n, amount="0.0012345678901234567890"):
+    return {"balances": {"FLOP": "88.123456789"},
+            "spent_cumulative": {"FLOP": "11.87654321"},
+            "spent_by_day": {"FLOP": {"2026-10-17": "11.87654321"}},
+            "entries": [{"kind": "spend", "token": "FLOP", "amount": amount,
+                         "memo": "gemini kibble:research đủ dài để giống thật",
+                         "mode": "simulation", "balance_after": "88.1234567890123",
+                         "ts": "2026-10-17T18:20:46Z"} for _ in range(n)]}
+
+
+def test_kv_payload_never_exceeds_the_service_limit(tmp_path, monkeypatch):
+    """Lỗi THẬT: 500 entries ~87KB, service chặn ở 8192 -> kv_set trả 400 suốt 10 tiếng."""
+    import token_manager as tm
+    monkeypatch.setenv("TOKEN_LEDGER_FILE", str(tmp_path / "l.json"))
+    tm.save_ledger(_big_ledger(500))
+    sent = {}
+    monkeypatch.setattr(ac, "kv_set", lambda pk, did, k, v: sent.update({k: v}) or True)
+    ac.persist_ledger_to_kv("pk", "did")
+    assert len(sent["token_ledger"]) <= ac.KV_VALUE_MAX
+
+
+def test_running_totals_survive_the_trim(tmp_path, monkeypatch):
+    """Cắt log bao nhiêu cũng được, nhưng SỐ LIỆU thì không được mất."""
+    import token_manager as tm
+    monkeypatch.setenv("TOKEN_LEDGER_FILE", str(tmp_path / "l.json"))
+    tm.save_ledger(_big_ledger(500))
+    sent = {}
+    monkeypatch.setattr(ac, "kv_set", lambda pk, did, k, v: sent.update({k: v}) or True)
+    ac.persist_ledger_to_kv("pk", "did")
+    pl = json.loads(sent["token_ledger"])
+    assert pl["balances"] == {"FLOP": "88.123456789"}
+    assert pl["spent_cumulative"] == {"FLOP": "11.87654321"}
+    assert pl["spent_by_day"] == {"FLOP": {"2026-10-17": "11.87654321"}}
+
+
+def test_trims_further_when_entries_are_huge(tmp_path, monkeypatch):
+    """Entry khổng lồ -> cắt tiếp xuống 10/5/0 thay vì bỏ cuộc."""
+    import token_manager as tm
+    monkeypatch.setenv("TOKEN_LEDGER_FILE", str(tmp_path / "l.json"))
+    tm.save_ledger(_big_ledger(30, amount="9" * 600))
+    sent = {}
+    monkeypatch.setattr(ac, "kv_set", lambda pk, did, k, v: sent.update({k: v}) or True)
+    ac.persist_ledger_to_kv("pk", "did")
+    pl = json.loads(sent["token_ledger"])
+    assert len(sent["token_ledger"]) <= ac.KV_VALUE_MAX
+    assert len(pl["entries"]) < ac.LEDGER_KV_ENTRY_CAP
+    assert pl["balances"]                                   # số liệu vẫn còn
+
+
+def test_failed_kv_write_is_announced(tmp_path, monkeypatch, capsys):
+    """Im lặng chính là lỗi: 10 tiếng sổ cái không bền mà không dòng log nào báo."""
+    import token_manager as tm
+    monkeypatch.setenv("TOKEN_LEDGER_FILE", str(tmp_path / "l.json"))
+    tm.save_ledger(_big_ledger(5))
+    monkeypatch.setattr(ac, "kv_set", lambda pk, did, k, v: False)   # service từ chối
+    ac.persist_ledger_to_kv("pk", "did")
+    out = capsys.readouterr().out
+    assert "ĐẨY KV THẤT BẠI" in out and "tua ngược" in out

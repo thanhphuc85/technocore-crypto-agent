@@ -1462,7 +1462,13 @@ def persist_durable_to_kv(private_key, did) -> None:
 
 # --- Sổ cái token FLOP: BỀN qua KV (không thì runner Actions xoá file mỗi run -> mất tích luỹ) --
 LEDGER_KV_KEY = "token_ledger"
-LEDGER_ENTRY_CAP = 500
+LEDGER_ENTRY_CAP = 500           # trần entries giữ TRÊN ĐĨA
+# technocore.chat từ chối value > 8192 ký tự ("400 text too long"). Một entry ~180 byte,
+# nên 500 entries ~87KB — vượt 11 lần, và kv_set trả 400 SUỐT 10 TIẾNG mà không ai biết.
+# Bản đẩy lên KV phải cắt mạnh; số dư / spent_cumulative / spent_by_day đều là TỔNG CHẠY
+# nên cắt log KHÔNG làm sai số liệu.
+KV_VALUE_MAX = 8192              # giới hạn cứng của service
+LEDGER_KV_ENTRY_CAP = 20         # ~3.6KB, chừa dư địa cho phần còn lại
 
 
 def _ledger_spent_magnitude(led) -> float:
@@ -1573,13 +1579,31 @@ def persist_ledger_to_kv(private_key, did) -> None:
         led = token_manager.load_ledger()
         # mode đi KÈM bản công khai: sổ cái mô phỏng mà không ghi rõ là mô phỏng thì
         # người đọc ngoài sẽ hiểu thành chi tiêu THẬT — đó là số liệu gây hiểu nhầm.
-        payload = {"mode": token_manager.ledger_mode(),
-                   "balances": led.get("balances", {}),
-                   # BẮT BUỘC đẩy kèm: thiếu nó thì mốc chỉ-tăng không bao giờ tới KV và
-                   # hydrate lại rơi về luật |balance| cũ (tua ngược).
-                   "spent_cumulative": led.get("spent_cumulative", {}),
-                   "entries": (led.get("entries", []) or [])[-LEDGER_ENTRY_CAP:]}
-        kv_set(private_key, did, LEDGER_KV_KEY, json.dumps(payload, ensure_ascii=False))
+        base = {"mode": token_manager.ledger_mode(),
+                "balances": led.get("balances", {}),
+                # BẮT BUỘC đẩy kèm: thiếu nó thì mốc chỉ-tăng không bao giờ tới KV và
+                # hydrate lại rơi về luật |balance| cũ (tua ngược).
+                "spent_cumulative": led.get("spent_cumulative", {}),
+                "spent_by_day": led.get("spent_by_day", {}),
+                "unlock": led.get("unlock", {})}
+        entries = (led.get("entries", []) or [])
+        body = None
+        # Cắt dần tới khi VỪA giới hạn. Số dư và các tổng chạy không suy từ entries, nên
+        # mất log cũ không làm sai số liệu — mất cả bản ghi mới là sai.
+        for cap in (LEDGER_KV_ENTRY_CAP, 10, 5, 0):
+            cand = json.dumps({**base, "entries": entries[-cap:] if cap else []},
+                              ensure_ascii=False)
+            if len(cand) <= KV_VALUE_MAX:
+                body = cand
+                break
+        if body is None:
+            print(f"[ledger] KHÔNG đẩy được lên KV — ngay cả bản không entries vẫn "
+                  f"> {KV_VALUE_MAX} ký tự")
+            return
+        if not kv_set(private_key, did, LEDGER_KV_KEY, body):
+            # Im lặng ở đây nghĩa là sổ cái NGỪNG BỀN mà không ai biết — đúng lỗi vừa rồi.
+            print(f"[ledger] ⚠️ ĐẨY KV THẤT BẠI ({len(body)} ký tự) — sổ cái KHÔNG còn bền, "
+                  "chi tiêu sẽ bị tua ngược ở run sau")
     except Exception as e:
         print(f"[ledger] persist bỏ qua ({str(e)[:80]})")
 
