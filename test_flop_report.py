@@ -82,3 +82,65 @@ def test_report_includes_counts_and_extras():
     assert "chi 24h: 0.5 FLOP (1 lần)" in txt
     assert "số dư: 99.5 FLOP" in txt
     assert "faucet: 1 claim" in txt and "session: 6 settled" in txt
+
+
+# --- spend-health: "có đang KIẾM HỤT không" ------------------------------------------
+
+def _pace(budget="100", spent="10", target="50"):
+    return {"enabled": True, "daily_budget": budget,
+            "spent_today": spent, "target_now": target}
+
+
+def test_health_flags_behind_pace_with_idle_balance():
+    s = fr.summarize(_led([], bal="87.6"), NOW)
+    h = fr.spend_health(s, _pace(spent="12", target="50"))
+    assert h["pace"] == "behind" and h["idle_warn"] is True
+    assert h["elapsed_pct"] == 50 and h["spent_pct"] == 12
+
+
+def test_health_on_track_does_not_warn():
+    s = fr.summarize(_led([], bal="87.6"), NOW)
+    h = fr.spend_health(s, _pace(spent="48", target="50"))
+    assert h["pace"] == "on-track" and h["idle_warn"] is False
+
+
+def test_health_ahead_of_pace():
+    h = fr.spend_health(fr.summarize(_led([], bal="10"), NOW), _pace(spent="80", target="50"))
+    assert h["pace"] == "ahead" and h["idle_warn"] is False   # chi nhanh != bỏ phí
+
+
+def test_health_pacer_off_warns_only_when_nothing_spent():
+    """Không kêu chỉ vì còn số dư — lúc nào cũng còn số dư. Chỉ kêu khi THỰC SỰ đứng im."""
+    idle = fr.summarize(_led([], bal="50"), NOW)                       # 24h: 0 lần chi
+    assert fr.spend_health(idle, None)["idle_warn"] is True
+    busy = fr.summarize(_led([{"kind": "spend", "token": "FLOP", "amount": "1",
+                               "ts": _ts(-60)}], bal="50"), NOW)
+    assert fr.spend_health(busy, None)["idle_warn"] is False
+    assert fr.spend_health(busy, None)["pace"] == "off"
+
+
+def test_health_no_warning_when_balance_is_zero():
+    s = fr.summarize(_led([], bal="0"), NOW)
+    assert fr.spend_health(s, _pace(spent="0", target="50"))["idle_warn"] is False
+
+
+def test_health_survives_missing_or_zero_budget():
+    s = fr.summarize(_led([], bal="5"), NOW)
+    for p in (None, {}, {"enabled": True, "daily_budget": "0"},
+              {"enabled": False, "daily_budget": "100"}, "rác"):
+        h = fr.spend_health(s, p)
+        assert h["pace"] == "off" and h["elapsed_pct"] is None
+
+
+def test_report_renders_health_lines():
+    led = _led([{"kind": "spend", "token": "FLOP", "amount": "12.4", "ts": _ts(-60)}], bal="87.6")
+    txt = fr.format_report(fr.summarize(led, NOW, mode="simulation"),
+                           pacing=_pace(spent="12.4", target="50"))
+    assert "nhàn rỗi: 87.6 FLOP" in txt and "KHÔNG sinh phân bổ" in txt
+    assert "50% ngày đã trôi" in txt and "12% ngân sách đã chi" in txt
+    assert "ĐANG CHẬM" in txt
+
+
+def test_report_omits_pace_line_when_pacer_off():
+    txt = fr.format_report(fr.summarize(_led([], bal="1"), NOW))
+    assert "ngày đã trôi" not in txt

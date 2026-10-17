@@ -1527,7 +1527,13 @@ def maybe_send_daily_report(state: dict, now: int, extras: dict = None) -> bool:
         summ = fr.summarize(token_manager.load_ledger(), now,
                             token=token_manager.default_token(),
                             mode=token_manager.ledger_mode())
-        return _telegram_send(fr.format_report(summ, extras=extras))
+        pacing = None
+        try:                                  # nhịp chi -> dòng spend-health; thiếu pacer
+            import flop_pacer                 # thì báo cáo vẫn gửi, chỉ bớt 1 dòng.
+            pacing = flop_pacer.pacing_status(now=now)
+        except Exception:
+            pass
+        return _telegram_send(fr.format_report(summ, extras=extras, pacing=pacing))
     except Exception as e:
         print(f"[report] bỏ qua ({str(e)[:100]})")
         return False

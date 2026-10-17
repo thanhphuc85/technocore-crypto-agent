@@ -86,7 +86,47 @@ def summarize(ledger, now: int, token: str = "FLOP", window_s: int = WINDOW_S,
     return out
 
 
-def format_report(s: dict, *, date_label: str = None, extras: dict = None) -> str:
+def spend_health(summary: dict, pacing: dict = None) -> dict:
+    """Tín hiệu "có đang KIẾM HỤT không" — khác hẳn "đã chi bao nhiêu".
+
+    Vì sao đây mới là chỉ số tối ưu hoá: trang chính thức ghi "Holding test tokens earns
+    nothing", nên FLOP nằm im trong ví là **phân bổ đang mất**, không phải tài sản. Tổng
+    đã chi chỉ kể quá khứ; cái cần biết là hôm nay còn dư bao nhiêu và nhịp chi có kịp
+    tiêu hết trong ngày không.
+
+    Trả {idle, idle_warn, pace, elapsed_pct, spent_pct, budget}. `pace`:
+      off       — chưa đặt FLOP_DAILY_BUDGET (pacer tắt) -> không đánh giá nhịp
+      behind    — chi chậm hơn mốc >10 điểm % -> nhiều khả năng dư token cuối ngày
+      on-track  — trong khoảng ±10 điểm %
+      ahead     — chi nhanh hơn mốc >10 điểm % (không phải lỗi, nhưng dễ cạn sớm)
+    """
+    s = summary if isinstance(summary, dict) else {}
+    p = pacing if isinstance(pacing, dict) else {}
+    idle = _dec(s.get("balance"))
+    out = {"idle": _fmt(idle), "idle_warn": False, "pace": "off",
+           "elapsed_pct": None, "spent_pct": None, "budget": None}
+    budget = _dec(p.get("daily_budget")) if p.get("enabled") else Decimal(0)
+    if p.get("enabled") and budget > 0:
+        out["budget"] = _fmt(budget)
+        elapsed = _dec(p.get("target_now")) / budget * 100
+        spent = _dec(p.get("spent_today")) / budget * 100
+        out["elapsed_pct"] = int(elapsed)
+        out["spent_pct"] = int(spent)
+        diff = spent - elapsed
+        out["pace"] = "behind" if diff < -10 else ("ahead" if diff > 10 else "on-track")
+    # Cảnh báo chỉ khi THẬT SỰ đang bỏ phí: còn token mà nhịp chi đang chậm, hoặc
+    # pacer tắt và 24h qua không chi đồng nào. Không kêu khi chỉ đơn giản là còn số dư —
+    # lúc nào cũng còn số dư, cảnh báo như vậy thành tiếng ồn.
+    if idle > 0:
+        if out["pace"] == "behind":
+            out["idle_warn"] = True
+        elif out["pace"] == "off" and int(s.get("spend_count", 0) or 0) == 0:
+            out["idle_warn"] = True
+    return out
+
+
+def format_report(s: dict, *, date_label: str = None, extras: dict = None,
+                  pacing: dict = None) -> str:
     """Một tin gọn để gửi Telegram. `extras` là các trường tuỳ chọn của agent
     (faucet/session/kibble...). Luôn nêu rõ mode."""
     s = s if isinstance(s, dict) else {}
@@ -102,6 +142,15 @@ def format_report(s: dict, *, date_label: str = None, extras: dict = None) -> st
         f"tổng đã chi: {s.get('spent_total', '0')} {tok} "
         f"({s.get('spend_count_total', 0)} lần)",
     ]
+    h = spend_health(s, pacing)
+    if h["idle_warn"]:
+        lines.append(f"⚠️ nhàn rỗi: {h['idle']} {tok} — giữ token KHÔNG sinh phân bổ")
+    if h["pace"] != "off":
+        label = {"behind": "ĐANG CHẬM (dễ dư cuối ngày)",
+                 "on-track": "đúng nhịp",
+                 "ahead": "nhanh hơn mốc (dễ cạn sớm)"}[h["pace"]]
+        lines.append(f"nhịp: {h['elapsed_pct']}% ngày đã trôi · "
+                     f"{h['spent_pct']}% ngân sách đã chi -> {label}")
     for k, v in (extras or {}).items():
         lines.append(f"{k}: {v}")
     return "\n".join(lines)
