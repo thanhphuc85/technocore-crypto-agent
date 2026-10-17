@@ -1551,7 +1551,8 @@ def maybe_send_daily_report(state: dict, now: int, extras: dict = None) -> bool:
         pacing = None
         try:                                  # nhịp chi -> dòng spend-health; thiếu pacer
             import flop_pacer                 # thì báo cáo vẫn gửi, chỉ bớt 1 dòng.
-            pacing = flop_pacer.pacing_status(now=now)
+            pacing = flop_pacer.pacing_status(
+                now=now, ledger_path=token_manager.ledger_path())
         except Exception:
             pass
         # Rút gọn CHỈ cho tin nhắn — log Actions và job summary giữ bản đầy đủ.
@@ -3977,6 +3978,9 @@ def main():
     session_status = "off"
     if os.environ.get("FLOP_SESSION_ENABLED", "").strip().lower() in ("1", "true", "on", "yes"):
         # Danh sách model_hash (CSV hoặc '|') -> mỗi phiên xoay 1 cái. Thiếu -> skip, KHÔNG bịa.
+        # PHẢI import ở ĐẦU nhánh: resolve_model_hashes được gọi NGAY dưới đây, còn import
+        # cũ nằm mãi trong nhánh else -> NameError làm sập cả run.
+        import flop_session
         import token_manager as _tm0
         _sess_models, _sess_src = flop_session.resolve_model_hashes(
             os.environ.get("FLOP_SESSION_MODEL_HASH", ""),

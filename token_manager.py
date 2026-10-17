@@ -611,7 +611,10 @@ def meter_inference(amount: str = None, memo: str = "Gemini Inference",
             import flop_pacer
             # `path` ở đây là SỔ CÁI, không phải file nhịp của pacer -> truyền đúng chỗ,
             # nếu không pacer sẽ ghi trạng thái đè lên file sổ cái.
-            paced = flop_pacer.next_spend_amount(token=token, ledger_path=path)
+            # Truyền ĐƯỜNG DẪN ĐÃ GIẢI (không phải None): pacer chỉ đọc sổ cái khi được
+            # nêu rõ, nên phải nói rõ là sổ cái NÀO.
+            paced = flop_pacer.next_spend_amount(token=token,
+                                                 ledger_path=ledger_path(path))
         except Exception as e:
             print(f"[meter] pacer lỗi ({e}), dùng phí cố định")
             paced = None

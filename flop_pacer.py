@@ -155,6 +155,11 @@ def _spent_today(rec: dict, token: str, now: int, ledger_path: str = None) -> De
     Sổ cái bền qua KV nên nó là nguồn đúng; vẫn lấy MAX để bản ghi pacer (khi có, vd khi
     chạy trên VPS có đĩa bền) không bị bỏ qua."""
     mine = _dec(rec.get("spent_today", "0")) or Decimal(0)
+    if not ledger_path:
+        # KHÔNG tự đi tìm sổ cái mặc định. Caller phải NÊU RÕ sổ cái nào — nếu không,
+        # hàm thuần này lại phụ thuộc vào một file toàn cục trong thư mục làm việc,
+        # khiến kết quả đổi theo việc test nào chạy trước (đúng lỗi đã làm CI đỏ).
+        return mine
     try:
         import token_manager as _tm        # import TRỄ: tránh vòng lặp import
         led = _tm.spent_today_amount(token=token, now=now, path=ledger_path)
