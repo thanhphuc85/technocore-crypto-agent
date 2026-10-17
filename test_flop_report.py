@@ -1,5 +1,6 @@
 """Tests cho flop_report.py — tóm tắt chi tiêu FLOP (thuần, không mạng)."""
 
+import re
 import time
 
 import flop_report as fr
@@ -269,3 +270,59 @@ def test_big_numbers_get_thousand_separators():
     assert fr._grp("1234.5678") == "1,234.5678"
     assert fr._grp("-2500") == "-2,500"
     assert fr._grp("abc") == "abc" and fr._grp("") == ""
+
+
+# --- cộng dồn theo ngày: "ngày N/90 · hôm nay +X -> tích luỹ Y" -----------------------
+
+def _days_ago(n):
+    return time.strftime("%Y-%m-%d", time.gmtime(NOW - n * 86400))
+
+
+def test_day_index_counts_from_first_spend_day():
+    led = _led_cum("300000", by_day={_days_ago(2): "100000", _days_ago(1): "100000",
+                                     _days_ago(0): "100000"})
+    led["first_spend_day"] = _days_ago(2)
+    p = fr.projection(led, NOW, horizon_days=90)
+    assert p["day_index"] == 3 and p["days_left"] == 87
+    assert p["today"] == "100000" and p["total_so_far"] == "300000"
+
+
+def test_report_shows_the_daily_accumulation():
+    led = _led_cum("300000", count=9, by_day={_days_ago(2): "100000", _days_ago(1): "100000",
+                                              _days_ago(0): "100000"})
+    led["first_spend_day"] = _days_ago(2)
+    txt = fr.format_report(fr.summarize(led, NOW, mode="testnet"),
+                           proj=fr.projection(led, NOW, horizon_days=90))
+    assert "ngày 3/90" in txt
+    assert "hôm nay +100,000" in txt and "tích luỹ 300,000 FLOP" in txt
+    assert "còn 87 ngày" in txt
+
+
+def test_announced_testnet_start_overrides_first_spend():
+    """Khi FLOP công bố mốc bắt đầu, nó thắng ngày chi đầu tiên của ta."""
+    led = _led_cum("10", by_day={_days_ago(0): "10"})
+    led["first_spend_day"] = _days_ago(1)
+    led["testnet_start"] = _days_ago(10)
+    assert fr.projection(led, NOW, horizon_days=90)["day_index"] == 11
+
+
+def test_day_index_absent_without_a_start_date():
+    led = _led_cum("10", by_day={_days_ago(0): "10"})
+    p = fr.projection(led, NOW, horizon_days=90)
+    assert p["day_index"] is None and p["days_left"] is None
+    txt = fr.format_report(fr.summarize(led, NOW), proj=p)
+    assert "tích luỹ" not in txt and "còn " not in txt
+    assert not re.search(r"ngày \d+/\d+", txt)        # không có dòng "ngày N/90"
+
+
+def test_day_index_survives_a_broken_start_date():
+    led = _led_cum("10", by_day={_days_ago(0): "10"})
+    led["first_spend_day"] = "khong-phai-ngay"
+    assert fr.projection(led, NOW, horizon_days=90)["day_index"] is None
+
+
+def test_days_left_never_goes_negative():
+    led = _led_cum("10", by_day={_days_ago(0): "10"})
+    led["first_spend_day"] = _days_ago(200)
+    p = fr.projection(led, NOW, horizon_days=90)
+    assert p["day_index"] == 201 and p["days_left"] == 0

@@ -181,7 +181,20 @@ def projection(ledger, now: int, token: str = "FLOP", horizon_days: int = TESTNE
     total = _dec(cum.get(token)) if isinstance(cum, dict) else Decimal(0)
     out = {"days": len(done), "avg_per_day": None, "basis": "",
            "total_so_far": _fmt(total), "projected": None,
-           "horizon": max(0, int(horizon_days))}
+           "horizon": max(0, int(horizon_days)),
+           "today": _fmt(_dec(by.get(today))),
+           "day_index": None, "days_left": None}
+    # "Đang ở ngày thứ mấy": đếm từ ngày chi ĐẦU TIÊN, hoặc từ mốc do FLOP công bố.
+    start = str(led.get("testnet_start") or led.get("first_spend_day") or "").strip()
+    if start:
+        try:
+            d0 = calendar.timegm(time.strptime(start, "%Y-%m-%d"))
+            idx = (int(now) - (int(now) % 86400) - d0) // 86400 + 1
+            if idx >= 1:
+                out["day_index"] = int(idx)
+                out["days_left"] = max(0, out["horizon"] - int(idx))
+        except (ValueError, TypeError):
+            pass
     if done:
         avg = sum(done.values()) / Decimal(len(done))
         out["basis"] = "days"
@@ -267,6 +280,10 @@ def format_report(s: dict, *, date_label: str = None, extras: dict = None,
     pj = proj if isinstance(proj, dict) else {}
     if pj.get("projected"):
         src = f"TB {pj['days']} ngày" if pj.get("basis") == "days" else "nhịp hôm nay"
+        if pj.get("day_index"):
+            lines.append(f"ngày {pj['day_index']}/{pj['horizon']} · hôm nay "
+                         f"+{_grp(pj.get('today', '0'))} -> tích luỹ "
+                         f"{_grp(pj['total_so_far'])} {tok} · còn {pj['days_left']} ngày")
         lines.append(f"TB {_grp(pj['avg_per_day'])} {tok}/ngày ({src})")
         lines.append(f"dự phóng {pj.get('horizon', TESTNET_DAYS)} ngày: "
                      f"~{_grp(pj['projected'])} "

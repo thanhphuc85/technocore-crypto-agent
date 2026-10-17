@@ -227,6 +227,9 @@ def _accrue_day(state: dict, token: str, amount: Decimal, now: int = None) -> No
     chi bao nhiêu". Tổng chạy thì cắt log bao nhiêu cũng không sai."""
     now = int(now if now is not None else time.time())
     day = time.strftime("%Y-%m-%d", time.gmtime(now))
+    # Ngày chi ĐẦU TIÊN — đặt một lần, không bao giờ đổi. Cần nó để biết "đang ở ngày
+    # thứ mấy của kỳ": spent_by_day chỉ giữ 7 ngày nên không suy ngược ra được.
+    state.setdefault("first_spend_day", day)
     by = state.setdefault("spent_by_day", {})
     tok = by.setdefault(token, {})
     prev = _parse_amount(tok.get(day, "0")) or Decimal(0)
