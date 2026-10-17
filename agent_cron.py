@@ -1567,7 +1567,12 @@ def maybe_send_daily_report(state: dict, now: int, extras: dict = None) -> bool:
             extras["kibble"] = fr.compact_kibble(extras["kibble"])
         try:                                  # dự phóng CHI qua kỳ testnet
             _days = int(_env_float("FLOP_TESTNET_DAYS", fr.TESTNET_DAYS))
-            proj = fr.projection(token_manager.load_ledger(), now,
+            _led = dict(token_manager.load_ledger())
+            # Mốc bắt đầu kỳ do FLOP công bố (nếu có) ĐÈ lên ngày chi đầu tiên của ta.
+            _start = os.environ.get("FLOP_TESTNET_START", "").strip()
+            if _start:
+                _led["testnet_start"] = _start
+            proj = fr.projection(_led, now,
                                  token=token_manager.default_token(), horizon_days=_days)
         except Exception:
             proj = None
@@ -1592,6 +1597,7 @@ def persist_ledger_to_kv(private_key, did) -> None:
                 "spent_cumulative": led.get("spent_cumulative", {}),
                 "spent_by_day": led.get("spent_by_day", {}),
                 "spend_count_cumulative": led.get("spend_count_cumulative", {}),
+                "first_spend_day": led.get("first_spend_day"),
                 "unlock": led.get("unlock", {})}
         entries = (led.get("entries", []) or [])
         body = None

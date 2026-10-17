@@ -431,3 +431,15 @@ def test_legacy_ledger_without_spent_by_day_still_works(tmp_path):
     tm.save_ledger({"balances": {"FLOP": "9"}, "entries": [
         {"kind": "spend", "token": "FLOP", "amount": "2", "ts": ts}]}, p)
     assert tm.spent_today_amount(path=p) == Decimal("2")
+
+
+def test_first_spend_day_is_set_once_and_never_moves(tmp_path):
+    """Cần nó để biết 'đang ở ngày thứ mấy' — spent_by_day chỉ giữ 7 ngày."""
+    import time as _t
+    p = str(tmp_path / "l.json")
+    tm.credit("100", memo="seed", path=p)
+    tm.spend("1", memo="x", path=p)
+    first = tm.load_ledger(p)["first_spend_day"]
+    assert first == _t.strftime("%Y-%m-%d", _t.gmtime())
+    tm.spend("1", memo="x", path=p)
+    assert tm.load_ledger(p)["first_spend_day"] == first      # không đổi

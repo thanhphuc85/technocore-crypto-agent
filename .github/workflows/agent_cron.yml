@@ -144,6 +144,8 @@ jobs:
           FLOP_DAILY_REPORT_HOURS: ${{ vars.FLOP_DAILY_REPORT_HOURS }}
           # Số ngày testnet dùng để DỰ PHÓNG tổng chi (trống = 90).
           FLOP_TESTNET_DAYS: ${{ vars.FLOP_TESTNET_DAYS }}
+          # Ngày bắt đầu kỳ testnet 'YYYY-MM-DD' (trống = tính từ ngày chi đầu tiên).
+          FLOP_TESTNET_START: ${{ vars.FLOP_TESTNET_START }}
           # Ngưỡng cảnh báo tập trung thợ đào (0..1, trống = 0.5). 0 = tắt cảnh báo.
           FLOP_MINER_CONC_WARN: ${{ vars.FLOP_MINER_CONC_WARN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
