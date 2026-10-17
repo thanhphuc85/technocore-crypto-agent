@@ -251,6 +251,10 @@ jobs:
           # Session inference (mua compute có settle). FLOP_SESSION_ENABLED=on + MODEL_HASH khi mở.
           FLOP_SESSION_ENABLED: ${{ vars.FLOP_SESSION_ENABLED }}
           FLOP_SESSION_MODEL_HASH: ${{ vars.FLOP_SESSION_MODEL_HASH }}
+          # CHẠY THỬ: hash mô phỏng, CHỈ dùng khi TESTNET_ENABLED tắt. Bật testnet thì
+          # code TỪ CHỐI dùng nó (không để hash giả chạm mempool thật).
+          FLOP_SESSION_SIM_MODEL_HASH: ${{ vars.FLOP_SESSION_SIM_MODEL_HASH }}
+          FLOP_SESSION_SIM_MINERS: ${{ vars.FLOP_SESSION_SIM_MINERS }}
           FLOP_SESSION_FLOPS: ${{ vars.FLOP_SESSION_FLOPS }}
           FLOP_SESSION_MAX_LATENCY_MS: ${{ vars.FLOP_SESSION_MAX_LATENCY_MS }}
           FLOP_SESSION_MAX_PER_RUN: ${{ vars.FLOP_SESSION_MAX_PER_RUN }}

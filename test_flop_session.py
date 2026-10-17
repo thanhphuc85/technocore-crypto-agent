@@ -151,3 +151,44 @@ def test_run_session_skips_fleet_miner(tmp_path):
     # deny rỗng/None -> settle bình thường (tương thích cũ)
     out3 = fsess.run_inference_session("a" * 16, 2000, 1000, [], "0.05", path=p)
     assert out3["outcome"] == "spent_simulated"
+
+
+# --- chạy thử phiên ở SIMULATION: hash mô phỏng có chốt cứng -------------------------
+
+def test_real_hash_always_wins():
+    assert fsess.resolve_model_hashes("h1,h2", "sim", False) == (["h1", "h2"], "real")
+    assert fsess.resolve_model_hashes("h1|h2", "sim", True) == (["h1", "h2"], "real")
+
+
+def test_sim_hash_refused_when_testnet_is_on():
+    """CHỐT QUAN TRỌNG NHẤT: hash giả không bao giờ được chạm mempool thật."""
+    assert fsess.resolve_model_hashes("", "simA,simB", True) == ([], "none-testnet")
+
+
+def test_sim_hash_used_only_when_testnet_is_off():
+    assert fsess.resolve_model_hashes("", "simA|simB", False) == (["simA", "simB"], "sim")
+
+
+def test_no_hash_anywhere_returns_empty():
+    assert fsess.resolve_model_hashes("", "", False) == ([], "none")
+    assert fsess.resolve_model_hashes("   ", "  ", False) == ([], "none")
+
+
+def test_mock_miner_default_is_unchanged():
+    """Mặc định (pool=1) phải giữ NGUYÊN DID giả cũ — không đổi hành vi sẵn có."""
+    assert fsess._mock_miner("bất kỳ", 1) == "did:key:zMOCKminer000000000000000000000000000000"
+    assert fsess._mock_miner("bất kỳ", 0) == fsess._mock_miner("bất kỳ", 1)
+
+
+def test_mock_miner_pool_spreads_deterministically():
+    ids = [f"req{i:04d}" for i in range(300)]
+    got = {fsess._mock_miner(i, 8) for i in ids}
+    assert len(got) == 8
+    assert all(d.startswith(fsess.SIM_MINER_PREFIX) for d in got)       # luôn lộ rõ là MOCK
+    assert len({len(d) for d in got}) == 1                            # cùng độ dài
+    assert fsess._mock_miner("req0001", 8) == fsess._mock_miner("req0001", 8)   # tất định
+
+
+def test_mock_miner_tolerates_bad_pool():
+    for bad in ("x", None, -3):
+        assert fsess._mock_miner("r", bad) == fsess._mock_miner("r", 1)

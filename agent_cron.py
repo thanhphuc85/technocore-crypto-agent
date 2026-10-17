@@ -3977,11 +3977,22 @@ def main():
     session_status = "off"
     if os.environ.get("FLOP_SESSION_ENABLED", "").strip().lower() in ("1", "true", "on", "yes"):
         # Danh sách model_hash (CSV hoặc '|') -> mỗi phiên xoay 1 cái. Thiếu -> skip, KHÔNG bịa.
-        _sess_models = [m.strip() for m in re.split(r"[,|]", os.environ.get("FLOP_SESSION_MODEL_HASH", "")) if m.strip()]
+        import token_manager as _tm0
+        _sess_models, _sess_src = flop_session.resolve_model_hashes(
+            os.environ.get("FLOP_SESSION_MODEL_HASH", ""),
+            os.environ.get("FLOP_SESSION_SIM_MODEL_HASH", ""),
+            _tm0.testnet_enabled())
+        if _sess_src == "sim":
+            print("[session] dùng FLOP_SESSION_SIM_MODEL_HASH — CHẠY THỬ mô phỏng, "
+                  "KHÔNG phải phiên thật (testnet đang tắt).")
         if not _sess_models:
             session_status = "skip-unconfigured"
-            print("[session] FLOP_SESSION_ENABLED bật nhưng thiếu FLOP_SESSION_MODEL_HASH "
-                  "— bỏ qua (không bịa model_hash).")
+            if _sess_src == "none-testnet":
+                print("[session] TESTNET bật nhưng thiếu FLOP_SESSION_MODEL_HASH THẬT "
+                      "— TỪ CHỐI dùng hash mô phỏng, bỏ qua (không bịa model_hash).")
+            else:
+                print("[session] FLOP_SESSION_ENABLED bật nhưng thiếu FLOP_SESSION_MODEL_HASH "
+                      "— bỏ qua (không bịa model_hash).")
         else:
             try:
                 import flop_session
@@ -4005,6 +4016,9 @@ def main():
                     r = flop_session.maybe_run_session(
                         _m, _lt, _fl, fee=_fe,
                         submit_fn=_mempool_submit_fn,
+                        # Chỉ có tác dụng ở SIMULATION: xoay thợ đào giả để đường đo độ
+                        # phân tán được chạy thật, thay vì luôn thấy 100% một người.
+                        sim_miner_pool=int(_env_float("FLOP_SESSION_SIM_MINERS", 1)),
                         deny_dids=PROACTIVE_DENY_DIDS,   # chốt: không settle nếu match trúng miner nhà
                         private_key=private_key, did=did)
                     _last = r

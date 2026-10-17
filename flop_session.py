@@ -28,6 +28,7 @@ phiên, có commitment + chữ ký thợ đào), KHÔNG kiểm tính đúng mậ
 import hashlib
 import os
 import random
+import re
 import time
 
 import token_manager as tm
@@ -121,7 +122,52 @@ def _mock_poui(request: dict, miner_did: str) -> dict:
             "commitment": commit, "miner_sig": f"mock-sig:{commit[:16]}"}
 
 
-def submit_request(request: dict, *, submit_fn=None, log=print) -> dict:
+SIM_MINER_PREFIX = "did:key:zMOCKminer"
+SIM_MINER_DEFAULT = "did:key:zMOCKminer000000000000000000000000000000"
+
+
+def resolve_model_hashes(real: str, sim: str, testnet_on: bool) -> tuple:
+    """Chọn danh sách model_hash cho phiên. Trả (list, nguồn) với nguồn ∈
+    {'real','sim','none-testnet','none'}.
+
+    Luật, theo thứ tự:
+      1. Có hash THẬT -> luôn dùng, bất kể chế độ.
+      2. Không có hash thật + TESTNET BẬT -> trả rỗng. TUYỆT ĐỐI không dùng hash
+         placeholder khi có thể chạm mempool thật: hash giả gửi lên đó là rác, và
+         là thứ bị đọc là hoạt động bịa.
+      3. Không có hash thật + testnet TẮT + có hash mô phỏng -> dùng hash mô phỏng,
+         để chạy thử trọn vòng request -> match -> verify -> settle trước ngày thật.
+      4. Không có gì -> rỗng.
+
+    Hash mô phỏng phải do người vận hành ĐẶT TƯỜNG MINH (biến riêng), không tự sinh —
+    không ai được vô tình có hash giả trong cấu hình."""
+    def _split(v):
+        return [x.strip() for x in re.split(r"[,|]", v or "") if x.strip()]
+    r = _split(real)
+    if r:
+        return r, "real"
+    if testnet_on:
+        return [], "none-testnet"
+    m = _split(sim)
+    return (m, "sim") if m else ([], "none")
+
+
+def _mock_miner(request_id: str, pool: int = 1) -> str:
+    """Thợ đào GIẢ cho simulation. `pool` > 1 -> xoay vòng tất định theo request id, để
+    đường đo độ phân tán thợ đào được chạy thật thay vì luôn thấy 100% một người.
+    Luôn mang tiền tố MOCK nên không thể nhầm với DID thật."""
+    try:
+        n = max(1, int(pool))
+    except (TypeError, ValueError):
+        n = 1
+    if n <= 1:
+        return SIM_MINER_DEFAULT              # giữ NGUYÊN DID cũ -> mặc định không đổi gì
+    idx = int(hashlib.sha256(str(request_id).encode()).hexdigest()[:8], 16) % n
+    return (f"{SIM_MINER_PREFIX}{idx:02d}"
+            + "0" * (len(SIM_MINER_DEFAULT) - len(SIM_MINER_PREFIX) - 2))
+
+
+def submit_request(request: dict, *, submit_fn=None, log=print, sim_miner_pool: int = 1) -> dict:
     """Đăng yêu cầu phiên vào mempool và nhận thợ đào.
       - SIMULATION: trả 1 thợ đào GIẢ + PoUI giả (chạy trọn happy-path, không mạng).
       - TESTNET: gửi qua submit_fn tới FLOP_MEMPOOL_URL. submit_fn trả {session_id, miner_did,
@@ -145,7 +191,7 @@ def submit_request(request: dict, *, submit_fn=None, log=print) -> dict:
         return {"outcome": "accepted", "accept": accept}
 
     # SIMULATION: thợ đào giả nhận ngay + trả PoUI giả.
-    miner_did = "did:key:zMOCKminer000000000000000000000000000000"
+    miner_did = _mock_miner(request["id"], sim_miner_pool)
     accept = {"session_id": request["id"], "miner_did": miner_did,
               "poui": _mock_poui(request, miner_did)}
     log(f"[SIMULATION] session {request['id']} nhận bởi thợ đào giả {miner_did[:16]}…")
@@ -197,7 +243,8 @@ def dispute(request: dict, poui: dict, reason: str, *, path: str = None, log=pri
 def run_inference_session(model_hash: str, max_latency_ms: int, flops: int,
                           security_flags=None, fee: str = None, *, token: str = None,
                           path: str = None, submit_fn=None, submit_tx=None,
-                          private_key=None, did: str = None, deny_dids=None, log=print) -> dict:
+                          private_key=None, did: str = None, deny_dids=None, log=print,
+                          sim_miner_pool: int = 1) -> dict:
     """Mua MỘT phiên inference trọn vòng: build -> đăng mempool -> nhận PoUI -> verify ->
     settle (nếu hợp lệ) hoặc dispute (nếu sai). Trả dict có 'stage' + 'outcome' để caller
     biết dừng ở đâu. SIMULATION chạy trọn happy-path bằng thợ đào giả; TESTNET cần submit_fn
@@ -208,7 +255,8 @@ def run_inference_session(model_hash: str, max_latency_ms: int, flops: int,
     chi cho miner cùng-nhóm + là cờ sybil. Chốt an toàn khi match tự nhiên lỡ rơi vào miner nhà."""
     req = build_request(model_hash, max_latency_ms, flops, security_flags, fee,
                         token=token, private_key=private_key, did=did)
-    sub = submit_request(req, submit_fn=submit_fn, log=log)
+    sub = submit_request(req, submit_fn=submit_fn, log=log,
+                         sim_miner_pool=sim_miner_pool)
     if sub["outcome"] != "accepted":
         return {"stage": "submit", "request_id": req["id"], **sub}
     accept = sub["accept"]
