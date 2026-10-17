@@ -2208,3 +2208,68 @@ def test_skipped_job_is_not_remembered(monkeypatch):
     assert ac.answer_kibble_job({"jobid": "k1", "type": "explain",
                                  "title": "t", "body": "some body"}) is None
     assert ac._kibble_recent_fps == []
+
+
+# --- báo cáo chi tiêu định kỳ qua Telegram -------------------------------------------
+
+def test_daily_report_skipped_when_disabled(monkeypatch):
+    monkeypatch.setattr(ac, "DAILY_REPORT_ENABLED", False)
+    sent = []
+    monkeypatch.setattr(ac, "_telegram_send", lambda t: sent.append(t) or True)
+    assert ac.maybe_send_daily_report({}, 1_790_000_000) is False
+    assert sent == []
+
+
+def test_daily_report_respects_interval(monkeypatch):
+    monkeypatch.setattr(ac, "DAILY_REPORT_ENABLED", True)
+    monkeypatch.setattr(ac, "DAILY_REPORT_HOURS", 24)
+    sent = []
+    monkeypatch.setattr(ac, "_telegram_send", lambda t: sent.append(t) or True)
+    now = 1_790_000_000
+    assert ac.maybe_send_daily_report({"last_daily_report": now - 3600}, now) is False
+    assert sent == []                                        # mới 1 giờ -> chưa tới hạn
+    assert ac.maybe_send_daily_report({"last_daily_report": now - 90_000}, now) is True
+    assert len(sent) == 1 and "Technocore agent" in sent[0]
+
+
+def test_daily_report_never_crashes_the_run(monkeypatch):
+    monkeypatch.setattr(ac, "DAILY_REPORT_ENABLED", True)
+
+    def _boom(*a, **k):
+        raise RuntimeError("sổ cái hỏng")
+
+    monkeypatch.setattr(ac, "_telegram_send", _boom)
+    assert ac.maybe_send_daily_report({}, 1_790_000_000) is False     # nuốt lỗi, không ném
+
+
+def test_telegram_send_requires_both_secrets(monkeypatch, capsys):
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "123")
+    assert ac._telegram_send("x") is False
+    assert "thiếu TELEGRAM" in capsys.readouterr().out
+
+
+def test_telegram_send_never_logs_the_token(monkeypatch, capsys):
+    """Token đi vào URL -> tuyệt đối không được lọt ra log khi lỗi."""
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "8123456789:AAH-SECRET-TOKEN")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "123")
+
+    class _R:
+        status_code = 404
+        text = "token 8123456789:AAH-SECRET-TOKEN bị từ chối"
+
+    monkeypatch.setattr(ac.requests, "post", lambda *a, **k: _R())
+    assert ac._telegram_send("x") is False
+    out = capsys.readouterr().out
+    assert "404" in out and "AAH-SECRET-TOKEN" not in out
+
+
+def test_published_ledger_is_labelled_with_mode(monkeypatch):
+    """Sổ cái CÔNG KHAI phải nói rõ simulation hay testnet."""
+    import token_manager as tm
+    monkeypatch.setattr(tm, "load_ledger", lambda *a, **k: {"balances": {"FLOP": "9"}, "entries": []})
+    monkeypatch.setattr(tm, "ledger_mode", lambda: "simulation")
+    seen = {}
+    monkeypatch.setattr(ac, "kv_set", lambda pk, did, k, v: seen.update({k: v}))
+    ac.persist_ledger_to_kv(None, "did:key:zTest")
+    assert json.loads(seen[ac.LEDGER_KV_KEY])["mode"] == "simulation"

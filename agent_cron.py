@@ -434,6 +434,12 @@ KIBBLE_TRACK_ENABLED = os.environ.get("FLOP_KIBBLE_TRACK_ENABLED", "").strip().l
     "1", "true", "on", "yes")
 # Ngưỡng Jaccard coi 2 job là "gần trùng" -> bỏ job sau. 0 = TẮT. Mặc định 0.85: loạt job
 # cùng template (chỉ khác hậu tố id) đo được ~0.95+, còn 2 job khác chủ đề thấp hơn nhiều.
+# Báo cáo CHI TIÊU FLOP định kỳ qua Telegram. Mặc định TẮT. Vì sao cần: cảnh báo hiện có
+# chỉ chạy `if: failure()` — nó báo lúc HỎNG, không báo lúc chạy tốt, mà "đã chi bao nhiêu"
+# mới là con số tính điểm airdrop ("compute purchased in settled sessions").
+DAILY_REPORT_ENABLED = os.environ.get("FLOP_DAILY_REPORT_ENABLED", "").strip().lower() in (
+    "1", "true", "on", "yes")
+DAILY_REPORT_HOURS = _env_float("FLOP_DAILY_REPORT_HOURS", 24)
 KIBBLE_DUP_SIM = _env_float("FLOP_KIBBLE_DUP_SIM", 0.85)
 # Vân tay chống-trùng HẾT HẠN sau ngần này giờ. Mục đích là chặn trả lời CẢ LOẠT trong
 # một đợt, KHÔNG phải cấm vĩnh viễn một template: board hiện gần như chỉ còn vài họ job
@@ -1402,7 +1408,8 @@ def primary_alive(now: int, within_min: float) -> bool:
 # state.json) -> dễ đăng lại telemetry. Mirror các khóa BỀN lên KV (nguồn dùng chung cho cả
 # runner chính lẫn phụ) rồi hydrate lúc khởi động -> cooldown được tôn trọng ở mọi nơi.
 _TS_DURABLE_KEYS = ("last_seq", "last_telemetry", "last_manifest", "last_digest",
-                    "last_status_feed", "last_recap", "last_weekly_sample")
+                    "last_status_feed", "last_recap", "last_weekly_sample",
+                    "last_daily_report")
 _BLOB_DURABLE_KEYS = ("weekly_samples", "last_alert_price")
 # Khóa BỘ ĐẾM cộng dồn: hợp nhất bằng MAX từng ô (đếm chỉ tăng) — KHÔNG dùng luật blob
 # "local có thì local thắng", vì state.json rỗng sau khi cache mất sẽ nuốt số đã tích.
@@ -1487,13 +1494,55 @@ def hydrate_ledger_from_kv() -> None:
         print(f"[ledger] hydrate bỏ qua ({str(e)[:80]})")
 
 
+def _telegram_send(text: str) -> bool:
+    """Gửi 1 tin Telegram. Trả False (không ném) nếu thiếu cấu hình hoặc lỗi mạng —
+    báo cáo KHÔNG bao giờ được làm sập run. KHÔNG log token: chỉ log mã HTTP."""
+    tok = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    chat = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    if not tok or not chat:
+        print("[report] bỏ qua — thiếu TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID")
+        return False
+    try:
+        r = requests.post(f"https://api.telegram.org/bot{tok}/sendMessage",
+                          data={"chat_id": chat, "text": text}, timeout=15)
+        if r.status_code != 200:
+            print(f"[report] Telegram trả HTTP {r.status_code}")   # không in body (có thể vọng token)
+            return False
+        return True
+    except requests.RequestException as e:
+        print(f"[report] gửi Telegram lỗi ({type(e).__name__})")
+        return False
+
+
+def maybe_send_daily_report(state: dict, now: int, extras: dict = None) -> bool:
+    """(GATED) Gửi tóm tắt CHI TIÊU FLOP mỗi DAILY_REPORT_HOURS giờ. Trả True nếu đã gửi
+    (caller đóng cổng thời gian). Bọc kín: mọi lỗi bị nuốt, run không bao giờ sập vì báo cáo."""
+    if not DAILY_REPORT_ENABLED:
+        return False
+    if not _due(state, "last_daily_report", DAILY_REPORT_HOURS, now):
+        return False
+    try:
+        import flop_report as fr
+        import token_manager
+        summ = fr.summarize(token_manager.load_ledger(), now,
+                            token=token_manager.default_token(),
+                            mode=token_manager.ledger_mode())
+        return _telegram_send(fr.format_report(summ, extras=extras))
+    except Exception as e:
+        print(f"[report] bỏ qua ({str(e)[:100]})")
+        return False
+
+
 def persist_ledger_to_kv(private_key, did) -> None:
     """Đẩy sổ cái token lên KV (nguồn bền chung mọi runner). Cắt entries còn LEDGER_ENTRY_CAP
     gần nhất để BOUNDED — balances là tổng chạy (KHÔNG suy từ entries) nên cắt log KHÔNG sai số dư."""
     try:
         import token_manager
         led = token_manager.load_ledger()
-        payload = {"balances": led.get("balances", {}),
+        # mode đi KÈM bản công khai: sổ cái mô phỏng mà không ghi rõ là mô phỏng thì
+        # người đọc ngoài sẽ hiểu thành chi tiêu THẬT — đó là số liệu gây hiểu nhầm.
+        payload = {"mode": token_manager.ledger_mode(),
+                   "balances": led.get("balances", {}),
                    "entries": (led.get("entries", []) or [])[-LEDGER_ENTRY_CAP:]}
         kv_set(private_key, did, LEDGER_KV_KEY, json.dumps(payload, ensure_ascii=False))
     except Exception as e:
@@ -3966,6 +4015,11 @@ def main():
     # kiểm tra outage để 1 lần kv_set thành công ở đây không che giấu outage thật.
     persist_durable_to_kv(private_key, did)
     persist_ledger_to_kv(private_key, did)   # đẩy sổ cái token (metering) lên KV -> bền, đo được
+    # Báo cáo chi tiêu định kỳ (GATED) — đặt SAU persist để số liệu đã chốt của run này.
+    if maybe_send_daily_report(state, now, extras={
+            "kibble": kibble_status, "faucet": faucet_status, "session": session_status}):
+        save_state({"last_daily_report": now})
+        print("[report] đã gửi tóm tắt chi tiêu qua Telegram")
     try:                                     # telemetry: đo đóng góp inference tích luỹ (mock/testnet)
         import token_manager
         _st = token_manager.spend_stats()
