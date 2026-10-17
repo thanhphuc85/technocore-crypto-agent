@@ -248,6 +248,13 @@ def _accrue_cumulative(state: dict, token: str, amount: Decimal) -> None:
     cm = state.setdefault("spent_cumulative", {})
     prev = _parse_amount(cm.get(token, "0")) or Decimal(0)
     cm[token] = _fmt(prev + amount)
+    # Đếm số lần chi cũng phải là TỔNG CHẠY: bản publish cắt entries còn 20, nên đếm từ
+    # log sẽ hụt hàng chục lần.
+    cc = state.setdefault("spend_count_cumulative", {})
+    try:
+        cc[token] = int(cc.get(token, 0)) + 1
+    except (TypeError, ValueError):
+        cc[token] = 1
 
 
 def cumulative_spent(state: dict, token: str = None) -> Decimal:

@@ -1565,7 +1565,13 @@ def maybe_send_daily_report(state: dict, now: int, extras: dict = None) -> bool:
         extras = dict(extras or {})
         if extras.get("kibble"):
             extras["kibble"] = fr.compact_kibble(extras["kibble"])
-        return _telegram_send(fr.format_report(summ, extras=extras, pacing=pacing))
+        try:                                  # dự phóng CHI qua kỳ testnet
+            _days = int(_env_float("FLOP_TESTNET_DAYS", fr.TESTNET_DAYS))
+            proj = fr.projection(token_manager.load_ledger(), now,
+                                 token=token_manager.default_token(), horizon_days=_days)
+        except Exception:
+            proj = None
+        return _telegram_send(fr.format_report(summ, extras=extras, pacing=pacing, proj=proj))
     except Exception as e:
         print(f"[report] bỏ qua ({str(e)[:100]})")
         return False
@@ -1585,6 +1591,7 @@ def persist_ledger_to_kv(private_key, did) -> None:
                 # hydrate lại rơi về luật |balance| cũ (tua ngược).
                 "spent_cumulative": led.get("spent_cumulative", {}),
                 "spent_by_day": led.get("spent_by_day", {}),
+                "spend_count_cumulative": led.get("spend_count_cumulative", {}),
                 "unlock": led.get("unlock", {})}
         entries = (led.get("entries", []) or [])
         body = None

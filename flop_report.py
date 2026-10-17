@@ -93,6 +93,20 @@ def summarize(ledger, now: int, token: str = "FLOP", window_s: int = WINDOW_S,
         elif kind == "credit":
             out["credited"] += amt
             out["credit_count"] += 1
+    # TỔNG CHẠY thắng log: bản publish cắt entries còn 20, nên cộng từ entries sẽ hụt
+    # hàng chục lần. Chỉ rơi về entries khi sổ cái chưa có tổng chạy (bản cũ).
+    cum = _dec((led.get("spent_cumulative") or {}).get(token)) if isinstance(
+        led.get("spent_cumulative"), dict) else Decimal(0)
+    if cum > 0:
+        out["spent_total"] = cum
+    cnt = (led.get("spend_count_cumulative") or {}) if isinstance(
+        led.get("spend_count_cumulative"), dict) else {}
+    try:
+        n = int(cnt.get(token, 0))
+    except (TypeError, ValueError):
+        n = 0
+    if n > 0:
+        out["spend_count_total"] = n
     for k in ("spent", "credited", "spent_total"):
         out[k] = _fmt(out[k])
     return out
@@ -130,6 +144,59 @@ def compact_kibble(status: str) -> str:
     if m:
         parts.append(f"lifetime {m.group(1)}% (n={m.group(2)})")
     return " \u00b7 ".join(parts) if parts else txt
+
+
+def _grp(num: str) -> str:
+    """Thêm dấu phân cách hàng nghìn cho dễ đọc: '9000000' -> '9,000,000'."""
+    txt = str(num or "")
+    if not txt:
+        return txt
+    neg, txt = (txt[0] == "-"), txt.lstrip("-")
+    head, _, tail = txt.partition(".")
+    if not head.isdigit():
+        return str(num or "")
+    head = f"{int(head):,}"
+    return ("-" if neg else "") + head + (("." + tail) if tail else "")
+
+
+TESTNET_DAYS = 90            # độ dài testnet (ngày) — chỉ để DỰ PHÓNG, không phải cam kết
+
+
+def projection(ledger, now: int, token: str = "FLOP", horizon_days: int = TESTNET_DAYS) -> dict:
+    """Dự phóng TỔNG CHI qua `horizon_days` ngày, dựa trên nhịp chi THẬT gần đây.
+
+    QUAN TRỌNG — đây là số đã/sẽ CHI, KHÔNG phải số nhận được. Phân bổ của agent là
+    PRO-RATA: phần của mình = chi của mình ÷ tổng chi của TẤT CẢ agent × quỹ 1.2B. Tổng
+    chi của mạng không ai biết trước, nên quy "chi 9 triệu" thành "nhận 9 triệu" là sai.
+
+    Nhịp lấy từ các NGÀY ĐÃ TRỌN trong `spent_by_day` (bỏ hôm nay — ngày dở dang kéo tụt
+    trung bình). Chưa có ngày trọn nào -> suy từ nhịp hôm nay chia cho phần ngày đã trôi."""
+    led = ledger if isinstance(ledger, dict) else {}
+    by = led.get("spent_by_day")
+    by = by.get(token) if isinstance(by, dict) else None
+    by = by if isinstance(by, dict) else {}
+    today = time.strftime("%Y-%m-%d", time.gmtime(int(now)))
+    done = {d: _dec(v) for d, v in by.items() if d != today}
+    cum = led.get("spent_cumulative")
+    total = _dec(cum.get(token)) if isinstance(cum, dict) else Decimal(0)
+    out = {"days": len(done), "avg_per_day": None, "basis": "",
+           "total_so_far": _fmt(total), "projected": None,
+           "horizon": max(0, int(horizon_days))}
+    if done:
+        avg = sum(done.values()) / Decimal(len(done))
+        out["basis"] = "days"
+    else:
+        elapsed = Decimal(int(now) % 86400) / Decimal(86400)
+        if elapsed <= 0:
+            return out
+        avg = _dec(by.get(today)) / elapsed      # ngoại suy từ phần ngày đã trôi
+        out["basis"] = "runrate"
+    if avg <= 0:
+        out["basis"] = ""
+        return out
+    out["avg_per_day"] = _fmt(avg)
+    out["projected"] = _fmt(avg * Decimal(out["horizon"]))
+    return out
 
 
 def spend_health(summary: dict, pacing: dict = None) -> dict:
@@ -172,7 +239,7 @@ def spend_health(summary: dict, pacing: dict = None) -> dict:
 
 
 def format_report(s: dict, *, date_label: str = None, extras: dict = None,
-                  pacing: dict = None) -> str:
+                  pacing: dict = None, proj: dict = None) -> str:
     """Một tin gọn để gửi Telegram. `extras` là các trường tuỳ chọn của agent
     (faucet/session/kibble...). Luôn nêu rõ mode."""
     s = s if isinstance(s, dict) else {}
@@ -185,7 +252,7 @@ def format_report(s: dict, *, date_label: str = None, extras: dict = None,
         f"chi 24h: {s.get('spent', '0')} {tok} ({s.get('spend_count', 0)} lần)",
         f"nạp 24h: {s.get('credited', '0')} {tok} ({s.get('credit_count', 0)} lần)",
         f"số dư: {s.get('balance', '0')} {tok}",
-        f"tổng đã chi: {s.get('spent_total', '0')} {tok} "
+        f"tổng đã chi: {_grp(s.get('spent_total', '0'))} {tok} "
         f"({s.get('spend_count_total', 0)} lần)",
     ]
     h = spend_health(s, pacing)
@@ -197,6 +264,14 @@ def format_report(s: dict, *, date_label: str = None, extras: dict = None,
                  "ahead": "nhanh hơn mốc (dễ cạn sớm)"}[h["pace"]]
         lines.append(f"nhịp: {h['elapsed_pct']}% ngày đã trôi · "
                      f"{h['spent_pct']}% ngân sách đã chi -> {label}")
+    pj = proj if isinstance(proj, dict) else {}
+    if pj.get("projected"):
+        src = f"TB {pj['days']} ngày" if pj.get("basis") == "days" else "nhịp hôm nay"
+        lines.append(f"TB {_grp(pj['avg_per_day'])} {tok}/ngày ({src})")
+        lines.append(f"dự phóng {pj.get('horizon', TESTNET_DAYS)} ngày: "
+                     f"~{_grp(pj['projected'])} "
+                     f"{tok} ĐÃ CHI — KHÔNG phải nhận (thưởng chia pro-rata theo tổng chi "
+                     f"toàn mạng)")
     for k, v in (extras or {}).items():
         lines.append(f"{k}: {v}")
     return "\n".join(lines)

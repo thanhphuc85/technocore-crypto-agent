@@ -194,3 +194,78 @@ def test_display_keeps_small_amounts_exact():
         {"kind": "spend", "token": "FLOP", "amount": "0.001", "ts": _ts(-60)}]}
     s = fr.summarize(led, NOW)
     assert s["spent"] == "0.001" and s["balance"] == "99.993"
+
+
+# --- tổng CHẠY thắng log bị cắt + dự phóng kỳ testnet ---------------------------------
+
+def _led_cum(cum, count=None, by_day=None, bal="71.5", entries=20):
+    d = {"balances": {"FLOP": bal}, "spent_cumulative": {"FLOP": cum},
+         "entries": [{"kind": "spend", "token": "FLOP", "amount": "1.8", "ts": _ts(-60)}
+                     for _ in range(entries)]}
+    if count is not None:
+        d["spend_count_cumulative"] = {"FLOP": count}
+    if by_day is not None:
+        d["spent_by_day"] = {"FLOP": by_day}
+    return d
+
+
+def test_total_comes_from_running_sum_not_the_trimmed_log():
+    """PR #134 cắt entries còn 20 khi publish -> cộng từ log hụt hàng chục lần."""
+    s = fr.summarize(_led_cum("19.628", count=204), NOW)
+    assert s["spent_total"] == "19.628" and s["spend_count_total"] == 204
+
+
+def test_total_falls_back_to_entries_for_legacy_ledgers():
+    s = fr.summarize({"balances": {"FLOP": "9"}, "entries": [
+        {"kind": "spend", "token": "FLOP", "amount": "2", "ts": _ts(-60)}]}, NOW)
+    assert s["spent_total"] == "2"
+
+
+def test_projection_uses_completed_days_only():
+    """Hôm nay là ngày DỞ DANG — gộp vào sẽ kéo tụt trung bình."""
+    today = time.strftime("%Y-%m-%d", time.gmtime(NOW))
+    by = {"2026-10-14": "100000", "2026-10-15": "99000", "2026-10-16": "101000",
+          today: "20000"}
+    p = fr.projection(_led_cum("320000", by_day=by), NOW, horizon_days=90)
+    assert p["days"] == 3 and p["basis"] == "days"
+    assert p["avg_per_day"] == "100000" and p["projected"] == "9000000"
+
+
+def test_projection_falls_back_to_today_run_rate():
+    """Ngày đầu chạy: chưa có ngày trọn -> ngoại suy từ phần ngày đã trôi."""
+    noon = NOW - (NOW % 86400) + 43200                    # đúng 12:00 UTC
+    today = time.strftime("%Y-%m-%d", time.gmtime(noon))
+    p = fr.projection(_led_cum("50", by_day={today: "50"}), noon, horizon_days=90)
+    assert p["basis"] == "runrate" and p["avg_per_day"] == "100"      # 50 / 0.5 ngày
+    assert p["projected"] == "9000"
+
+
+def test_projection_empty_when_nothing_spent():
+    p = fr.projection(_led_cum("0", by_day={}), NOW)
+    assert p["projected"] is None and p["basis"] == ""
+    assert fr.projection(None, NOW)["projected"] is None
+
+
+def test_projection_horizon_is_configurable():
+    today = time.strftime("%Y-%m-%d", time.gmtime(NOW))
+    by = {"2026-10-16": "100", today: "1"}
+    assert fr.projection(_led_cum("101", by_day=by), NOW, horizon_days=30)["projected"] == "3000"
+    assert fr.projection(_led_cum("101", by_day=by), NOW, horizon_days=0)["projected"] == "0"
+
+
+def test_report_says_spent_not_earned():
+    """9 triệu là ĐÃ CHI. Phần thưởng chia pro-rata, không ai biết trước tổng chi mạng."""
+    today = time.strftime("%Y-%m-%d", time.gmtime(NOW))
+    by = {"2026-10-14": "100000", "2026-10-15": "100000", today: "5"}
+    led = _led_cum("200005", count=9, by_day=by)
+    txt = fr.format_report(fr.summarize(led, NOW, mode="testnet"),
+                           proj=fr.projection(led, NOW, horizon_days=90))
+    assert "~9,000,000 FLOP ĐÃ CHI" in txt and "KHÔNG phải nhận" in txt
+    assert "pro-rata" in txt
+
+
+def test_big_numbers_get_thousand_separators():
+    assert fr._grp("9000000") == "9,000,000"
+    assert fr._grp("1234.5678") == "1,234.5678"
+    assert fr._grp("-2500") == "-2,500"
+    assert fr._grp("abc") == "abc" and fr._grp("") == ""
