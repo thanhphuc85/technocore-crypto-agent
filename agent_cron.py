@@ -446,6 +446,9 @@ KIBBLE_DUP_SIM = _env_float("FLOP_KIBBLE_DUP_SIM", 0.85)
 # lặp, nên vân tay sống mãi khiến throughput về 0. <=0 = không hết hạn (hành vi cũ).
 KIBBLE_DUP_HOURS = _env_float("FLOP_KIBBLE_DUP_HOURS", 6)
 _kibble_recent_fps = []              # vân tay job VỪA TRẢ LỜI (nạp từ state trong main)
+_miner_stats = {}                    # {counts:{did:n}, denied:n} — độ phân tán thợ đào
+# Ngưỡng cảnh báo tập trung thợ đào (0..1). 0 = tắt cảnh báo, vẫn đếm.
+MINER_CONC_WARN = _env_float("FLOP_MINER_CONC_WARN", 0.5)
 _REVIEW_NO_TARGET = object()         # sentinel: review không có đích GitHub -> rơi nhánh thường
 KIBBLE_TEMPERATURE = _env_float("FLOP_KIBBLE_TEMPERATURE", 0.3)
 # Ngân sách token ĐẦU RA cho việc kibble/tclk: reply lobby chỉ cần ~120, nhưng deliverable
@@ -3515,6 +3518,10 @@ def main():
     # Mục ĐỊNH DẠNG CŨ (list trần, không mốc) được giữ nguyên ở đây; _live_fingerprints
     # coi chúng là đã hết hạn nên chúng không chặn gì, và lần remember kế tiếp dọn sạch.
     _kibble_recent_fps[:] = [x for x in (state.get("kibble_recent_fps") or []) if x]
+    # Độ phân tán thợ đào: bằng chứng "independent demand" chỉ có giá trị khi tích luỹ
+    # qua nhiều ngày, nên phải bền qua run.
+    _miner_stats.clear()
+    _miner_stats.update(state.get("miner_stats") or {})
     now = int(time.time())
     # Run thủ công (workflow_dispatch) luôn phát để dễ kiểm chứng.
     force = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
@@ -4002,9 +4009,17 @@ def main():
                         private_key=private_key, did=did)
                     _last = r
                     _oc = r.get("outcome")
+                    import flop_miners as _fm
                     if r.get("stage") == "settle" and _oc in ("spent_onchain", "spent_simulated"):
                         _settled += 1
+                        # Ghi thợ đào ĐÃ settle -> đo độ phân tán (independent-demand).
+                        _miner_stats.clear()
+                        _miner_stats.update(_fm.record_settled(dict(_miner_stats),
+                                                               r.get("miner_did")))
                     elif _oc == "skipped_fleet_miner":
+                        # Chốt chặn fleet bắn -> ĐẾM, trước đây nó chạy hoàn toàn âm thầm.
+                        _miner_stats.clear()
+                        _miner_stats.update(_fm.record_denied(dict(_miner_stats)))
                         continue   # trúng miner fleet -> bỏ phiên này, thử phiên khác (match khác)
                     else:
                         break   # off/unconfigured/no_miner/insufficient/error -> KHÔNG spin vòng
@@ -4015,6 +4030,16 @@ def main():
                 if _last.get("tx_hash"):
                     extra += f" tx={str(_last['tx_hash'])[:12]}…"
                 print(f"[session] {session_status}{extra}")
+                try:
+                    import flop_miners as _fm
+                    _ms = _fm.summarize(_miner_stats)
+                    print(f"[miners] {_fm.format_line(_ms)}")
+                    _w = _fm.concentration_warning(_ms, MINER_CONC_WARN) if MINER_CONC_WARN > 0 else None
+                    if _w:
+                        print(f"[miners] ⚠️ {_w}")
+                    save_state({"miner_stats": _miner_stats})
+                except Exception as e:
+                    print(f"[miners] bỏ qua ({str(e)[:80]})")
             except Exception as e:
                 session_status = "error"
                 print(f"[session] bỏ qua ({str(e)[:100]})")
@@ -4084,8 +4109,18 @@ def main():
     persist_durable_to_kv(private_key, did)
     persist_ledger_to_kv(private_key, did)   # đẩy sổ cái token (metering) lên KV -> bền, đo được
     # Báo cáo chi tiêu định kỳ (GATED) — đặt SAU persist để số liệu đã chốt của run này.
-    if maybe_send_daily_report(state, now, extras={
-            "kibble": kibble_status, "faucet": faucet_status, "session": session_status}):
+    _mx = {"kibble": kibble_status, "faucet": faucet_status, "session": session_status}
+    try:
+        import flop_miners as _fm
+        _ms = _fm.summarize(_miner_stats)
+        if _ms.get("total") or _ms.get("denied"):
+            _mx["thợ đào"] = _fm.format_line(_ms)
+            _w = _fm.concentration_warning(_ms, MINER_CONC_WARN) if MINER_CONC_WARN > 0 else None
+            if _w:
+                _mx["⚠️"] = _w
+    except Exception:
+        pass
+    if maybe_send_daily_report(state, now, extras=_mx):
         save_state({"last_daily_report": now})
         print("[report] đã gửi tóm tắt chi tiêu qua Telegram")
     print_meter_skips()                      # vì sao sổ cái không nhúc nhích -> nói ra, đừng im

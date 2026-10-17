@@ -142,6 +142,8 @@ jobs:
           # Telegram của bước cảnh báo; agent chỉ ĐỌC chúng để gửi, không bao giờ log.
           FLOP_DAILY_REPORT_ENABLED: ${{ vars.FLOP_DAILY_REPORT_ENABLED }}
           FLOP_DAILY_REPORT_HOURS: ${{ vars.FLOP_DAILY_REPORT_HOURS }}
+          # Ngưỡng cảnh báo tập trung thợ đào (0..1, trống = 0.5). 0 = tắt cảnh báo.
+          FLOP_MINER_CONC_WARN: ${{ vars.FLOP_MINER_CONC_WARN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           # Tracker ATTEST (đo useful-rate của chính agent) — mặc định TẮT. Đặt
