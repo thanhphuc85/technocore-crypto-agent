@@ -43,8 +43,19 @@ def _ts(v):
         return None
 
 
+_DISPLAY_DP = Decimal("0.000001")      # 6 chữ số thập phân là quá đủ để đọc
+
+
 def _fmt(d: Decimal) -> str:
-    """Bỏ số 0 thừa ở đuôi, giữ dạng người đọc được ('12.4' chứ không '12.4000')."""
+    """Số để ĐỌC: làm tròn 6 chữ số thập phân rồi bỏ 0 thừa ('12.4' chứ không '12.4000').
+
+    Chỉ ảnh hưởng HIỂN THỊ. Sổ cái và pacer vẫn giữ Decimal đầy đủ — phép chia của
+    pacer sinh ra những số như 95.90277777777777777777777778, không ai đọc nổi trong
+    một tin nhắn, nhưng làm tròn ở tầng kế toán thì sẽ trôi số dư."""
+    try:
+        d = d.quantize(_DISPLAY_DP)
+    except (InvalidOperation, ValueError):
+        pass
     s = format(d.normalize(), "f")
     return s if s != "-0" else "0"
 

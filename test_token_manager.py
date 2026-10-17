@@ -297,3 +297,38 @@ def test_metering_works_after_seed(tmp_path, monkeypatch):
     assert tm.meter_inference(memo="x", event_id="k1", path=p)["outcome"] == "skipped_insufficient"
     tm.maybe_sim_credit(path=p, log=lambda *a: None)
     assert tm.meter_inference(memo="x", event_id="k1", path=p)["outcome"] == "spent_simulated"
+
+
+# --- available_today: nền của FLOP_DAILY_BUDGET=auto ----------------------------------
+
+def test_available_today_counts_balance_plus_todays_spend(tmp_path):
+    p = str(tmp_path / "l.json")
+    tm.credit("100", memo="seed", path=p)
+    assert tm.available_today(path=p) == "100"
+    tm.spend("40", memo="x", path=p)
+    assert tm.check_balance(path=p) == "60"
+    assert tm.available_today(path=p) == "100"          # 60 còn + 40 đã chi hôm nay
+
+
+def test_available_today_ignores_yesterdays_spend(tmp_path):
+    """Chi của hôm qua KHÔNG được cộng vào ngân sách hôm nay."""
+    import time as _t
+    p = str(tmp_path / "l.json")
+    tm.credit("100", memo="seed", path=p)
+    tm.spend("40", memo="x", path=p)
+    now = int(_t.time())
+    tomorrow = now - (now % 86400) + 86400 + 3600       # 01:00 UTC ngày mai
+    assert tm.available_today(now=tomorrow, path=p) == "60"    # chỉ còn số dư
+
+
+def test_available_today_empty_wallet_is_zero(tmp_path):
+    assert tm.available_today(path=str(tmp_path / "trong.json")) == "0"
+
+
+def test_available_today_skips_entries_without_timestamp(tmp_path):
+    p = str(tmp_path / "l.json")
+    tm.credit("10", memo="seed", path=p)
+    led = tm.load_ledger(p)
+    led["entries"].append({"kind": "spend", "token": "FLOP", "amount": "5"})   # thiếu ts
+    tm.save_ledger(led, p)
+    assert tm.available_today(path=p) == "10"           # không đoán thời điểm

@@ -176,3 +176,21 @@ def test_compact_kibble_handles_partial_fields():
         "0\u2713 \u00b7 useful n/a"
     assert fr.compact_kibble("lifetime 58%/n=48 nhưng thiếu phần còn lại") == \
         "lifetime 58%/n=48 nhưng thiếu phần còn lại"   # không khớp 'lifetime=' -> giữ nguyên
+
+
+def test_display_rounds_long_decimals_but_keeps_ledger_math():
+    """Pacer sinh số như 95.90277777777777777777777778 — tin nhắn phải đọc được."""
+    led = {"balances": {"FLOP": "4.09722222222222222222222222"}, "entries": [
+        {"kind": "spend", "token": "FLOP",
+         "amount": "95.90277777777777777777777778", "ts": _ts(-60)}]}
+    s = fr.summarize(led, NOW)
+    assert s["spent"] == "95.902778" and s["balance"] == "4.097222"
+    txt = fr.format_report(s)
+    assert "95.902778" in txt and "7777777" not in txt
+
+
+def test_display_keeps_small_amounts_exact():
+    led = {"balances": {"FLOP": "99.993"}, "entries": [
+        {"kind": "spend", "token": "FLOP", "amount": "0.001", "ts": _ts(-60)}]}
+    s = fr.summarize(led, NOW)
+    assert s["spent"] == "0.001" and s["balance"] == "99.993"

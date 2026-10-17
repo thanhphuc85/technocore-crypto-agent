@@ -45,8 +45,22 @@ def _fmt(d: Decimal) -> str:
 
 # --- config (đọc live từ env) -----------------------------------------------------
 
-def daily_budget():
-    d = _dec(os.environ.get("FLOP_DAILY_BUDGET", ""))
+def daily_budget(token: str = None, ledger_path: str = None):
+    """Ngân sách FLOP cho hôm nay. Rỗng/không hợp lệ -> None (pacer TẮT).
+
+    `auto` -> suy từ VÍ THẬT: số dư còn lại + đã chi trong ngày UTC. Vì sao cần: faucet
+    nạp mỗi ngày một lượng khác nhau, mà ngân sách cố định thì phải chỉnh tay sau mỗi lần
+    nạp — không ai làm nổi hằng ngày, và token thừa nằm im là phân bổ bị mất
+    ("Holding test tokens earns nothing"). `auto` làm việc đó tự động."""
+    raw = os.environ.get("FLOP_DAILY_BUDGET", "").strip()
+    if raw.lower() == "auto":
+        try:
+            import token_manager as _tm        # import TRỄ: tránh vòng lặp import
+            d = _dec(_tm.available_today(token=token, path=ledger_path))
+        except Exception:
+            return None                        # không đọc được ví -> pacer tắt, không đoán
+        return d if (d is not None and d > 0) else None
+    d = _dec(raw)
     return d if (d is not None and d > 0) else None
 
 
@@ -129,13 +143,14 @@ def _rec_for(state: dict, token: str, now: int) -> dict:
 
 # --- API --------------------------------------------------------------------------
 
-def next_spend_amount(token: str = None, now: int = None, path: str = None, rng=None):
+def next_spend_amount(token: str = None, now: int = None, path: str = None, rng=None,
+                      ledger_path: str = None):
     """Số FLOP NÊN chi lần chạy này để bám lịch rải đều. Trả:
        None  -> pacer tắt (FLOP_DAILY_BUDGET chưa đặt) -> caller dùng phí cố định;
        "0"   -> chưa tới nhịp (đã bám kịp mục tiêu, hoặc phần đến hạn < FLOP_MIN_SPEND);
        "x.y" -> lượng nên chi để đuổi kịp mục tiêu tuyến tính, đã kẹp trần/lần.
     `rng` (tùy chọn) là nguồn ngẫu nhiên cho jitter, tiêm được để test tất định."""
-    budget = daily_budget()
+    budget = daily_budget(token, ledger_path)
     if budget is None:
         return None
     now = int(now if now is not None else time.time())
@@ -174,9 +189,10 @@ def record_spend(amount, token: str = None, now: int = None, path: str = None) -
     _save(state, path)
 
 
-def pacing_status(token: str = None, now: int = None, path: str = None) -> dict:
+def pacing_status(token: str = None, now: int = None, path: str = None,
+                  ledger_path: str = None) -> dict:
     """Ảnh chụp nhịp hôm nay (để log/telemetry): ngân sách, đã chi, mục tiêu, đến hạn."""
-    budget = daily_budget()
+    budget = daily_budget(token, ledger_path)
     now = int(now if now is not None else time.time())
     token = _token(token)
     rec = _rec_for(_load(path), token, now)
@@ -188,5 +204,6 @@ def pacing_status(token: str = None, now: int = None, path: str = None) -> dict:
         "spent_today": _fmt(spent), "target_now": _fmt(target),
         # Telemetry: báo lượng đến hạn TRƯỚC jitter (rng=0.5 -> hệ số 1.0) để status
         # ổn định/đọc được; jitter chỉ áp ở lần chi thật qua next_spend_amount().
-        "next_due": next_spend_amount(token, now, path, rng=lambda: 0.5),
+        "next_due": next_spend_amount(token, now, path, rng=lambda: 0.5,
+                                      ledger_path=ledger_path),
     }

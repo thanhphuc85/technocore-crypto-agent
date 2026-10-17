@@ -111,3 +111,73 @@ def test_pacing_status_ignores_jitter(pfile, monkeypatch):
     monkeypatch.setenv("FLOP_PACE_JITTER_PCT", "50")
     # telemetry phải ổn định (jitter vô hiệu bằng rng=0.5 nội bộ).
     assert fp.pacing_status(now=NOON, path=pfile)["next_due"] == "12"
+
+
+# --- FLOP_DAILY_BUDGET=auto: ngân sách suy từ ví thật --------------------------------
+
+def _seed_ledger(tmp_path, balance, spends=()):
+    """Dựng một sổ cái thật qua token_manager (không chế JSON bằng tay)."""
+    import token_manager as tm
+    led = str(tmp_path / "led.json")
+    tm.credit(balance, memo="seed", path=led)
+    for amt, ts_off in spends:
+        tm.spend(amt, memo="x", path=led)
+    return led
+
+
+def test_auto_budget_is_balance_plus_spent_today(tmp_path, monkeypatch):
+    """Ngân sách phải ĐỨNG YÊN khi chi: nếu chỉ lấy số dư thì mục tiêu tụt theo mỗi lần
+    chi và ví không bao giờ tiêu hết."""
+    import token_manager as tm
+    monkeypatch.setenv("FLOP_DAILY_BUDGET", "auto")
+    led = _seed_ledger(tmp_path, "100")
+    assert fp.daily_budget(ledger_path=led) == Decimal("100")
+    tm.spend("30", memo="x", path=led)
+    assert tm.check_balance(path=led) == "70"
+    assert fp.daily_budget(ledger_path=led) == Decimal("100")      # 70 còn + 30 đã chi
+
+
+def test_auto_budget_grows_when_faucet_credits(tmp_path, monkeypatch):
+    import token_manager as tm
+    monkeypatch.setenv("FLOP_DAILY_BUDGET", "auto")
+    led = _seed_ledger(tmp_path, "100")
+    tm.credit("50", memo="faucet", path=led)
+    assert fp.daily_budget(ledger_path=led) == Decimal("150")
+
+
+def test_auto_budget_off_when_wallet_empty(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLOP_DAILY_BUDGET", "auto")
+    assert fp.daily_budget(ledger_path=str(tmp_path / "trong.json")) is None
+
+
+def test_auto_budget_off_when_ledger_unreadable(monkeypatch):
+    """Không đọc được ví -> pacer TẮT, không đoán một con số."""
+    monkeypatch.setenv("FLOP_DAILY_BUDGET", "auto")
+    import token_manager as tm
+
+    def _boom(*a, **k):
+        raise RuntimeError("sổ cái hỏng")
+
+    monkeypatch.setattr(tm, "available_today", _boom)
+    assert fp.daily_budget() is None
+
+
+def test_fixed_budget_still_works_and_ignores_wallet(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLOP_DAILY_BUDGET", "24")
+    led = _seed_ledger(tmp_path, "999")
+    assert fp.daily_budget(ledger_path=led) == Decimal("24")
+
+
+def test_auto_budget_drives_next_spend_amount(tmp_path, monkeypatch):
+    """Đầu-cuối: ví 24 FLOP, giữa trưa -> nên chi đúng một nửa."""
+    monkeypatch.setenv("FLOP_DAILY_BUDGET", "auto")
+    led = _seed_ledger(tmp_path, "24")
+    pfile = str(tmp_path / "pace.json")
+    assert fp.next_spend_amount(now=NOON, path=pfile, ledger_path=led) == "12"
+
+
+def test_pacing_status_reports_auto_budget(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLOP_DAILY_BUDGET", "auto")
+    led = _seed_ledger(tmp_path, "48")
+    st = fp.pacing_status(now=NOON, path=str(tmp_path / "p.json"), ledger_path=led)
+    assert st["enabled"] is True and st["daily_budget"] == "48" and st["target_now"] == "24"

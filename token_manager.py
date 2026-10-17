@@ -450,6 +450,31 @@ def _recent_spend_count(token: str, now: int, window: int = 3600, path: str = No
     return n
 
 
+def available_today(token: str = None, now: int = None, path: str = None) -> str:
+    """Tổng token KHẢ DỤNG trong ngày UTC hiện tại = số dư còn lại + ĐÃ chi trong ngày.
+
+    Dùng cho FLOP_DAILY_BUDGET=auto. Vì sao cộng cả phần đã chi: nếu ngân sách chỉ bằng
+    số dư hiện tại thì mỗi lần chi lại kéo ngân sách xuống, mục tiêu tụt theo và ví
+    KHÔNG BAO GIỜ tiêu hết (tiệm cận 0). Cộng phần đã chi làm ngân sách ĐỨNG YÊN trong
+    ngày, và chỉ tăng khi faucet nạp thêm — đúng ý "hôm nay có bao nhiêu, tiêu bấy nhiêu".
+
+    Chỉ tính entry 'spend' có ts nằm trong NGÀY UTC hiện tại; entry thiếu/hỏng ts bị bỏ
+    qua (không đoán thời điểm)."""
+    token = (token or default_token())
+    now = int(now if now is not None else time.time())
+    start = now - (now % 86400)                      # 00:00 UTC hôm nay
+    spent = Decimal(0)
+    for e in load_ledger(path).get("entries", []):
+        if not isinstance(e, dict) or e.get("kind") != "spend" or e.get("token") != token:
+            continue
+        ts = _parse_ts(e.get("ts"))
+        if ts is None or ts < start:
+            continue
+        spent += _parse_amount(e.get("amount")) or Decimal(0)
+    bal = _parse_amount(check_balance(token, path)) or Decimal(0)
+    return _fmt(max(Decimal(0), bal) + spent)
+
+
 def spend_stats(token: str = None, now: int = None, path: str = None) -> dict:
     """Ảnh chụp hoạt động chi (để audit/telemetry chống sybil): tổng số lần chi và số
     lần chi trong 24h gần đây. Auditor đối chiếu chuỗi này với số lượt trả lời thật
@@ -541,7 +566,9 @@ def meter_inference(amount: str = None, memo: str = "Gemini Inference",
     if amount is None:
         try:
             import flop_pacer
-            paced = flop_pacer.next_spend_amount(token=token, path=path)
+            # `path` ở đây là SỔ CÁI, không phải file nhịp của pacer -> truyền đúng chỗ,
+            # nếu không pacer sẽ ghi trạng thái đè lên file sổ cái.
+            paced = flop_pacer.next_spend_amount(token=token, ledger_path=path)
         except Exception as e:
             print(f"[meter] pacer lỗi ({e}), dùng phí cố định")
             paced = None
@@ -566,7 +593,7 @@ def meter_inference(amount: str = None, memo: str = "Gemini Inference",
     if result.get("outcome") in ("spent_simulated", "spent_onchain"):
         try:
             import flop_pacer
-            flop_pacer.record_spend(result.get("amount", amt), token=token, path=path)
+            flop_pacer.record_spend(result.get("amount", amt), token=token)
         except Exception:
             pass
     return result
