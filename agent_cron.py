@@ -1533,6 +1533,10 @@ def maybe_send_daily_report(state: dict, now: int, extras: dict = None) -> bool:
             pacing = flop_pacer.pacing_status(now=now)
         except Exception:
             pass
+        # Rút gọn CHỈ cho tin nhắn — log Actions và job summary giữ bản đầy đủ.
+        extras = dict(extras or {})
+        if extras.get("kibble"):
+            extras["kibble"] = fr.compact_kibble(extras["kibble"])
         return _telegram_send(fr.format_report(summ, extras=extras, pacing=pacing))
     except Exception as e:
         print(f"[report] bỏ qua ({str(e)[:100]})")

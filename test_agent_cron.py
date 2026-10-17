@@ -2297,3 +2297,19 @@ def test_meter_skip_ignores_deliberate_off(capsys):
     ac._note_meter_skip(None)
     ac.print_meter_skips()
     assert capsys.readouterr().out == "" and ac._meter_skips == {}
+
+
+def test_daily_report_compacts_only_the_kibble_extra(monkeypatch):
+    """Rút gọn CHỈ áp cho tin nhắn; dict extras của caller không được sửa tại chỗ."""
+    monkeypatch.setattr(ac, "DAILY_REPORT_ENABLED", True)
+    sent = []
+    monkeypatch.setattr(ac, "_telegram_send", lambda t: sent.append(t) or True)
+    extras = {"kibble": ("live 2\u2713/0skip/200scan | kibble-score delivered=300 useful=44 "
+                         "not=33 useful_rate=57% pending=223 unattested=0 lifetime=58%/n=48"),
+              "faucet": "off"}
+    before = dict(extras)
+    assert ac.maybe_send_daily_report({}, 1_790_000_000, extras=extras) is True
+    assert "kibble: 2\u2713 \u00b7 useful 57% \u00b7 lifetime 58% (n=48)" in sent[0]
+    assert "pending=223" not in sent[0]
+    assert "faucet: off" in sent[0]
+    assert extras == before                      # không sửa dict của caller

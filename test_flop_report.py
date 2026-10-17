@@ -144,3 +144,35 @@ def test_report_renders_health_lines():
 def test_report_omits_pace_line_when_pacer_off():
     txt = fr.format_report(fr.summarize(_led([], bal="1"), NOW))
     assert "ngày đã trôi" not in txt
+
+
+# --- rút gọn dòng kibble cho tin nhắn (log Actions giữ bản đầy đủ) -------------------
+
+_FULL = ("live 2\u2713/0skip/200scan | kibble-score delivered=300 useful=44 not=33 "
+         "useful_rate=57% pending=223 unattested=0 lifetime=58%/n=48")
+
+
+def test_compact_kibble_keeps_the_three_numbers_that_matter():
+    out = fr.compact_kibble(_FULL)
+    assert out == "2\u2713 \u00b7 useful 57% \u00b7 lifetime 58% (n=48)"
+    assert len(out) < len(_FULL) / 3          # 126 -> 37 ký tự
+
+
+def test_compact_kibble_keeps_the_dry_marker():
+    """Bỏ 'dry' đi thì '3✓' trông như đã giao THẬT — rút gọn không được đổi nghĩa."""
+    out = fr.compact_kibble("dry 3\u2713/1skip/200scan | kibble-score delivered=5 "
+                            "useful=1 not=0 useful_rate=100% pending=4 unattested=0")
+    assert out.startswith("dry 3\u2713") and "useful 100%" in out
+
+
+def test_compact_kibble_passes_through_unparseable_status():
+    """Thà dài còn hơn mất thông tin: trạng thái không khớp mẫu phải đi qua NGUYÊN VẸN."""
+    for t in ("off", "skip-outage", "error", "", None):
+        assert fr.compact_kibble(t) == (t or "")
+
+
+def test_compact_kibble_handles_partial_fields():
+    assert fr.compact_kibble("live 0\u2713/5skip/200scan useful_rate=n/a") == \
+        "0\u2713 \u00b7 useful n/a"
+    assert fr.compact_kibble("lifetime 58%/n=48 nhưng thiếu phần còn lại") == \
+        "lifetime 58%/n=48 nhưng thiếu phần còn lại"   # không khớp 'lifetime=' -> giữ nguyên

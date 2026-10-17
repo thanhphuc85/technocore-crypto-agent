@@ -18,6 +18,7 @@ agent_cron lo phần đọc sổ cái, chặn thời gian, và gửi.
 from __future__ import annotations
 
 import calendar
+import re
 import time
 from decimal import Decimal, InvalidOperation
 
@@ -84,6 +85,40 @@ def summarize(ledger, now: int, token: str = "FLOP", window_s: int = WINDOW_S,
     for k in ("spent", "credited", "spent_total"):
         out[k] = _fmt(out[k])
     return out
+
+
+_K_DELIVERED = re.compile(r"(\d+)\u2713")
+_K_RATE = re.compile(r"useful_rate=(\d+%|n/a)")
+_K_LIFETIME = re.compile(r"lifetime=(\d+)%/n=(\d+)")
+
+
+def compact_kibble(status: str) -> str:
+    """Rút dòng kibble dài cho TIN NHẮN; log Actions vẫn giữ nguyên bản đầy đủ.
+
+    Bản đầy đủ ~140 ký tự nên trên điện thoại nó vỡ thành 4 dòng và chôn mất phần
+    đáng đọc. Giữ đúng 3 số có ý nghĩa: đã giao, tỉ lệ cửa sổ, tỉ lệ cộng dồn.
+
+      live 2✓/0skip/200scan | kibble-score delivered=300 useful=44 not=33
+      useful_rate=57% pending=223 unattested=0 lifetime=58%/n=48
+        -> 2✓ · useful 57% · lifetime 58% (n=48)
+
+    KHÔNG nhận diện được mẫu nào -> trả NGUYÊN chuỗi: thà dài còn hơn mất thông tin
+    (vd 'off', 'skip-outage', 'error' phải đi qua y nguyên)."""
+    txt = str(status or "")
+    parts = []
+    m = _K_DELIVERED.search(txt)
+    if m:
+        # Giữ tiền tố 'dry': bỏ nó đi thì '3✓' trông như đã giao THẬT trong khi
+        # dry-run không đăng gì cả — rút gọn không được phép đổi nghĩa.
+        parts.append(("dry " if txt.strip().lower().startswith("dry") else "")
+                     + f"{m.group(1)}✓")
+    m = _K_RATE.search(txt)
+    if m:
+        parts.append(f"useful {m.group(1)}")
+    m = _K_LIFETIME.search(txt)
+    if m:
+        parts.append(f"lifetime {m.group(1)}% (n={m.group(2)})")
+    return " \u00b7 ".join(parts) if parts else txt
 
 
 def spend_health(summary: dict, pacing: dict = None) -> dict:
