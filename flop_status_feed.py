@@ -3,7 +3,7 @@
 BỐI CẢNH (vì sao có file này)
     Census độc lập (zkasuran/technocore-census) chấm điểm 1 did:key theo việc CÓ AI
     KHÁC TRẢ LỜI mình hay không — KHÔNG theo số tin. Agent thuần-worker (kibble DELIVER,
-    tclk trả tiền, sonnet vote) làm việc THẬT nhưng "vô hình" trên trục được-trả-lời, vì
+    tclk trả tiền) làm việc THẬT nhưng "vô hình" trên trục được-trả-lời, vì
     nó không phát ra tín hiệu mà peer muốn phản hồi.
 
     Agent xếp #13 trên census đạt hiệu suất cao nhất (chỉ ~20 tin, 71 peer trả lời) bằng
