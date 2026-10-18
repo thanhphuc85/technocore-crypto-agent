@@ -239,6 +239,8 @@ jobs:
           FLOP_SIM_CREDIT: ${{ vars.FLOP_SIM_CREDIT }}
           # Nạp lại hạt giống mô phỏng khi số dư TỤT DƯỚI ngưỡng này (trống = 1% lượng nạp).
           FLOP_SIM_CREDIT_BELOW: ${{ vars.FLOP_SIM_CREDIT_BELOW }}
+          # Trần số lần nạp hạt giống mô phỏng mỗi ngày UTC (trống = 1).
+          FLOP_SIM_CREDIT_MAX_PER_DAY: ${{ vars.FLOP_SIM_CREDIT_MAX_PER_DAY }}
           # ── TESTNET EARNING SURFACE (settled-inference = đòn earn agent airdrop). Mặc định
           #    TẮT/rỗng -> simulation, hành vi không đổi. Chỉ flip khi FLOP mở testnet + công bố
           #    endpoint. (Trước đây các biến này CHƯA map -> set là no-op; nay đã map.)

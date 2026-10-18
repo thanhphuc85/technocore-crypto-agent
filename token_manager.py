@@ -576,7 +576,7 @@ def spend_stats(token: str = None, now: int = None, path: str = None) -> dict:
 
 # --- Hạt giống MÔ PHỎNG: để chạy thử đường ống khi faucet thật chưa tồn tại --------
 
-def maybe_sim_credit(path: str = None, log=print) -> dict:
+def maybe_sim_credit(path: str = None, log=print, now: int = None) -> dict:
     """(GATED, CHỈ simulation) Nạp một hạt giống MÔ PHỎNG khi số dư = 0.
 
     Vì sao cần: faucet THẬT chưa có spec (FLOP chưa công bố), nên số dư luôn 0 và MỌI
@@ -611,8 +611,28 @@ def maybe_sim_credit(path: str = None, log=print) -> dict:
     if cur > below:
         return {"outcome": "skipped_has_balance",
                 "reason": f"số dư {_fmt(cur)} > ngưỡng {_fmt(below)}"}
+    # TRẦN MỖI NGÀY — faucet THẬT có FLOP_FAUCET_MAX_PER_DAY, hạt giống mô phỏng thì
+    # không, nên pacer rút cạn ví rồi nạp lại ngay TRONG ngày: đo được 2 lần nạp/ngày,
+    # tổng chi 115 thay vì 100. Ngân sách `auto` = số dư + đã chi hôm nay, nên mỗi lần
+    # nạp lại NÂNG ngân sách của chính ngày đó -> chi trong ngày không còn trần.
+    day = time.strftime("%Y-%m-%d", time.gmtime(int(now if now is not None else time.time())))
+    cap = _parse_amount(os.environ.get("FLOP_SIM_CREDIT_MAX_PER_DAY", "").strip())
+    cap = 1 if (cap is None or cap < 0) else int(cap)
+    st = load_ledger(path).get("sim_credit_count") or {}
+    used = 0
+    if isinstance(st, dict) and st.get("day") == day:
+        try:
+            used = int(st.get("n") or 0)
+        except (TypeError, ValueError):
+            used = 0
+    if cap and used >= cap:
+        return {"outcome": "skipped_daily_cap",
+                "reason": f"đã nạp {used} lần hôm nay (trần {cap})"}
     res = credit(amt, token=token, memo="SIMULATION seed (khong phai faucet that)", path=path)
     if res.get("ok"):
+        led = load_ledger(path)                      # ghi mốc SAU khi credit đã lưu
+        led["sim_credit_count"] = {"day": day, "n": used + 1}
+        _save_ledger(led, path)
         log(f"[sim-credit] nạp hạt giống MÔ PHỎNG {_fmt(amt)} {token} "
             f"(sổ cái mode=simulation, không phải token thật)")
         return {"outcome": "credited", "amount": _fmt(amt), "token": token}

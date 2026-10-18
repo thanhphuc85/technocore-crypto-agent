@@ -1596,6 +1596,7 @@ def persist_ledger_to_kv(private_key, did) -> None:
                 # hydrate lại rơi về luật |balance| cũ (tua ngược).
                 "spent_cumulative": led.get("spent_cumulative", {}),
                 "spent_by_day": led.get("spent_by_day", {}),
+                "sim_credit_count": led.get("sim_credit_count", {}),
                 "spend_count_cumulative": led.get("spend_count_cumulative", {}),
                 "first_spend_day": led.get("first_spend_day"),
                 "unlock": led.get("unlock", {})}

@@ -488,3 +488,42 @@ def test_sim_credit_threshold_is_tunable(tmp_path, monkeypatch):
     p = str(tmp_path / "l.json")
     tm.save_ledger({"balances": {"FLOP": "30"}, "entries": []}, p)
     assert tm.maybe_sim_credit(path=p, log=lambda *a: None)["outcome"] == "credited"
+
+
+def test_sim_credit_is_capped_to_once_per_day(tmp_path, monkeypatch):
+    """Faucet THẬT có MAX_PER_DAY; hạt giống mô phỏng thì không, nên pacer rút cạn ví rồi
+    nạp lại NGAY trong ngày — đo được 2 lần nạp/ngày, tổng chi 115 thay vì 100."""
+    monkeypatch.setenv("FLOP_SIM_CREDIT", "100")
+    monkeypatch.delenv("TESTNET_ENABLED", raising=False)
+    p = str(tmp_path / "l.json")
+    tm.save_ledger({"balances": {"FLOP": "0"}, "entries": []}, p)
+    assert tm.maybe_sim_credit(path=p, log=lambda *a: None)["outcome"] == "credited"
+    tm.spend("100", memo="x", path=p)                      # rút cạn lại trong cùng ngày
+    r = tm.maybe_sim_credit(path=p, log=lambda *a: None)
+    assert r["outcome"] == "skipped_daily_cap" and "trần 1" in r["reason"]
+
+
+def test_sim_credit_resets_on_the_next_utc_day(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLOP_SIM_CREDIT", "100")
+    monkeypatch.delenv("TESTNET_ENABLED", raising=False)
+    p = str(tmp_path / "l.json")
+    tm.save_ledger({"balances": {"FLOP": "0"}, "entries": []}, p)
+    t0 = 1_792_000_000
+    assert tm.maybe_sim_credit(path=p, log=lambda *a: None, now=t0)["outcome"] == "credited"
+    tm.spend("100", memo="x", path=p)
+    assert tm.maybe_sim_credit(path=p, log=lambda *a: None,
+                               now=t0)["outcome"] == "skipped_daily_cap"
+    assert tm.maybe_sim_credit(path=p, log=lambda *a: None,
+                               now=t0 + 86400)["outcome"] == "credited"   # ngày mới
+
+
+def test_sim_credit_daily_cap_is_tunable(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLOP_SIM_CREDIT", "10")
+    monkeypatch.setenv("FLOP_SIM_CREDIT_MAX_PER_DAY", "3")
+    monkeypatch.delenv("TESTNET_ENABLED", raising=False)
+    p = str(tmp_path / "l.json")
+    tm.save_ledger({"balances": {"FLOP": "0"}, "entries": []}, p)
+    for _ in range(3):
+        assert tm.maybe_sim_credit(path=p, log=lambda *a: None)["outcome"] == "credited"
+        tm.spend("10", memo="x", path=p)
+    assert tm.maybe_sim_credit(path=p, log=lambda *a: None)["outcome"] == "skipped_daily_cap"
