@@ -24,5 +24,6 @@ dist/
 # Agent runtime state (persisted via actions/cache, not committed)
 state.json
 token_ledger.json
+token_ledger_testnet.json
 flop_pacer.json
 flop_faucet.json

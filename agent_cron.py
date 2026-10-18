@@ -1468,6 +1468,24 @@ LEDGER_ENTRY_CAP = 500           # trần entries giữ TRÊN ĐĨA
 # Bản đẩy lên KV phải cắt mạnh; số dư / spent_cumulative / spent_by_day đều là TỔNG CHẠY
 # nên cắt log KHÔNG làm sai số liệu.
 KV_VALUE_MAX = 8192              # giới hạn cứng của service
+
+
+def _ledger_kv_key() -> str:
+    """Khoá KV của sổ cái THEO CHẾ ĐỘ: simulation giữ khoá cũ (không đụng dữ liệu đang có),
+    testnet dùng khoá riêng. Dùng chung một khoá thì ngày bật testnet, runner mới hydrate kéo
+    sổ MÔ PHỎNG về: số dư giả lọt qua kiểm số dư của spend() on-chain, phiên giả trộn vào
+    session_cumulative (thước đo được tính), và đếm ngày bắt đầu từ trước khi testnet tồn tại."""
+    import token_manager
+    mode = token_manager.ledger_mode()
+    return LEDGER_KV_KEY if mode == "simulation" else f"{LEDGER_KV_KEY}_{mode}"
+
+
+def _miner_stats_key() -> str:
+    """Độ phân tán thợ đào cũng tách theo chế độ: 83 phiên của thợ đào GIẢ sẽ pha loãng tỷ lệ
+    tập trung thật, khiến cảnh báo independent-demand không bao giờ bắn trên testnet."""
+    import token_manager
+    mode = token_manager.ledger_mode()
+    return "miner_stats" if mode == "simulation" else f"miner_stats_{mode}"
 LEDGER_KV_ENTRY_CAP = 20         # ~3.6KB, chừa dư địa cho phần còn lại
 
 
@@ -1500,7 +1518,7 @@ def hydrate_ledger_from_kv() -> None:
     """Kéo sổ cái token BỀN từ KV vào token_ledger.json TRƯỚC khi metering. Runner Actions xoá
     file mỗi run -> không hydrate thì sổ luôn rỗng = mất tích luỹ. Lấy bản KV nếu nó tích luỹ
     NHIỀU hơn (|balance| ≥ local) -> runner mới/cache mất không ghi đè bản đầy. Bọc kín."""
-    raw = kv_get(LEDGER_KV_KEY)
+    raw = kv_get(_ledger_kv_key())
     if not raw:
         return
     try:
@@ -1512,6 +1530,11 @@ def hydrate_ledger_from_kv() -> None:
         return
     try:
         import token_manager
+        # Chốt thứ hai: khoá đúng mà nội dung là sổ của CHẾ ĐỘ KHÁC thì vẫn không nạp.
+        if remote.get("mode") and remote.get("mode") != token_manager.ledger_mode():
+            print(f"[ledger] bỏ qua sổ KV chế độ {remote.get('mode')} "
+                  f"(đang chạy {token_manager.ledger_mode()})")
+            return
         local = token_manager.load_ledger()
         # CHẶT CHẼ (>) chứ không phải >=: hoà nhau thì GIỮ bản local. Bản local là bản vừa
         # được ghi trong run này, lấy bản KV khi hoà chỉ tạo thêm cơ hội tua ngược.
@@ -1617,7 +1640,7 @@ def persist_ledger_to_kv(private_key, did) -> None:
             print(f"[ledger] KHÔNG đẩy được lên KV — ngay cả bản không entries vẫn "
                   f"> {KV_VALUE_MAX} ký tự")
             return
-        if not kv_set(private_key, did, LEDGER_KV_KEY, body):
+        if not kv_set(private_key, did, _ledger_kv_key(), body):
             # Im lặng ở đây nghĩa là sổ cái NGỪNG BỀN mà không ai biết — đúng lỗi vừa rồi.
             print(f"[ledger] ⚠️ ĐẨY KV THẤT BẠI ({len(body)} ký tự) — sổ cái KHÔNG còn bền, "
                   "chi tiêu sẽ bị tua ngược ở run sau")
@@ -3563,7 +3586,7 @@ def main():
     # Độ phân tán thợ đào: bằng chứng "independent demand" chỉ có giá trị khi tích luỹ
     # qua nhiều ngày, nên phải bền qua run.
     _miner_stats.clear()
-    _miner_stats.update(state.get("miner_stats") or {})
+    _miner_stats.update(state.get(_miner_stats_key()) or {})
     now = int(time.time())
     # Run thủ công (workflow_dispatch) luôn phát để dễ kiểm chứng.
     force = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
@@ -4000,7 +4023,7 @@ def main():
                     _w = _fm.concentration_warning(_ms, MINER_CONC_WARN) if MINER_CONC_WARN > 0 else None
                     if _w:
                         print(f"[miners] ⚠️ {_w}")
-                    save_state({"miner_stats": _miner_stats})
+                    save_state({_miner_stats_key(): _miner_stats})
                 except Exception as e:
                     print(f"[miners] bỏ qua ({str(e)[:80]})")
             except Exception as e:

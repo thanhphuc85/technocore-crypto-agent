@@ -1482,6 +1482,87 @@ def test_hydrate_ledger_keeps_richer_local(tmp_path, monkeypatch):
     assert tm.check_balance() == "-5.0"                           # KHÔNG để KV nghèo ghi đè local đầy
 
 
+
+# ── sổ cái TÁCH THEO CHẾ ĐỘ: sổ mô phỏng không bao giờ rò sang testnet ─────────────────
+def _sim_ledger_payload():
+    return {"mode": "simulation", "balances": {"FLOP": "95.44"},
+            "entries": [{"kind": "spend", "token": "FLOP", "amount": "0.001", "ts": "x"}],
+            "spent_cumulative": {"FLOP": "95.6"}, "spend_count_cumulative": {"FLOP": 328},
+            "session_cumulative": {"FLOP": "0.0089"}, "session_count_cumulative": {"FLOP": 9},
+            "first_spend_day": "2026-10-17"}
+
+
+def test_ledger_and_miner_keys_split_by_mode(monkeypatch):
+    monkeypatch.delenv("TESTNET_ENABLED", raising=False)
+    assert ac._ledger_kv_key() == "token_ledger"            # khoá cũ giữ nguyên cho simulation
+    assert ac._miner_stats_key() == "miner_stats"
+    monkeypatch.setenv("TESTNET_ENABLED", "true")
+    assert ac._ledger_kv_key() == "token_ledger_testnet"
+    assert ac._miner_stats_key() == "miner_stats_testnet"
+
+
+def test_ledger_path_split_by_mode(monkeypatch):
+    import token_manager as tm
+    monkeypatch.delenv("TOKEN_LEDGER_FILE", raising=False)
+    monkeypatch.delenv("TESTNET_ENABLED", raising=False)
+    assert tm.ledger_path() == "token_ledger.json"
+    monkeypatch.setenv("TESTNET_ENABLED", "true")
+    assert tm.ledger_path() == "token_ledger_testnet.json"
+    monkeypatch.setenv("TOKEN_LEDGER_FILE", "x.json")         # override vẫn thắng
+    assert tm.ledger_path() == "x.json"
+
+
+def test_flip_day_simulation_ledger_never_reaches_testnet(tmp_path, monkeypatch):
+    # Tái hiện ngày bật testnet: runner mới (file rỗng), KV chỉ có sổ MÔ PHỎNG 95 FLOP giả.
+    import token_manager as tm
+    monkeypatch.setenv("TOKEN_LEDGER_FILE", str(tmp_path / "led.json"))
+    store = {"token_ledger": json.dumps(_sim_ledger_payload())}
+    monkeypatch.setattr(ac, "kv_get", lambda k: store.get(k))
+    monkeypatch.setenv("TESTNET_ENABLED", "true")
+    monkeypatch.setenv("FLOP_RPC_URL", "http://testnet.invalid")
+    ac.hydrate_ledger_from_kv()
+    led = tm.load_ledger()
+    assert led["balances"] == {}                               # không nạp số dư giả
+    assert not led.get("session_cumulative")                   # không nạp phiên giả
+    # Số dư giả KHÔNG còn cho phép một giao dịch on-chain đi qua.
+    r = tm.spend("0.001", "inference-session:flip", submit_tx=lambda tx: {"tx_hash": "0xF"},
+                 log=lambda *a: None)
+    assert r["outcome"] == "skipped_insufficient"
+
+
+def test_hydrate_rejects_other_mode_even_on_right_key(tmp_path, monkeypatch):
+    # Chốt thứ hai: khoá testnet nhưng nội dung ghi mode=simulation -> vẫn không nạp.
+    import token_manager as tm
+    monkeypatch.setenv("TOKEN_LEDGER_FILE", str(tmp_path / "led.json"))
+    monkeypatch.setenv("TESTNET_ENABLED", "true")
+    monkeypatch.setattr(ac, "kv_get", lambda k: json.dumps(_sim_ledger_payload()))
+    ac.hydrate_ledger_from_kv()
+    assert tm.load_ledger()["balances"] == {}
+
+
+def test_hydrate_same_mode_still_restores(tmp_path, monkeypatch):
+    # Không phá đường cũ: simulation vẫn hydrate sổ simulation bình thường.
+    import token_manager as tm
+    monkeypatch.setenv("TOKEN_LEDGER_FILE", str(tmp_path / "led.json"))
+    monkeypatch.delenv("TESTNET_ENABLED", raising=False)
+    monkeypatch.setattr(ac, "kv_get", lambda k: json.dumps(_sim_ledger_payload())
+                        if k == "token_ledger" else None)
+    ac.hydrate_ledger_from_kv()
+    assert tm.check_balance() == "95.44"
+
+
+def test_persist_testnet_writes_its_own_key(tmp_path, monkeypatch):
+    # Testnet không bao giờ ghi đè sổ mô phỏng trên KV (và ngược lại).
+    import token_manager as tm
+    monkeypatch.setenv("TOKEN_LEDGER_FILE", str(tmp_path / "led.json"))
+    monkeypatch.setenv("TESTNET_ENABLED", "true")
+    tm.save_ledger({"balances": {"FLOP": "1"}, "entries": []})
+    sent = {}
+    monkeypatch.setattr(ac, "kv_set", lambda pk, did, k, v: sent.update({k: v}) or True)
+    ac.persist_ledger_to_kv("pk", "did")
+    assert list(sent) == ["token_ledger_testnet"]
+    assert json.loads(sent["token_ledger_testnet"])["mode"] == "testnet"
+
 # --- Pacing/jitter + retry 429 cho đường ghi ---------------------------------------------
 def test_retry_after_seconds_header_body_default():
     class _H:

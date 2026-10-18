@@ -104,8 +104,13 @@ def default_token() -> str:
 
 
 def ledger_path(path: str = None) -> str:
-    """Đường dẫn file sổ cái (mặc định token_ledger.json; override TOKEN_LEDGER_FILE)."""
-    return path or os.environ.get("TOKEN_LEDGER_FILE", "").strip() or "token_ledger.json"
+    """Đường dẫn file sổ cái (mặc định token_ledger.json, testnet token_ledger_testnet.json;
+    override TOKEN_LEDGER_FILE). Tách file theo chế độ để sổ mô phỏng còn nằm trên đĩa không
+    bao giờ bị đọc như sổ testnet."""
+    override = path or os.environ.get("TOKEN_LEDGER_FILE", "").strip()
+    if override:
+        return override
+    return "token_ledger_testnet.json" if testnet_enabled() else "token_ledger.json"
 
 
 # --- Số học thập phân CHÍNH XÁC (Decimal -> không trôi số float ở mức 0.001) ------
