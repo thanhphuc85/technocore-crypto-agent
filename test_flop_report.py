@@ -80,8 +80,10 @@ def test_report_includes_counts_and_extras():
                            date_label="2026-10-17",
                            extras={"faucet": "1 claim", "session": "6 settled"})
     assert "2026-10-17" in txt
-    assert "chi 24h: 0.5 FLOP (1 lần)" in txt
-    assert "số dư: 99.5 FLOP" in txt
+    # Dòng dẫn đầu nay là THƯỚC ĐO THẬT (mua compute), không phải tổng chi gộp.
+    assert "MUA COMPUTE (được tính)" in txt
+    assert "ghi sổ LLM (KHÔNG tính): 0.5 FLOP" in txt
+    assert "số dư 99.5" in txt
     assert "faucet: 1 claim" in txt and "session: 6 settled" in txt
 
 
@@ -326,3 +328,62 @@ def test_days_left_never_goes_negative():
     led["first_spend_day"] = _days_ago(200)
     p = fr.projection(led, NOW, horizon_days=90)
     assert p["day_index"] == 201 and p["days_left"] == 0
+
+
+# --- tach CHI PHIEN (duoc tinh) khoi metering (khong tinh) ---------------------------
+
+def _led_sess(sess, sess_n, total, by_day=None, sess_by_day=None, bal="50000"):
+    d = {"balances": {"FLOP": bal},
+         "spent_cumulative": {"FLOP": total}, "spend_count_cumulative": {"FLOP": 3000},
+         "session_cumulative": {"FLOP": sess}, "session_count_cumulative": {"FLOP": sess_n},
+         "entries": []}
+    if by_day is not None:
+        d["spent_by_day"] = {"FLOP": by_day}
+    if sess_by_day is not None:
+        d["session_by_day"] = {"FLOP": sess_by_day}
+    return d
+
+
+def test_summary_separates_session_spend_from_metering():
+    """Thước đo airdrop CHỈ là 'compute purchased in settled sessions'."""
+    today = time.strftime("%Y-%m-%d", time.gmtime(NOW))
+    s = fr.summarize(_led_sess("287000", 2870, "320000",
+                               sess_by_day={today: "99000"}), NOW)
+    assert s["session_total"] == "287000" and s["session_count"] == 2870
+    assert s["session_today"] == "99000"
+    assert s["spent_total"] == "320000"            # tổng gộp vẫn có, nhưng là phụ
+
+
+def test_report_leads_with_the_metric_that_counts():
+    today = time.strftime("%Y-%m-%d", time.gmtime(NOW))
+    txt = fr.format_report(fr.summarize(_led_sess("287000", 2870, "320000",
+                                                  sess_by_day={today: "99000"}),
+                                        NOW, mode="testnet"))
+    first = txt.split("\n")[1]
+    assert "MUA COMPUTE (được tính)" in first and "287,000" in first
+    assert "KHÔNG tính" in txt and "320,000" in txt     # metering vẫn hiện, nhưng gán nhãn
+
+
+def test_projection_uses_session_spend_not_total():
+    """Dự phóng 90 ngày phải theo con số ĐƯỢC TÍNH, không theo tổng gộp."""
+    d0, d1 = _days_ago(2), _days_ago(1)
+    led = _led_sess("200000", 2000, "320000",
+                    by_day={d0: "100000", d1: "100000"},
+                    sess_by_day={d0: "90000", d1: "90000"})
+    p = fr.projection(led, NOW, horizon_days=90)
+    assert p["avg_per_day"] == "90000" and p["projected"] == "8100000"
+    assert p["total_so_far"] == "200000"
+
+
+def test_projection_falls_back_to_total_for_legacy_ledgers():
+    d0 = _days_ago(1)
+    led = {"balances": {"FLOP": "1"}, "spent_cumulative": {"FLOP": "50"},
+           "spent_by_day": {"FLOP": {d0: "25"}}, "entries": []}
+    p = fr.projection(led, NOW, horizon_days=10)
+    assert p["avg_per_day"] == "25" and p["total_so_far"] == "50"
+
+
+def test_session_fields_default_to_zero_when_absent():
+    s = fr.summarize({"balances": {}, "entries": []}, NOW)
+    assert s["session_total"] == "0" and s["session_count"] == 0
+    assert s["session_today"] == "0"

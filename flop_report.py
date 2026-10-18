@@ -95,6 +95,20 @@ def summarize(ledger, now: int, token: str = "FLOP", window_s: int = WINDOW_S,
             out["credit_count"] += 1
     # TỔNG CHẠY thắng log: bản publish cắt entries còn 20, nên cộng từ entries sẽ hụt
     # hàng chục lần. Chỉ rơi về entries khi sổ cái chưa có tổng chạy (bản cũ).
+    # THƯỚC ĐO AIRDROP: chỉ "compute purchased in settled sessions" được tính.
+    # Metering (phí ghi sổ cho một lần gọi LLM) KHÔNG tính — tách ra để không tự
+    # đánh lừa mình bằng con số gộp suốt 90 ngày.
+    sc = led.get("session_cumulative")
+    out["session_total"] = _fmt(_dec(sc.get(token)) if isinstance(sc, dict) else Decimal(0))
+    scc = led.get("session_count_cumulative")
+    try:
+        out["session_count"] = int(scc.get(token, 0)) if isinstance(scc, dict) else 0
+    except (TypeError, ValueError):
+        out["session_count"] = 0
+    sbd = led.get("session_by_day")
+    sbd = sbd.get(token) if isinstance(sbd, dict) else None
+    today_key = time.strftime("%Y-%m-%d", time.gmtime(int(now)))
+    out["session_today"] = _fmt(_dec(sbd.get(today_key)) if isinstance(sbd, dict) else Decimal(0))
     cum = _dec((led.get("spent_cumulative") or {}).get(token)) if isinstance(
         led.get("spent_cumulative"), dict) else Decimal(0)
     if cum > 0:
@@ -172,12 +186,14 @@ def projection(ledger, now: int, token: str = "FLOP", horizon_days: int = TESTNE
     Nhịp lấy từ các NGÀY ĐÃ TRỌN trong `spent_by_day` (bỏ hôm nay — ngày dở dang kéo tụt
     trung bình). Chưa có ngày trọn nào -> suy từ nhịp hôm nay chia cho phần ngày đã trôi."""
     led = ledger if isinstance(ledger, dict) else {}
-    by = led.get("spent_by_day")
+    # Dự phóng theo THƯỚC ĐO THẬT: chi cho phiên đã settle. Rơi về tổng chi chỉ khi sổ
+    # cái chưa tách (bản cũ) — dự phóng bằng con số không được tính là tự lừa mình.
+    by = led.get("session_by_day") or led.get("spent_by_day")
     by = by.get(token) if isinstance(by, dict) else None
     by = by if isinstance(by, dict) else {}
     today = time.strftime("%Y-%m-%d", time.gmtime(int(now)))
     done = {d: _dec(v) for d, v in by.items() if d != today}
-    cum = led.get("spent_cumulative")
+    cum = led.get("session_cumulative") or led.get("spent_cumulative")
     total = _dec(cum.get(token)) if isinstance(cum, dict) else Decimal(0)
     out = {"days": len(done), "avg_per_day": None, "basis": "",
            "total_so_far": _fmt(total), "projected": None,
@@ -262,11 +278,12 @@ def format_report(s: dict, *, date_label: str = None, extras: dict = None,
         head += f"  [{s.get('mode', '?')} — KHÔNG phải chi tiêu thật]"
     lines = [
         head,
-        f"chi 24h: {s.get('spent', '0')} {tok} ({s.get('spend_count', 0)} lần)",
-        f"nạp 24h: {s.get('credited', '0')} {tok} ({s.get('credit_count', 0)} lần)",
-        f"số dư: {s.get('balance', '0')} {tok}",
-        f"tổng đã chi: {_grp(s.get('spent_total', '0'))} {tok} "
+        f"◆ MUA COMPUTE (được tính): {_grp(s.get('session_total', '0'))} {tok} "
+        f"· {s.get('session_count', 0)} phiên · hôm nay +{_grp(s.get('session_today', '0'))}",
+        f"ghi sổ LLM (KHÔNG tính): {_grp(s.get('spent_total', '0'))} {tok} "
         f"({s.get('spend_count_total', 0)} lần)",
+        f"nạp 24h: {s.get('credited', '0')} {tok} ({s.get('credit_count', 0)} lần) "
+        f"· số dư {s.get('balance', '0')}",
     ]
     h = spend_health(s, pacing)
     if h["idle_warn"]:

@@ -219,6 +219,35 @@ def _unlock_state(state: dict) -> dict:
 DAY_KEEP = 7                 # giữ 7 ngày gần nhất (đủ cho pacer + báo cáo), chặn phình
 
 
+SESSION_MEMO_PREFIX = "inference-session"   # chi cho MỘT phiên inference đã settle
+
+
+def is_session_spend(memo) -> bool:
+    """True nếu lần chi này là MUA COMPUTE trong một phiên đã settle.
+
+    Vì sao phải tách: thước đo airdrop của agent là "compute purchased in settled
+    sessions" — CHỈ cái này. Metering (ghi sổ phí một lần gọi LLM) KHÔNG được tính.
+    Đo gộp hai thứ là tự đánh lừa mình suốt 90 ngày bằng con số sai."""
+    return str(memo or "").startswith(SESSION_MEMO_PREFIX)
+
+
+def _accrue_session(state: dict, token: str, amount: Decimal, now: int = None) -> None:
+    """Tổng chạy RIÊNG cho chi tiêu phiên — thước đo thật, tách khỏi metering."""
+    now = int(now if now is not None else time.time())
+    day = time.strftime("%Y-%m-%d", time.gmtime(now))
+    cm = state.setdefault("session_cumulative", {})
+    cm[token] = _fmt((_parse_amount(cm.get(token, "0")) or Decimal(0)) + amount)
+    cc = state.setdefault("session_count_cumulative", {})
+    try:
+        cc[token] = int(cc.get(token, 0)) + 1
+    except (TypeError, ValueError):
+        cc[token] = 1
+    by = state.setdefault("session_by_day", {}).setdefault(token, {})
+    by[day] = _fmt((_parse_amount(by.get(day, "0")) or Decimal(0)) + amount)
+    for d in sorted(by)[:-DAY_KEEP]:
+        by.pop(d, None)
+
+
 def _accrue_day(state: dict, token: str, amount: Decimal, now: int = None) -> None:
     """Cộng dồn chi theo NGÀY UTC vào `spent_by_day`: {token: {'YYYY-MM-DD': tổng}}.
 
@@ -460,6 +489,8 @@ def spend(amount, memo, token: str = None, *, path: str = None,
         _accrue_unlock(state, token, amt)     # chi testnet THẬT -> tăng quyền mở khóa 3:1
         _accrue_cumulative(state, token, amt)  # mốc CHỈ TĂNG -> hydrate chọn đúng bản
         _accrue_day(state, token, amt)         # tổng theo ngày -> pacer không cần entries
+        if is_session_spend(memo):             # thước đo airdrop THẬT
+            _accrue_session(state, token, amt)
         _save_ledger(state, path)
         short = (tx_hash or "")[:12]
         log(f"[ledger] spent {_fmt(amt)} {token} for {memo} (tx {short}…)")
@@ -476,6 +507,8 @@ def spend(amount, memo, token: str = None, *, path: str = None,
     })
     _accrue_cumulative(state, token, amt)      # mốc CHỈ TĂNG -> hydrate chọn đúng bản
     _accrue_day(state, token, amt)             # tổng theo ngày -> pacer không cần entries
+    if is_session_spend(memo):                 # thước đo airdrop THẬT
+        _accrue_session(state, token, amt)
     _save_ledger(state, path)
     log(f"[SIMULATION] Spent {_fmt(amt)} MOCK_{token} for {memo}")
     return {**base, "outcome": "spent_simulated", "balance_after": new_bal,

@@ -527,3 +527,25 @@ def test_sim_credit_daily_cap_is_tunable(tmp_path, monkeypatch):
         assert tm.maybe_sim_credit(path=p, log=lambda *a: None)["outcome"] == "credited"
         tm.spend("10", memo="x", path=p)
     assert tm.maybe_sim_credit(path=p, log=lambda *a: None)["outcome"] == "skipped_daily_cap"
+
+
+def test_session_spend_tracked_separately_from_metering(tmp_path, monkeypatch):
+    """Chỉ chi cho phiên đã settle mới vào bộ đếm thước-đo."""
+    monkeypatch.setenv("FLOP_METER_ENABLED", "on")
+    p = str(tmp_path / "l.json")
+    tm.credit("100", memo="seed", path=p)
+    tm.spend("0.001", memo="gemini kibble:explain", path=p)
+    tm.spend("0.05", memo="inference-session:abc", path=p)
+    tm.spend("0.001", memo="gemini tclk-work", path=p)
+    tm.spend("0.05", memo="inference-session:def", path=p)
+    d = tm.load_ledger(p)
+    assert d["spent_cumulative"]["FLOP"] == "0.102"        # gộp cả hai
+    assert d["session_cumulative"]["FLOP"] == "0.1"        # CHỈ phiên
+    assert d["session_count_cumulative"]["FLOP"] == 2
+    assert list(d["session_by_day"]["FLOP"].values()) == ["0.1"]
+
+
+def test_is_session_spend_matches_only_the_session_memo():
+    assert tm.is_session_spend("inference-session:abc") is True
+    for other in ("gemini kibble:explain", "gemini tclk-work", "faucet", "", None):
+        assert tm.is_session_spend(other) is False
