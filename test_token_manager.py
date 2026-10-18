@@ -443,3 +443,48 @@ def test_first_spend_day_is_set_once_and_never_moves(tmp_path):
     assert first == _t.strftime("%Y-%m-%d", _t.gmtime())
     tm.spend("1", memo="x", path=p)
     assert tm.load_ledger(p)["first_spend_day"] == first      # không đổi
+
+
+def test_first_spend_day_repairs_a_null_from_an_old_publish(tmp_path):
+    """Bản publish trước #137 ghi `first_spend_day: null`. setdefault KHÔNG sửa được khoá
+    đã tồn tại, nên None nằm lại vĩnh viễn — production đúng như vậy."""
+    p = str(tmp_path / "l.json")
+    tm.save_ledger({"balances": {"FLOP": "100"}, "entries": [], "first_spend_day": None,
+                    "spent_by_day": {"FLOP": {"2026-10-17": "90.9"}}}, p)
+    tm.spend("1", memo="x", path=p)
+    assert tm.load_ledger(p)["first_spend_day"] == "2026-10-17"   # lấy ngày SỚM NHẤT đã biết
+
+
+def test_first_spend_day_defaults_to_today_when_nothing_known(tmp_path):
+    import time as _t
+    p = str(tmp_path / "l.json")
+    tm.credit("100", memo="seed", path=p)
+    tm.spend("1", memo="x", path=p)
+    assert tm.load_ledger(p)["first_spend_day"] == _t.strftime("%Y-%m-%d", _t.gmtime())
+
+
+def test_sim_credit_refills_when_only_dust_is_left(tmp_path, monkeypatch):
+    """Qua nửa đêm ví còn 0.205 bụi: '> 0' nên KHÔNG bao giờ nạp lại, ngân sách ngày mới teo."""
+    monkeypatch.setenv("FLOP_SIM_CREDIT", "100")
+    monkeypatch.delenv("TESTNET_ENABLED", raising=False)
+    p = str(tmp_path / "l.json")
+    tm.save_ledger({"balances": {"FLOP": "0.205"}, "entries": []}, p)
+    assert tm.maybe_sim_credit(path=p, log=lambda *a: None)["outcome"] == "credited"
+    assert Decimal(tm.check_balance(path=p)) > Decimal("100")
+
+
+def test_sim_credit_still_refuses_a_funded_wallet(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLOP_SIM_CREDIT", "100")
+    monkeypatch.delenv("TESTNET_ENABLED", raising=False)
+    p = str(tmp_path / "l.json")
+    tm.save_ledger({"balances": {"FLOP": "50"}, "entries": []}, p)
+    assert tm.maybe_sim_credit(path=p)["outcome"] == "skipped_has_balance"
+
+
+def test_sim_credit_threshold_is_tunable(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLOP_SIM_CREDIT", "100")
+    monkeypatch.setenv("FLOP_SIM_CREDIT_BELOW", "40")
+    monkeypatch.delenv("TESTNET_ENABLED", raising=False)
+    p = str(tmp_path / "l.json")
+    tm.save_ledger({"balances": {"FLOP": "30"}, "entries": []}, p)
+    assert tm.maybe_sim_credit(path=p, log=lambda *a: None)["outcome"] == "credited"

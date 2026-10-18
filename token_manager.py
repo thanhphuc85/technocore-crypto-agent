@@ -229,9 +229,16 @@ def _accrue_day(state: dict, token: str, amount: Decimal, now: int = None) -> No
     day = time.strftime("%Y-%m-%d", time.gmtime(now))
     # Ngày chi ĐẦU TIÊN — đặt một lần, không bao giờ đổi. Cần nó để biết "đang ở ngày
     # thứ mấy của kỳ": spent_by_day chỉ giữ 7 ngày nên không suy ngược ra được.
-    state.setdefault("first_spend_day", day)
+    # KHÔNG dùng setdefault: bản publish trước đó đã ghi khoá này với giá trị None
+    # (payload luôn kèm `first_spend_day`), mà setdefault chỉ đặt khi khoá VẮNG — nên
+    # None sẽ nằm lại vĩnh viễn và không bao giờ đếm được "ngày thứ mấy".
     by = state.setdefault("spent_by_day", {})
     tok = by.setdefault(token, {})
+    if not state.get("first_spend_day"):
+        # TỰ CHỮA: lấy ngày SỚM NHẤT đã biết thay vì mặc định hôm nay, để sổ cái đã mất
+        # khoá này (bản publish cũ ghi None) không bị gán nhầm ngày bắt đầu muộn hơn.
+        known = sorted(d for d in tok if isinstance(d, str))
+        state["first_spend_day"] = known[0] if known else day
     prev = _parse_amount(tok.get(day, "0")) or Decimal(0)
     tok[day] = _fmt(prev + amount)
     for d in sorted(tok)[:-DAY_KEEP]:        # chỉ giữ DAY_KEEP ngày gần nhất
@@ -595,8 +602,15 @@ def maybe_sim_credit(path: str = None, log=print) -> dict:
         return {"outcome": "skipped_bad_amount", "reason": f"FLOP_SIM_CREDIT không hợp lệ: {raw!r}"}
     token = default_token()
     cur = _parse_amount(check_balance(token, path)) or Decimal(0)
-    if cur > 0:
-        return {"outcome": "skipped_has_balance", "reason": f"số dư {_fmt(cur)} > 0"}
+    # Nạp khi số dư TỤT DƯỚI NGƯỠNG, không phải khi bằng đúng 0. Qua mốc nửa đêm ví còn
+    # 0.205 FLOP bụi — "> 0" nên không bao giờ nạp lại, và ngân sách ngày mới teo theo
+    # (budget = số dư + đã chi hôm nay). Mặc định ngưỡng = 1% lượng nạp.
+    below = _parse_amount(os.environ.get("FLOP_SIM_CREDIT_BELOW", "").strip())
+    if below is None or below < 0:
+        below = amt / Decimal(100)
+    if cur > below:
+        return {"outcome": "skipped_has_balance",
+                "reason": f"số dư {_fmt(cur)} > ngưỡng {_fmt(below)}"}
     res = credit(amt, token=token, memo="SIMULATION seed (khong phai faucet that)", path=path)
     if res.get("ok"):
         log(f"[sim-credit] nạp hạt giống MÔ PHỎNG {_fmt(amt)} {token} "
