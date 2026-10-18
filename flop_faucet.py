@@ -24,6 +24,7 @@ Env:
   FLOP_FAUCET_JITTER_MIN    (chống sybil) cộng thêm 0..N phút ngẫu nhiên vào cooldown để
                             claim KHÔNG rơi đúng ranh giới cooldown (dấu hiệu bot 24/7).
                             Offset ổn định trong 1 chu kỳ (seed theo mốc claim trước).
+                            Rỗng -> MẶC ĐỊNH 30; đặt 0 -> tắt.
   FLOP_FAUCET_MAX_PER_DAY   (chống sybil) trần số claim mỗi ngày UTC; chạm trần ->
                             skipped_daily_cap. Rỗng -> không giới hạn.
 """
@@ -81,9 +82,17 @@ def _day(now: int) -> str:
     return time.strftime("%Y-%m-%d", time.gmtime(now))
 
 
+DEFAULT_JITTER_MIN = 30.0
+
+
 def jitter_minutes() -> float:
+    """Rỗng -> MẶC ĐỊNH 30 phút: không có nó, mọi fork claim đúng cùng ranh giới cooldown
+    mỗi ngày — một nhịp chung, đúng kiểu dấu hiệu "common control". 0 -> tắt tường minh."""
+    raw = os.environ.get("FLOP_FAUCET_JITTER_MIN", "").strip()
+    if not raw:
+        return DEFAULT_JITTER_MIN
     try:
-        v = float(os.environ.get("FLOP_FAUCET_JITTER_MIN", "").strip() or 0)
+        v = float(raw)
         return v if v > 0 else 0.0
     except ValueError:
         return 0.0

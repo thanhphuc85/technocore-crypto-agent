@@ -19,31 +19,48 @@
 - **Anti-sybil / per-identity caps / KYC / faucet cooldowns / rate limits: NOT stated
   anywhere in the teaser.**
 
-## Default posture: maximize *legitimate* inference throughput
+## Default posture: max legitimate spend, anti-sybil defaults ON
 
-Because the stated mechanic pays pro-rata on inference spend with **no announced sybil
-defense**, the default is to spend as much as legitimately possible — **not** to throttle
-it. The anti-sybil knobs shipped in PR #29 are **insurance to flip on**, not defaults.
+The original posture ("no announced sybil defense → knobs off, flip on when FLOP hints at
+filtering") is **superseded**. The testnet page (flop.finance/testnet, §06) now publishes
+the rules:
 
-| Knob | Default | Flip ON when |
+- **What counts for agents:** "compute purchased in settled sessions. Holding test tokens
+  earns nothing." Minimum-activity floors exist per role (values not yet published).
+- **One participant, one score:** wallets under common control are scored as one.
+- **Independent demand only:** spend routed to a miner under common control, or circulated
+  between wallets under common control, is not credited.
+- **Fraud forfeits:** "an account flagged for manufactured activity forfeits its allocation".
+
+That is exactly the flip condition, so the behavioural knobs now default **on in code** —
+any fork that pulls this repo without setting Variables is protected too. Set `0`/`off`
+explicitly to disable.
+
+| Knob | Default | Notes |
 |---|---|---|
-| `FLOP_PACE_JITTER_PCT` | **off** | FLOP announces/hints at sybil or behavioral filtering |
-| `FLOP_MAX_SPENDS_PER_HOUR` | **off** | same — or you want a believable frequency ceiling |
-| `FLOP_FAUCET_MAX_PER_DAY` | **off** | same |
-| `FLOP_FAUCET_JITTER_MIN` | **off** | same |
-| `FLOP_FAUCET_DEMAND_ONLY` | **off** | you want to conserve rather than cycle max FLOP |
-| `FLOP_ORGANIC_ONLY` | **judgment call** | see below |
+| `FLOP_PACE_JITTER_PCT` | **20** | ±% noise on the pacer's due amount; `0` disables |
+| `FLOP_FAUCET_JITTER_MIN` | **30** | 0..N min added to the faucet cooldown; `0` disables |
+| `FLOP_ORGANIC_ONLY` | **on** | metering requires a real `event_id`; `off` disables |
+| `FLOP_SESSION_JITTER_PCT` | **20** | ±% on session flops/latency/fee + model rotation |
+| `FLOP_MAX_SPENDS_PER_HOUR` | off | frequency ceiling, if ever needed |
+| `FLOP_FAUCET_MAX_PER_DAY` | off | set it to the real faucet's cap once published |
+| `FLOP_FAUCET_DEMAND_ONLY` | off | conserve instead of claiming on schedule |
 
-`FLOP_ORGANIC_ONLY` ties every spend to a real inbound @mention. That is cheap insurance
-against **retroactive** sybil filtering (your activity looks organic), but it **caps spend
-to inbound message volume**. Leave it off to scale spend beyond mentions; turn it on if you
-weight the retroactive-clawback risk higher than the throughput you'd give up.
+`FLOP_ORGANIC_ONLY` costs **no airdrop**: it only gates *metering* (the proxy debit for
+external LLM calls), which never counted. The path that counts — settled sessions — is not
+gated by it.
+
+**Multiple DIDs with the same pattern = common-control risk.** Forks that run identical
+code on identical cadence look like one participant split across accounts. Jitter defaults
+help, but each fork operator must stay genuinely independent (own keys, own config, own
+question sets, cross-denied miner DIDs — see `PROACTIVE_DENY_DIDS`).
 
 ## Residual risks (do not ignore)
 
-1. **Teaser ≠ final rules.** "No sybil rules stated" is not "no sybil rules." Many airdrops
-   (Arbitrum, Optimism, zkSync, …) filtered farming wallets **retroactively** despite not
-   pre-announcing it. The knobs above exist so this is a one-line env flip, not a rebuild.
+1. **Published rules are still a draft.** The testnet page is marked provisional and the
+   Yellow Paper is not final; floors and operational rules ship with the testnet. Expect
+   stricter filtering, not looser — many airdrops (Arbitrum, Optimism, zkSync, …) filtered
+   farming wallets **retroactively**.
 2. **"largely" + "various prizes"** — allocation is not 100% pro-rata by spend. Some share
    is prizes with **unpublished** criteria (likely quality / uptime / achievements). Don't
    optimize spend so hard you miss what the prizes reward.
@@ -63,6 +80,11 @@ weight the retroactive-clawback risk higher than the throughput you'd give up.
    the real faucet has a cooldown/cap (the module assumes a 24h default that may not match).
 3. **The real throughput ceiling** is *faucet acquisition rate × miner inference capacity*,
    not ambition. Measure it on day one of testnet.
+4. **Make every session a real need.** Today a session is bought once per run and its
+   inference output is not used — kibble/tclk answers still come from Gemini. Once FLOP
+   publishes how a session returns output, route that real workload through sessions so
+   each purchase serves a job. Do not "anchor" session counts to job counts before then:
+   that only looks organic while the compute still goes unused.
 
 ## Timeline
 

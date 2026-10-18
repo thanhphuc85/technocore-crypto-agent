@@ -18,7 +18,7 @@ Env:
   FLOP_PACER_FILE     nơi lưu nhịp chi trong ngày (mặc định flop_pacer.json).
   FLOP_PACE_JITTER_PCT  (chống sybil) nhiễu ngẫu nhiên ±X% quanh lượng đến hạn, để nhịp
                         chi KHÔNG rơi đúng mục tiêu tuyến tính tất định (dấu hiệu bot).
-                        Rỗng/0 -> tắt (nhịp tuyến tính như cũ). Kẹp về [0,100].
+                        Rỗng -> MẶC ĐỊNH 20; đặt 0 -> tắt (nhịp tuyến tính). Kẹp [0,100].
 """
 
 import os
@@ -94,10 +94,17 @@ def min_spend() -> Decimal:
     return d if (d is not None and d > 0) else Decimal("0.0001")
 
 
+DEFAULT_JITTER_PCT = Decimal(20)
+
+
 def jitter_pct() -> Decimal:
-    """Biên nhiễu ±X% cho nhịp chi (chống "chi đúng mục tiêu = bot"). Rỗng/không
-    dương -> 0 (tắt). Kẹp trần 100 để jitter không lật dấu lượng chi."""
-    d = _dec(os.environ.get("FLOP_PACE_JITTER_PCT", ""))
+    """Biên nhiễu ±X% cho nhịp chi (chống "chi đúng mục tiêu = bot"). Rỗng -> MẶC ĐỊNH
+    20 (FLOP đã công bố phạt "manufactured activity"); 0/âm -> tắt tường minh. Kẹp trần
+    100 để jitter không lật dấu lượng chi."""
+    raw = os.environ.get("FLOP_PACE_JITTER_PCT", "").strip()
+    if not raw:
+        return DEFAULT_JITTER_PCT
+    d = _dec(raw)
     if d is None or d <= 0:
         return Decimal(0)
     return d if d <= 100 else Decimal(100)

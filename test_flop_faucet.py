@@ -13,9 +13,9 @@ def _clean_env(monkeypatch):
     for k in ("FLOP_FAUCET_ENABLED", "FLOP_FAUCET_URL", "FLOP_FAUCET_AMOUNT",
               "FLOP_FAUCET_COOLDOWN_HOURS", "FLOP_FAUCET_REFILL_BELOW",
               "FLOP_FAUCET_STATE", "TESTNET_ENABLED", "FLOP_TOKEN_SYMBOL",
-              "FLOP_FAUCET_DEMAND_ONLY", "FLOP_FAUCET_JITTER_MIN",
-              "FLOP_FAUCET_MAX_PER_DAY"):
+              "FLOP_FAUCET_DEMAND_ONLY", "FLOP_FAUCET_MAX_PER_DAY"):
         monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("FLOP_FAUCET_JITTER_MIN", "0")    # tắt tường minh: test cần tất định
 
 
 @pytest.fixture
@@ -162,3 +162,10 @@ def test_daily_cap_resets_next_day(paths, monkeypatch):
     assert ff.run_faucet_cycle(claim_fn=CLAIM_OK, now=day1, **paths)["outcome"] == "skipped_daily_cap"
     day2 = day1 + 86_400                                    # +24h -> ngày UTC khác -> reset
     assert ff.run_faucet_cycle(claim_fn=CLAIM_OK, now=day2, **paths)["outcome"] == "claimed"
+
+
+def test_faucet_jitter_on_by_default_and_explicit_zero_disables(monkeypatch):
+    monkeypatch.delenv("FLOP_FAUCET_JITTER_MIN", raising=False)  # vắng biến = 30 phút
+    assert ff.jitter_minutes() == 30.0
+    monkeypatch.setenv("FLOP_FAUCET_JITTER_MIN", "0")
+    assert ff.jitter_minutes() == 0.0

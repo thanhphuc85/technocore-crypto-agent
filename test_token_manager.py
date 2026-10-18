@@ -19,8 +19,9 @@ def _clean_env(monkeypatch):
     """Mỗi test khởi đầu ở simulation, không dính env FLOP_/TESTNET_ của máy chạy."""
     for k in ("TESTNET_ENABLED", "FLOP_RPC_URL", "FLOP_SUBMIT_URL", "FLOP_TX_MODE",
               "FLOP_TOKEN_SYMBOL", "TOKEN_LEDGER_FILE", "FLOP_METER_ENABLED",
-              "FLOP_INFERENCE_COST", "FLOP_ORGANIC_ONLY", "FLOP_MAX_SPENDS_PER_HOUR"):
+              "FLOP_INFERENCE_COST", "FLOP_MAX_SPENDS_PER_HOUR"):
         monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("FLOP_ORGANIC_ONLY", "off")       # tắt tường minh; test riêng bật lại
 
 
 @pytest.fixture
@@ -549,3 +550,18 @@ def test_is_session_spend_matches_only_the_session_memo():
     assert tm.is_session_spend("inference-session:abc") is True
     for other in ("gemini kibble:explain", "gemini tclk-work", "faucet", "", None):
         assert tm.is_session_spend(other) is False
+
+
+# --- Mặc định BẬT: fork không đặt Variable vẫn được bảo vệ -------------------------
+def test_organic_only_on_by_default(ledger, monkeypatch):
+    monkeypatch.delenv("FLOP_ORGANIC_ONLY", raising=False)   # vắng biến = BẬT
+    assert tm.organic_only() is True
+    tm.credit("1", path=ledger)
+    monkeypatch.setenv("FLOP_METER_ENABLED", "true")
+    assert tm.meter_inference(path=ledger)["outcome"] == "skipped_synthetic"
+
+
+def test_organic_only_explicit_off(monkeypatch):
+    for v in ("0", "false", "off", "no", "OFF"):
+        monkeypatch.setenv("FLOP_ORGANIC_ONLY", v)
+        assert tm.organic_only() is False

@@ -57,6 +57,14 @@ def _env_flag(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "on", "yes")
 
 
+def organic_only() -> bool:
+    """FLOP_ORGANIC_ONLY — MẶC ĐỊNH BẬT: chỉ chi khi lần suy luận gắn một sự kiện thật.
+    Chỉ tắt khi đặt tường minh 0/false/off/no. Từng mặc định tắt ("bảo hiểm, bật khi FLOP
+    công bố lọc hành vi") — FLOP đã công bố: "an account flagged for manufactured activity
+    forfeits its allocation". Fork không đặt Variable giờ cũng được bảo vệ."""
+    return os.environ.get("FLOP_ORGANIC_ONLY", "").strip().lower() not in ("0", "false", "off", "no")
+
+
 def testnet_enabled() -> bool:
     """Công tắc dry-run: bật giao dịch testnet THẬT khi TESTNET_ENABLED=true."""
     return _env_flag("TESTNET_ENABLED")
@@ -687,7 +695,7 @@ def meter_inference(amount: str = None, memo: str = "Gemini Inference",
     FLOP_INFERENCE_COST (mặc định 0.001). Bọc kín: mọi lỗi -> {'outcome':'skipped_off'}
     để không bao giờ làm sập luồng trả lời của agent.
 
-    Bất biến CHỐNG SYBIL (tùy chọn): khi FLOP_ORGANIC_ONLY bật, chỉ chi khi có
+    Bất biến CHỐNG SYBIL (mặc định BẬT, xem organic_only()): khi FLOP_ORGANIC_ONLY bật, chỉ chi khi có
     `event_id` — dấu vết một sự kiện THẬT (tin nhắn user @mention) đã kích hoạt lần
     suy luận này. Thiếu event_id -> skipped_synthetic. Đây là bảo hiểm để KHÔNG ai
     (kể cả cấu hình sai) nối được một vòng lặp tự-gọi đốt token không gắn hoạt động
@@ -698,7 +706,7 @@ def meter_inference(amount: str = None, memo: str = "Gemini Inference",
     Chạm trần -> skipped_rate_cap (không chi)."""
     if not _env_flag("FLOP_METER_ENABLED"):
         return {"outcome": "skipped_off", "reason": "FLOP_METER_ENABLED tắt"}
-    if _env_flag("FLOP_ORGANIC_ONLY") and not (event_id and str(event_id).strip()):
+    if organic_only() and not (event_id and str(event_id).strip()):
         return {"outcome": "skipped_synthetic",
                 "reason": ("FLOP_ORGANIC_ONLY: từ chối chi cho inference không gắn sự kiện "
                            "thật (thiếu event_id) — chống burn-loop tổng hợp")}

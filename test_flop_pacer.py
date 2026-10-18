@@ -12,8 +12,9 @@ import flop_pacer as fp
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
     for k in ("FLOP_DAILY_BUDGET", "FLOP_MAX_PER_RUN", "FLOP_MIN_SPEND",
-              "FLOP_PACER_FILE", "FLOP_TOKEN_SYMBOL", "FLOP_PACE_JITTER_PCT"):
+              "FLOP_PACER_FILE", "FLOP_TOKEN_SYMBOL"):
         monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("FLOP_PACE_JITTER_PCT", "0")      # tắt tường minh: test cần tất định
 
 
 @pytest.fixture
@@ -287,3 +288,10 @@ def test_percent_cap_bounds_a_real_spend(tmp_path, monkeypatch):
     monkeypatch.setenv("FLOP_MAX_PER_RUN", "2%")
     due = fp.next_spend_amount(now=NOON, path=str(tmp_path / "p.json"))
     assert Decimal(due) == Decimal("2000")        # đến hạn 50.000 nhưng kẹp 2% = 2.000
+
+
+def test_jitter_on_by_default_and_explicit_zero_disables(monkeypatch):
+    monkeypatch.delenv("FLOP_PACE_JITTER_PCT", raising=False)  # vắng biến = 20%
+    assert fp.jitter_pct() == Decimal(20)
+    monkeypatch.setenv("FLOP_PACE_JITTER_PCT", "0")
+    assert fp.jitter_pct() == Decimal(0)
