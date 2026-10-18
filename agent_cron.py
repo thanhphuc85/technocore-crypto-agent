@@ -3914,67 +3914,6 @@ def main():
             sonnet_status = "error"
             print(f"[sonnet] bỏ qua ({str(e)[:100]})")
 
-    # 3a7) (Tùy chọn, GATED) OWNER cho contest "Close Call" của FLOP Labs
-    #      (technocore-close-call-challenge). Mặc định TẮT (CLOSE_CALL_ENABLED) -> agent
-    #      không đổi hành vi. Khi bật: đăng ký owner 1 LẦN (idempotent qua
-    #      state['close_call_registered']) -> sweep kế cấp 10,000 POLF. CHỈ đăng ký, KHÔNG
-    #      giao dịch. register là POST -> cùng health-guard đường ghi như kibble/sonnet. Bọc kín.
-    close_call_status = "off"
-    _cc_on = os.environ.get("CLOSE_CALL_ENABLED", "").strip().lower() in ("1", "true", "on", "yes")
-    if _cc_on and posts_degraded():
-        close_call_status = "skip-outage"
-        print(f"[close-call] bỏ qua — đường ghi lỗi (post ok={_post_ok_count} fail={_post_fail_count}).")
-    elif _cc_on:
-        try:
-            import flop_close_call
-            if state.get("close_call_registered"):
-                close_call_status = "already"
-            else:
-                r = flop_close_call.register_owner(private_key, did, post_fn=post_message)
-                close_call_status = r.get("outcome", "?")
-                if close_call_status == "registered":
-                    state["close_call_registered"] = True
-                    save_state({"close_call_registered": True})
-        except Exception as e:
-            close_call_status = "error"
-            print(f"[close-call] bỏ qua ({str(e)[:100]})")
-
-    # 3a8) (Tùy chọn, GATED riêng) GIAO DỊCH Close Call theo Ý ĐỊNH TƯỜNG MINH. Mặc định TẮT
-    #      (CLOSE_CALL_TRADE_ENABLED) + dry-run mặc định BẬT -> KHÔNG bao giờ tự đặt lệnh thật
-    #      tới khi operator cấu hình CLOSE_CALL_ORDER (maker) / CLOSE_CALL_ACCEPT (taker) và tắt
-    #      dry-run. KHÔNG tự đoán hướng NVDA (cược -EV nếu không có view). Bọc kín, health-guarded.
-    close_call_trade_status = "off"
-    _cct_on = os.environ.get("CLOSE_CALL_TRADE_ENABLED", "").strip().lower() in ("1", "true", "on", "yes")
-    if _cct_on and posts_degraded():
-        close_call_trade_status = "skip-outage"
-        print(f"[close-call-trade] bỏ qua — đường ghi lỗi (post ok={_post_ok_count} fail={_post_fail_count}).")
-    elif _cct_on:
-        try:
-            import flop_close_call
-            parts = []
-            if flop_close_call.order_spec():
-                r = flop_close_call.post_offer(private_key, did, post_fn=post_message)
-                parts.append(f"offer:{r.get('outcome', '?')}")
-            if flop_close_call.accept_id():
-                r = flop_close_call.take_offer(private_key, did, post_fn=post_message,
-                                               fetch_fn=fetch_messages)
-                parts.append(f"take:{r.get('outcome', '?')}")
-            # EXIT trước (TP/SL, cả long/short): chạm ngưỡng -> đóng vị thế và TẮT auto-take
-            _exit_triggered = False
-            if flop_close_call.tp_price() is not None or flop_close_call.sl_price() is not None:
-                r = flop_close_call.manage_exit(private_key, did, post_fn=post_message,
-                                                fetch_fn=fetch_messages, state=state, save=save_state)
-                _exit_triggered = bool(r.get("triggered"))
-                parts.append(f"exit:{r.get('outcome', '?')}{('/' + r['kind']) if r.get('kind') else ''}")
-            if flop_close_call.take_side() and not _exit_triggered:
-                r = flop_close_call.auto_take(private_key, did, post_fn=post_message,
-                                              fetch_fn=fetch_messages, state=state, save=save_state)
-                parts.append(f"auto:{r.get('outcome', '?')} {r.get('filled', '?')}/{r.get('target', '?')}")
-            close_call_trade_status = " ".join(parts) if parts else "no-intent"
-        except Exception as e:
-            close_call_trade_status = "error"
-            print(f"[close-call-trade] bỏ qua ({str(e)[:100]})")
-
     # 3a8c) (Tùy chọn, GATED) FAUCET testnet — xin test token để CÓ số dư mà chi vào settled
     #       inference (nguồn earn agent airdrop). Mặc định TẮT (FLOP_FAUCET_ENABLED) -> không đổi
     #       hành vi. Cần FLOP_FAUCET_URL thật; thiếu/không submit_fn -> skipped_unconfigured (KHÔNG
@@ -4145,7 +4084,6 @@ def main():
         f"- kibble: **{kibble_status}**",
         f"- tclk: **{tclk_status}** · complete: **{tclk_done_status}**",
         f"- sonnet: **{sonnet_status}**",
-        f"- close-call: **{close_call_status}** · trade: **{close_call_trade_status}**",
         f"- faucet: **{faucet_status}** · session: **{session_status}**",
         f"- replies: **{replies}** · proactive: **{proactive}**",
         f"- technocore.chat 200s: **{_server_ok_count}**",
@@ -4154,7 +4092,7 @@ def main():
           f"digest={digest_status} status_feed={status_feed_status} recap={recap_status} kibble={kibble_status} "
           f"kibble_req={kibble_req_status} "
           f"tclk={tclk_status} tclk_done={tclk_done_status} tclk_offer={tclk_offer_status} "
-          f"sonnet={sonnet_status} close_call={close_call_status} close_call_trade={close_call_trade_status} "
+          f"sonnet={sonnet_status} "
           f"faucet={faucet_status} session={session_status} "
           f"replies={replies} "
           f"proactive={proactive} server200s={_server_ok_count}")

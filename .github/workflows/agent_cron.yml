@@ -287,32 +287,6 @@ jobs:
           SONNET_CONTEST_ID: ${{ vars.SONNET_CONTEST_ID }}
           SONNET_BALLOT_ENTRY: ${{ vars.SONNET_BALLOT_ENTRY }}
           SONNET_REFEREE_DID: ${{ vars.SONNET_REFEREE_DID }}
-          # OWNER cho contest "Close Call" của FLOP Labs (mặc định TẮT). Đặt CLOSE_CALL_ENABLED=on
-          # -> agent đăng ký owner 1 LẦN vào room close1 (season close-1) rồi sweep kế cấp 10,000
-          # POLF. CHỈ đăng ký, KHÔNG giao dịch. season/room/referee/lock override qua CLOSE_CALL_*.
-          CLOSE_CALL_ENABLED: ${{ vars.CLOSE_CALL_ENABLED }}
-          CLOSE_CALL_SEASON: ${{ vars.CLOSE_CALL_SEASON }}
-          CLOSE_CALL_ROOM: ${{ vars.CLOSE_CALL_ROOM }}
-          CLOSE_CALL_REFEREE_DID: ${{ vars.CLOSE_CALL_REFEREE_DID }}
-          CLOSE_CALL_LOCK: ${{ vars.CLOSE_CALL_LOCK }}
-          # GIAO DỊCH Close Call (mặc định TẮT + dry-run BẬT). Đặt CLOSE_CALL_TRADE_ENABLED=on và
-          # CLOSE_CALL_ORDER='side,qty,px,until' (maker) hoặc CLOSE_CALL_ACCEPT=<offer id> (taker);
-          # tắt dry-run bằng CLOSE_CALL_TRADE_DRY_RUN=off khi muốn phát THẬT. Agent KHÔNG tự đoán hướng.
-          CLOSE_CALL_TRADE_ENABLED: ${{ vars.CLOSE_CALL_TRADE_ENABLED }}
-          CLOSE_CALL_TRADE_DRY_RUN: ${{ vars.CLOSE_CALL_TRADE_DRY_RUN }}
-          CLOSE_CALL_ORDER: ${{ vars.CLOSE_CALL_ORDER }}
-          CLOSE_CALL_ACCEPT: ${{ vars.CLOSE_CALL_ACCEPT }}
-          CLOSE_CALL_MAX_QTY: ${{ vars.CLOSE_CALL_MAX_QTY }}
-          # AUTO-TAKE: gom vị thế theo hướng tường minh. CLOSE_CALL_TAKE_SIDE=buy|sell (buy=long),
-          # CLOSE_CALL_TAKE_QTY=<tổng qty mục tiêu>, CLOSE_CALL_TAKE_MAX_PER_RUN=<trần khớp/run>.
-          CLOSE_CALL_TAKE_SIDE: ${{ vars.CLOSE_CALL_TAKE_SIDE }}
-          CLOSE_CALL_TAKE_QTY: ${{ vars.CLOSE_CALL_TAKE_QTY }}
-          CLOSE_CALL_TAKE_MAX_PER_RUN: ${{ vars.CLOSE_CALL_TAKE_MAX_PER_RUN }}
-          # EXIT (cả long lẫn short): chạm ngưỡng -> đóng TOÀN BỘ vị thế và tự tắt auto-take.
-          # TP (chốt lời): long đóng khi ref>=TP, short đóng khi ref<=TP.
-          # SL (cắt lỗ):   long đóng khi ref<=SL, short đóng khi ref>=SL. Ngưỡng của operator.
-          CLOSE_CALL_TP: ${{ vars.CLOSE_CALL_TP }}
-          CLOSE_CALL_SL: ${{ vars.CLOSE_CALL_SL }}
           # Câu hỏi nhập tay khi Run workflow (bỏ qua khi chạy theo cron)
           ASK: ${{ github.event.inputs.ask }}
         run: python agent_cron.py
