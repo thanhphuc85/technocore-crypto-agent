@@ -1486,17 +1486,26 @@ def tclk_do_work(meta: dict):
 # --- Heartbeat phối hợp runner CHÍNH/PHỤ (xem RUNNER_ROLE) ---
 def write_heartbeat(private_key, did, now: int) -> None:
     """Runner CHÍNH đóng dấu 'còn sống' lên KV để runner PHỤ biết đang được phủ sóng."""
-    kv_set(private_key, did, HEARTBEAT_KEY, str(now))
+    kv_set(private_key, did, HEARTBEAT_KEY,
+           _kv_seal(private_key, {"ts": int(now)}) if isinstance(private_key, Ed25519PrivateKey)
+           else str(now))
 
 
-def primary_alive(now: int, within_min: float) -> bool:
+def primary_alive(now: int, within_min: float, private_key=None) -> bool:
     """True nếu heartbeat của runner chính còn tươi (mới hơn within_min phút). Đọc lỗi /
-    chưa có heartbeat -> coi như chính KHÔNG sống (để phụ tiếp quản, fail-open về phía có
-    người trực)."""
+    chưa có heartbeat / không có chữ ký của agent -> coi như chính KHÔNG sống (để phụ tiếp
+    quản, fail-open về phía có người trực). KV world-writable: heartbeat giả không còn giữ
+    được runner phụ đứng im mãi."""
     raw = kv_get(HEARTBEAT_KEY)
     try:
-        last = int(raw)
-    except (TypeError, ValueError):
+        if isinstance(private_key, Ed25519PrivateKey):
+            body = _kv_open(raw, private_key)
+            last = int((body or {}).get("ts"))
+        else:
+            last = int(raw)
+    except (TypeError, ValueError, AttributeError):
+        return False
+    if last > now + _KV_FUTURE_SKEW:
         return False
     return (now - last) <= int(within_min * 60)
 
@@ -3695,7 +3704,7 @@ def _respond_room(private_key, did, room, messages, last_seq, state, now, my_nic
     return cursor
 
 
-def _load_room_cursors(state, multi):
+def _load_room_cursors(state, multi, private_key=None):
     """Cursor RIÊNG từng room. Ưu tiên state['cursors']; cache trống + ĐA ROOM -> KV note
     'cursors' (JSON). Migrate cursor 1-room cũ (state['last_seq']) -> cursors[ROOM] để không
     tụt lùi. `multi` False (1 room) -> KHÔNG đụng KV blob (giữ KV cũ chỉ 'cursor')."""
@@ -3704,7 +3713,8 @@ def _load_room_cursors(state, multi):
         raw = kv_get("cursors")
         if raw:
             try:
-                for k, v in json.loads(raw).items():
+                body = _kv_open(raw, private_key)       # chỉ nhận bản agent tự ký
+                for k, v in (body if isinstance(body, dict) else {}).items():
                     if str(v).lstrip("-").isdigit():
                         cursors[k] = int(v)
             except Exception:
@@ -3725,7 +3735,7 @@ def auto_respond(private_key, did):
     multi = len(rooms) > 1
     greeted = state.setdefault("greeted", [])
     caps = {"replies": 0, "proactive": 0}
-    cursors = _load_room_cursors(state, multi)
+    cursors = _load_room_cursors(state, multi, private_key)
     all_msgs = []
     any_fetched = False
 
@@ -3734,6 +3744,8 @@ def auto_respond(private_key, did):
         rc = cursors.get(room)
         if rc is None and is_primary:            # dự phòng cursor 1-room legacy trên KV
             kc = kv_get("cursor")
+            if isinstance(private_key, Ed25519PrivateKey):
+                kc = str((_kv_open(kc, private_key) or {}).get("seq", "")) if kc else None
             if kc and kc.isdigit():
                 rc = int(kc)
                 print(f"[respond:{room}] khôi phục cursor từ KV -> {rc}")
@@ -3803,9 +3815,11 @@ def auto_respond(private_key, did):
                 "peer_log": state.get("peer_log", {}), "prof": state.get("prof", {}),
                 "recent_out": state.get("recent_out", []), "engaged": state.get("engaged", {})})
     if primary_cursor is not None:
-        kv_set(private_key, did, "cursor", str(primary_cursor))   # tương thích 1-room cũ
+        kv_set(private_key, did, "cursor",                          # tương thích 1-room cũ
+               _kv_seal(private_key, {"seq": primary_cursor})
+               if isinstance(private_key, Ed25519PrivateKey) else str(primary_cursor))
     if multi:
-        kv_set(private_key, did, "cursors", json.dumps(cursors))  # durable đa room (chỉ khi >1 room)
+        kv_set(private_key, did, "cursors", _kv_seal(private_key, cursors))  # durable đa room
     print(f"[respond] reply {caps['replies']} · proactive {caps['proactive']} | "
           f"rooms={len(rooms)} cursors={cursors}")
     return caps["replies"], caps["proactive"]
@@ -4049,7 +4063,7 @@ def main():
     #    để không nhân đôi telemetry/reply. Chạy tay (force) thì BỎ QUA standby để test được.
     #    CHÍNH luôn đóng dấu heartbeat ngay để phụ thấy "cadence còn chạy" (kể cả vòng này
     #    về sau có lỗi -> vòng chính kế tiếp tự phục hồi).
-    if RUNNER_ROLE == "backup" and not force and primary_alive(now, BACKUP_STANDBY_MIN):
+    if RUNNER_ROLE == "backup" and not force and primary_alive(now, BACKUP_STANDBY_MIN, private_key):
         # Cursor đã được hydrate từ KV ở trên -> lưu cục bộ để nếu sau này CHÍNH sập, phụ
         # tiếp quản mà KHÔNG replay backlog. Không đăng gì trong vòng standby.
         if state.get("last_seq") is not None:

@@ -616,7 +616,7 @@ def test_auto_respond_first_run_sets_cursor_and_skips_backlog(pk, respond_env):
     assert (r, p) == (0, 0)                              # lần đầu: KHÔNG trả lời backlog
     assert posts == []
     assert ac.load_state()["last_seq"] == 9             # chỉ đặt con trỏ tại last_seq server
-    assert kv["cursor"] == "9"
+    assert ac._kv_open(kv["cursor"], pk) == {"seq": 9}       # cursor KV giờ được ký
 
 
 def test_auto_respond_replies_addressed_and_advances_cursor(pk, respond_env):
@@ -644,7 +644,7 @@ def test_auto_respond_quota_stop_does_not_skip_unanswered(pk, respond_env):
     r, p = ac.auto_respond(pk, did)
     assert r == 2                                       # đúng trần quota
     assert ac.load_state()["last_seq"] == 102          # dừng tại tin đã trả lời cuối, KHÔNG qua 103
-    assert kv["cursor"] == "102"
+    assert ac._kv_open(kv["cursor"], pk) == {"seq": 102}
 
 
 def test_auto_respond_cursor_advances_past_errored_message(pk, respond_env):
@@ -679,7 +679,7 @@ def test_auto_respond_restores_cursor_from_kv_and_skips_old(pk, respond_env):
     """State trống nhưng KV còn cursor -> khôi phục, và tin cũ (<=cursor) bị bỏ qua,
     chỉ xử lý tin mới. Đây là bất biến khiến state persist mới có ý nghĩa."""
     did = ac.did_of(pk)
-    respond_env.setattr(ac, "kv_get", lambda k: "50")  # state rỗng, KV có cursor=50
+    respond_env.setattr(ac, "kv_get", lambda k: ac._kv_seal(pk, {"seq": 50}))  # state rỗng, KV có cursor=50 (đã ký)
     posts = []
     respond_env.setattr(ac, "post_message", lambda pk_, did_, msg, **k: posts.append(msg) or True)
     respond_env.setattr(ac, "fetch_messages", lambda since=None: {
@@ -1304,7 +1304,7 @@ def test_main_backup_stands_down_when_primary_alive(monkeypatch):
     monkeypatch.setattr(ac, "RUNNER_ROLE", "backup")
     monkeypatch.setattr(ac, "load_state", lambda: {"last_seq": 3})
     monkeypatch.setattr(ac, "hydrate_durable_from_kv", lambda *a, **k: None)
-    monkeypatch.setattr(ac, "primary_alive", lambda now, m: True)
+    monkeypatch.setattr(ac, "primary_alive", lambda *a, **k: True)
     monkeypatch.delenv("GITHUB_EVENT_NAME", raising=False)
     saved = {}
     monkeypatch.setattr(ac, "save_state", lambda d: saved.update(d))
@@ -1324,7 +1324,7 @@ def test_main_backup_runs_when_forced_even_if_primary_alive(monkeypatch):
     monkeypatch.setattr(ac, "RUNNER_ROLE", "backup")
     monkeypatch.setattr(ac, "load_state", lambda: {})
     monkeypatch.setattr(ac, "hydrate_durable_from_kv", lambda *a, **k: None)
-    monkeypatch.setattr(ac, "primary_alive", lambda now, m: True)
+    monkeypatch.setattr(ac, "primary_alive", lambda *a, **k: True)
     monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
     monkeypatch.setenv("FORCE_BROADCAST", "true")
     monkeypatch.setattr(ac, "save_state", lambda d: None)
@@ -1349,7 +1349,7 @@ def test_main_backup_stands_by_on_scheduler_dispatch(monkeypatch):
     monkeypatch.setattr(ac, "RUNNER_ROLE", "backup")
     monkeypatch.setattr(ac, "load_state", lambda: {})
     monkeypatch.setattr(ac, "hydrate_durable_from_kv", lambda *a, **k: None)
-    monkeypatch.setattr(ac, "primary_alive", lambda now, m: True)
+    monkeypatch.setattr(ac, "primary_alive", lambda *a, **k: True)
     monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
     monkeypatch.delenv("FORCE_BROADCAST", raising=False)
     monkeypatch.setattr(ac, "save_state", lambda d: None)
@@ -3238,3 +3238,21 @@ def test_forged_kv_ledger_is_ignored_but_own_sealed_ledger_restores(monkeypatch,
     monkeypatch.setattr(ac, "kv_get", lambda k: sent.get(k))
     ac.hydrate_ledger_from_kv({}, key)
     assert tm.check_balance(path=str(led)) == "6"
+
+
+
+def test_forged_heartbeat_and_cursors_are_ignored(monkeypatch):
+    import time as _t
+    key = _real_key()
+    now = int(_t.time())
+    kv = {"heartbeat": str(now), "cursors": json.dumps({"lobby": 0, "flop": 0}), "cursor": "0"}
+    monkeypatch.setattr(ac, "kv_get", lambda k: kv.get(k))
+    assert ac.primary_alive(now, 15, key) is False            # heartbeat giả không giữ phụ đứng im
+    assert ac._load_room_cursors({}, True, key) == {}          # cursor giả (tua về 0) bị bỏ
+    sent = {}
+    monkeypatch.setattr(ac, "kv_set", lambda pk, did, k, v: sent.update({k: v}) or True)
+    ac.write_heartbeat(key, ac.did_of(key), now)
+    kv["heartbeat"] = sent["heartbeat"]
+    assert ac.primary_alive(now + 60, 15, key) is True         # heartbeat tự ký -> nhận
+    kv["cursors"] = ac._kv_seal(key, {"lobby": 123})
+    assert ac._load_room_cursors({}, True, key) == {"lobby": 123}
