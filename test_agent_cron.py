@@ -2201,6 +2201,7 @@ def _gemini_fresh(monkeypatch, listed, failing):
     monkeypatch.setattr(ac, "_gemini_404", set())
     monkeypatch.setattr(ac, "_gemini_429", {})
     monkeypatch.setattr(ac, "_gemini_model_cache", None)
+    monkeypatch.setattr(ac, "_gemini_last_good_ts", None)
     calls = {"list": 0, "gen": []}
 
     def _list():
@@ -2238,7 +2239,7 @@ def test_gemini_second_run_skips_429_models_from_log(monkeypatch):
     assert ac._gemini_reply("q", "sys", 0.2) == "ok"
     assert calls["gen"] == _LOG_MODELS
     saved = ac.gemini_memory_dump()
-    assert saved["gemini_last_good"] == "gemini-3.1-flash-lite-preview"
+    assert saved["gemini_last_good"]["model"] == "gemini-3.1-flash-lite-preview"
     assert set(saved["gemini_429"]) == set(_LOG_429)
 
     # Run 2: process mới (bộ nhớ trong RAM mất), nạp lại từ state.
@@ -2254,7 +2255,8 @@ def test_gemini_last_good_failing_skips_cooling_models(monkeypatch):
     calls = _gemini_fresh(monkeypatch, _LOG_MODELS + ["gemini-other-flash"],
                           dict(_LOG_429, **{"gemini-3.1-flash-lite-preview": 429}))
     now = __import__("time").time()
-    ac.gemini_memory_load({"gemini_last_good": "gemini-3.1-flash-lite-preview",
+    ac.gemini_memory_load({"gemini_last_good": {"model": "gemini-3.1-flash-lite-preview",
+                                                "ts": now - 60},
                            "gemini_429": {m: now + 600 for m in _LOG_429}})
     assert ac._gemini_reply("q", "sys", 0.2) == "ok"
     assert calls["gen"] == ["gemini-3.1-flash-lite-preview", "gemini-other-flash"]
@@ -2264,12 +2266,42 @@ def test_gemini_memory_load_drops_expired_and_garbage(monkeypatch):
     monkeypatch.setattr(ac, "_gemini_429", {})
     monkeypatch.setattr(ac, "_gemini_404", {"ghost"})
     monkeypatch.setattr(ac, "_gemini_model_cache", None)
-    ac.gemini_memory_load({"gemini_last_good": "ghost",           # đã 404 -> không dùng
+    ac.gemini_memory_load({"gemini_last_good": {"model": "ghost", "ts": 990},  # 404 -> bỏ
                            "gemini_429": {"old": 10, "new": 2000, "bad": "x"}}, now=1000)
     assert ac._gemini_model_cache is None
     assert ac._gemini_429 == {"new": 2000.0}
     assert "old" not in ac.gemini_memory_dump(now=1000)["gemini_429"]
 
+
+
+def test_gemini_last_good_expires_and_returns_to_preferred(monkeypatch):
+    # Đúng run thật 2026-10-21: Google chập chờn đẩy agent xuống gemma-4-26b (xếp cuối).
+    # Hết hạn -> dò lại từ đầu và quay về model flash ưu tiên đã khoẻ lại.
+    calls = _gemini_fresh(monkeypatch,
+                          ["gemini-3.1-flash-lite-preview", "gemma-4-26b-a4b-it"], {})
+    now = 100_000
+    old = {"gemini_last_good": {"model": "gemma-4-26b-a4b-it",
+                                "ts": now - ac.GEMINI_LAST_GOOD_TTL_SEC - 1}}
+    ac.gemini_memory_load(old, now=now)
+    assert ac._gemini_model_cache is None
+    assert ac._gemini_reply("q", "sys", 0.2) == "ok"
+    assert calls["gen"] == ["gemini-3.1-flash-lite-preview"]
+
+
+def test_gemini_last_good_reuse_does_not_extend_its_ttl(monkeypatch):
+    # Gọi thành công lại KHÔNG gia hạn — nếu không model xếp cuối tự gia hạn mãi.
+    calls = _gemini_fresh(monkeypatch, ["gemma-4-26b-a4b-it"], {})
+    ac.gemini_memory_load({"gemini_last_good": {"model": "gemma-4-26b-a4b-it", "ts": 5000}},
+                          now=5000 + 60)
+    ac._gemini_reply("q", "sys", 0.2)
+    assert calls["gen"] == ["gemma-4-26b-a4b-it"] and calls["list"] == 0
+    assert ac.gemini_memory_dump(now=5000 + 120)["gemini_last_good"]["ts"] == 5000
+
+
+def test_gemini_last_good_plain_string_treated_as_expired(monkeypatch):
+    _gemini_fresh(monkeypatch, [], {})
+    ac.gemini_memory_load({"gemini_last_good": "gemini-3.1-flash-lite-preview"})
+    assert ac._gemini_model_cache is None
 
 def test_gemini_all_cooling_falls_through_to_next_provider(monkeypatch):
     # Mọi model trên key đang né -> Gemini báo lỗi để chuỗi provider chuyển sang openrouter,

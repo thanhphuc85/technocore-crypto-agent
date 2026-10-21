@@ -1827,6 +1827,12 @@ GEMINI_404_MAX = 50                  # trần kích thước -> state không ph�
 # khi tới model chạy được. Bền qua state như _gemini_404.
 _gemini_429 = {}
 GEMINI_429_COOLDOWN_SEC = int(_env_float("GEMINI_429_COOLDOWN_SEC", 3 * 3600))
+# "Model chạy được lần trước" chỉ dùng lại trong khoảng này. Không có hạn thì một lần
+# timeout của model ưu tiên đẩy agent xuống model xếp cuối (đo được: gemma-4-26b) và nó
+# DÍNH mãi chừng nào model đó còn chạy. Hết hạn -> dò lại từ đầu danh sách ưu tiên một lần
+# (bỏ qua model đang né 429) để quay về model tốt nhất còn dùng được.
+GEMINI_LAST_GOOD_TTL_SEC = int(_env_float("GEMINI_LAST_GOOD_TTL_SEC", 3600))
+_gemini_last_good_ts = None          # lúc model trong cache được xác nhận chạy (epoch)
 
 
 def _is_http_429(e) -> bool:
@@ -1847,11 +1853,19 @@ def _gemini_note_429(model, e, now: float = None) -> None:
 
 def gemini_memory_load(state: dict, now: float = None) -> None:
     """Đầu run: nạp model chạy được lần trước + các model đang né 429 (bỏ mục hết hạn)."""
-    global _gemini_model_cache
+    global _gemini_model_cache, _gemini_last_good_ts
     now = now if now is not None else time.time()
     last = state.get("gemini_last_good")
-    if isinstance(last, str) and last and last not in _gemini_404 and not _gemini_model_cache:
-        _gemini_model_cache = last
+    # Chỉ nhận dạng {"model", "ts"} còn hạn; chuỗi trần (bản đầu, không mốc) coi như hết hạn.
+    if isinstance(last, dict) and not _gemini_model_cache:
+        m, ts = last.get("model"), last.get("ts")
+        try:
+            fresh = float(ts) + GEMINI_LAST_GOOD_TTL_SEC > now
+        except (TypeError, ValueError):
+            fresh = False
+        if isinstance(m, str) and m and fresh and m not in _gemini_404 and not _gemini_cooling(m, now):
+            _gemini_model_cache = m
+            _gemini_last_good_ts = float(ts)
     for m, until in (state.get("gemini_429") or {}).items():
         try:
             if float(until) > now:
@@ -1866,7 +1880,10 @@ def gemini_memory_dump(now: float = None) -> dict:
     live = {m: u for m, u in _gemini_429.items() if u > now}
     out = {"gemini_429": dict(sorted(live.items(), key=lambda kv: -kv[1])[:GEMINI_404_MAX])}
     if _gemini_model_cache:
-        out["gemini_last_good"] = _gemini_model_cache
+        # Giữ mốc GỐC khi model vẫn là model đã nạp — gọi thành công lại không gia hạn,
+        # nếu không model xếp cuối sẽ tự gia hạn mãi và hạn 1 giờ vô tác dụng.
+        out["gemini_last_good"] = {"model": _gemini_model_cache,
+                                   "ts": _gemini_last_good_ts if _gemini_last_good_ts else now}
     return out
 
 
@@ -1960,7 +1977,7 @@ def _gemini_reply(user_text: str, system: str, temperature: float,
                   max_tokens: int = 120) -> str:
     """Thử model đã cache trước (nhanh, khỏi list lại); nếu FAIL thì LÙI VỀ full
     danh sách ưu tiên và thử lần lượt — thay vì bỏ cuộc ngay với model đã ghim."""
-    global _gemini_model_cache
+    global _gemini_model_cache, _gemini_last_good_ts
     last_err = None
     tried = set()
 
@@ -1975,6 +1992,7 @@ def _gemini_reply(user_text: str, system: str, temperature: float,
             _gemini_note_404(_gemini_model_cache, e)
             _gemini_note_429(_gemini_model_cache, e)
             _gemini_model_cache = None
+            _gemini_last_good_ts = None
 
     # 2) Lùi về danh sách ưu tiên (áp dụng cả khi user ghim GEMINI_MODEL nhưng nó fail).
     for model in _gemini_candidates():
@@ -1984,6 +2002,7 @@ def _gemini_reply(user_text: str, system: str, temperature: float,
             text = _gemini_call(model, user_text, system, temperature, max_tokens)
             print(f"[llm:gemini] model = {model}")
             _gemini_model_cache = model
+            _gemini_last_good_ts = time.time()   # model MỚI vừa được chọn qua dò -> mốc mới
             return text
         except Exception as e:
             last_err = e
