@@ -155,9 +155,13 @@ def merge_state(local, remote) -> dict:
             if not isinstance(rec, dict):
                 continue
             o = out.setdefault(tok, {})
-            for k in ("last_claim_ts", "next_claim_ts"):
+            now = int(time.time())
+            for k, ahead in (("last_claim_ts", 600), ("next_claim_ts", 2 * 86400)):
                 try:
-                    o[k] = max(int(o.get(k) or 0), int(rec.get(k) or 0))
+                    v = int(rec.get(k) or 0)
+                    if v > now + ahead:                   # mốc quá xa ở tương lai = rác -> bỏ
+                        continue
+                    o[k] = max(int(o.get(k) or 0), v)
                 except (TypeError, ValueError):
                     pass
             cl = rec.get("claims")

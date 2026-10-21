@@ -1303,7 +1303,7 @@ def test_main_backup_stands_down_when_primary_alive(monkeypatch):
     monkeypatch.setattr(ac, "SEED_HEX", SEED_HEX)
     monkeypatch.setattr(ac, "RUNNER_ROLE", "backup")
     monkeypatch.setattr(ac, "load_state", lambda: {"last_seq": 3})
-    monkeypatch.setattr(ac, "hydrate_durable_from_kv", lambda s: None)
+    monkeypatch.setattr(ac, "hydrate_durable_from_kv", lambda *a, **k: None)
     monkeypatch.setattr(ac, "primary_alive", lambda now, m: True)
     monkeypatch.delenv("GITHUB_EVENT_NAME", raising=False)
     saved = {}
@@ -1323,7 +1323,7 @@ def test_main_backup_runs_when_forced_even_if_primary_alive(monkeypatch):
     monkeypatch.setattr(ac, "SEED_HEX", SEED_HEX)
     monkeypatch.setattr(ac, "RUNNER_ROLE", "backup")
     monkeypatch.setattr(ac, "load_state", lambda: {})
-    monkeypatch.setattr(ac, "hydrate_durable_from_kv", lambda s: None)
+    monkeypatch.setattr(ac, "hydrate_durable_from_kv", lambda *a, **k: None)
     monkeypatch.setattr(ac, "primary_alive", lambda now, m: True)
     monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
     monkeypatch.setenv("FORCE_BROADCAST", "true")
@@ -1348,7 +1348,7 @@ def test_main_backup_stands_by_on_scheduler_dispatch(monkeypatch):
     monkeypatch.setattr(ac, "SEED_HEX", SEED_HEX)
     monkeypatch.setattr(ac, "RUNNER_ROLE", "backup")
     monkeypatch.setattr(ac, "load_state", lambda: {})
-    monkeypatch.setattr(ac, "hydrate_durable_from_kv", lambda s: None)
+    monkeypatch.setattr(ac, "hydrate_durable_from_kv", lambda *a, **k: None)
     monkeypatch.setattr(ac, "primary_alive", lambda now, m: True)
     monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
     monkeypatch.delenv("FORCE_BROADCAST", raising=False)
@@ -3165,3 +3165,76 @@ def test_ledger_snapshot_of_other_mode_is_ignored(monkeypatch, tmp_path):
              "spent_cumulative": {"FLOP": "50"}}
     ac.hydrate_ledger_from_kv({ac._ledger_snapshot_key(): bogus})   # đang ở simulation
     assert tm.check_balance(path=str(led)) == "0"
+
+
+# --- KV world-writable: trạng thái bền phải có CHỮ KÝ của chính agent -----------------------
+def _real_key(byte="aa"):
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    return Ed25519PrivateKey.from_private_bytes(bytes.fromhex(byte * 32))
+
+
+def _forged_state(now):
+    return {"last_radar": now + 10**8, "last_telemetry": now + 10**8,
+            "faucet_state": {"FLOP": {"next_claim_ts": now + 10**8}},
+            "post_counts": {"day": ac.time.strftime("%Y-%m-%d", ac.time.gmtime(now)),
+                            "rooms": {"kibble": 99999}}}
+
+
+def test_forged_unsigned_kv_state_is_ignored(monkeypatch):
+    import time as _t
+    import flop_governor as g
+    now = int(_t.time())
+    monkeypatch.setattr(ac, "kv_get", lambda k: json.dumps(_forged_state(now)))
+    st = {}
+    ac.hydrate_durable_from_kv(st, _real_key())
+    assert ac._due(st, "last_radar", 1, now) and ac._due(st, "last_telemetry", 6, now)
+    assert "faucet_state" not in st
+    assert g.check(st, "kibble", g.parse_caps(""), now)["allowed"]
+
+
+def test_kv_state_signed_by_another_key_is_ignored(monkeypatch):
+    import time as _t
+    now = int(_t.time())
+    forged = ac._kv_seal(_real_key("bb"), _forged_state(now))
+    monkeypatch.setattr(ac, "kv_get", lambda k: forged)
+    st = {}
+    ac.hydrate_durable_from_kv(st, _real_key("aa"))
+    assert ac._due(st, "last_radar", 1, now) and "faucet_state" not in st
+
+
+def test_own_sealed_state_round_trips_and_future_stamps_are_dropped(monkeypatch):
+    import time as _t
+    now = int(_t.time())
+    key = _real_key()
+    sent = {}
+    monkeypatch.setattr(ac, "load_state", lambda: {"last_telemetry": now - 60, "last_radar": now + 10**8})
+    monkeypatch.setattr(ac, "kv_set", lambda pk, did, k, v: sent.update({k: v}) or True)
+    ac.persist_durable_to_kv(key, ac.did_of(key))
+    assert json.loads(sent["state"])["did"] == ac.did_of(key)          # ai cũng kiểm được
+    monkeypatch.setattr(ac, "kv_get", lambda k: sent.get(k))
+    st = {}
+    ac.hydrate_durable_from_kv(st, key)
+    assert st["last_telemetry"] == now - 60
+    assert "last_radar" not in st                                      # mốc tương lai bị bỏ
+
+
+def test_forged_kv_ledger_is_ignored_but_own_sealed_ledger_restores(monkeypatch, tmp_path):
+    import token_manager as tm
+    led = tmp_path / "ledger.json"
+    monkeypatch.setenv("TOKEN_LEDGER_FILE", str(led))
+    key = _real_key()
+    fake = {"mode": "simulation", "balances": {"FLOP": "999999"}, "entries": [],
+            "spent_cumulative": {"FLOP": "999999"}, "session_cumulative": {"FLOP": "999999"}}
+    monkeypatch.setattr(ac, "kv_get", lambda k: json.dumps(fake))
+    ac.hydrate_ledger_from_kv({}, key)
+    assert tm.check_balance(path=str(led)) == "0"                       # sổ giả KHÔNG được nạp
+    sent = {}
+    monkeypatch.setattr(ac, "save_state", lambda d: None)
+    monkeypatch.setattr(ac, "kv_set", lambda pk, did, k, v: sent.update({k: v}) or True)
+    tm.credit("10", path=str(led))
+    tm.spend("4", "inference-session:x", path=str(led))
+    ac.persist_ledger_to_kv(key, ac.did_of(key))
+    led.unlink()
+    monkeypatch.setattr(ac, "kv_get", lambda k: sent.get(k))
+    ac.hydrate_ledger_from_kv({}, key)
+    assert tm.check_balance(path=str(led)) == "6"

@@ -1520,23 +1520,71 @@ DURABLE_STATE_KEYS = (_TS_DURABLE_KEYS + _BLOB_DURABLE_KEYS + _COUNTER_DURABLE_K
 STATE_KV_KEY = "state"
 
 
-def hydrate_durable_from_kv(state: dict) -> None:
+# KV namespace là WORLD-WRITABLE: ai cũng ghi đè được. Trạng thái bền mà agent ĐỌC LẠI để ra
+# quyết định (mốc thời gian, đếm tin, faucet, sổ cái) được NIÊM PHONG bằng chữ ký Ed25519 của
+# chính agent; khi đọc, bản không có chữ ký hợp lệ của khoá này bị BỎ QUA (state.json trong
+# Actions cache vẫn là nguồn chính). Không có niêm phong, một bản ghi giả với mốc ở tương
+# lai/đếm vượt trần tắt được radar, telemetry, faucet và việc đăng kibble.
+_KV_FUTURE_SKEW = 600                     # mốc thời gian quá "bây giờ" hơn 10 phút = rác/giả
+
+
+def _kv_canon(obj) -> str:
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _kv_seal(private_key, obj) -> str:
+    """{"body": obj, "sig": Ed25519(canon(obj)), "did": ...} — ai cũng kiểm được bằng DID.
+    Không có khoá Ed25519 thật (công cụ/test) -> JSON thường."""
+    if not isinstance(private_key, Ed25519PrivateKey):
+        return json.dumps(obj, ensure_ascii=False)
+    return json.dumps({"body": obj, "sig": sign_message(private_key, _kv_canon(obj)),
+                       "did": did_of(private_key)}, ensure_ascii=False)
+
+
+def _kv_open(raw, private_key):
+    """Thân bản ghi nếu chữ ký khớp KHOÁ CỦA CHÍNH AGENT; ngược lại None. Không truyền khoá
+    Ed25519 thật (công cụ/test, KHÔNG phải main()) -> nhận JSON như trước, không kiểm."""
+    if not raw:
+        return None
+    if not isinstance(private_key, Ed25519PrivateKey):
+        try:
+            d = json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+        if isinstance(d, dict) and "body" in d and "sig" in d:
+            return d["body"]
+        return d
+    try:
+        d = json.loads(raw)
+        if not (isinstance(d, dict) and "body" in d and isinstance(d.get("sig"), str)):
+            return None
+        sig = base64.urlsafe_b64decode(d["sig"] + "=" * (-len(d["sig"]) % 4))
+        private_key.public_key().verify(sig, _kv_canon(d["body"]).encode("utf-8"))
+        return d["body"]
+    except Exception:
+        return None
+
+
+def hydrate_durable_from_kv(state: dict, private_key=None) -> None:
     """Kéo khóa BỀN từ KV vào state trước khi kiểm tra cooldown. Mốc thời gian: lấy
     MAX(local, kv) -> không re-post khi local rỗng (runner mới / cache mất) hoặc cũ (2 runner).
-    Khóa blob (mẫu tuần / mốc giá alert): dùng KV khi local thiếu/rỗng."""
+    Khóa blob (mẫu tuần / mốc giá alert): dùng KV khi local thiếu/rỗng. CHỈ nhận bản có chữ
+    ký hợp lệ của agent (xem _kv_seal); mốc ở tương lai bị bỏ."""
     raw = kv_get(STATE_KV_KEY)
     if not raw:
         return
-    try:
-        remote = json.loads(raw)
-    except (ValueError, TypeError):
-        return
+    remote = _kv_open(raw, private_key)
     if not isinstance(remote, dict):
+        print("[kv] bỏ qua trạng thái KV không có chữ ký hợp lệ của agent (có thể bị ghi đè)")
         return
+    _limit = int(time.time()) + _KV_FUTURE_SKEW
     for k in _TS_DURABLE_KEYS:
         if k in remote:
             try:
-                state[k] = max(int(state.get(k) or 0), int(remote[k] or 0))
+                v = int(remote[k] or 0)
+                if k != "last_seq" and v > _limit:
+                    continue
+                state[k] = max(int(state.get(k) or 0), v)
             except (TypeError, ValueError):
                 pass
     for k in _BLOB_DURABLE_KEYS:
@@ -1570,7 +1618,7 @@ def persist_durable_to_kv(private_key, did) -> None:
     snap = load_state()
     payload = {k: snap[k] for k in DURABLE_STATE_KEYS if k in snap}
     if payload:
-        kv_set(private_key, did, STATE_KV_KEY, json.dumps(payload, ensure_ascii=False))
+        kv_set(private_key, did, STATE_KV_KEY, _kv_seal(private_key, payload))
 
 
 # --- Sổ cái token FLOP: BỀN qua KV (không thì runner Actions xoá file mỗi run -> mất tích luỹ) --
@@ -1637,7 +1685,7 @@ def _valid_ledger(d) -> bool:
             and isinstance(d.get("entries"), list))
 
 
-def hydrate_ledger_from_kv(state: dict = None) -> None:
+def hydrate_ledger_from_kv(state: dict = None, private_key=None) -> None:
     """Kéo sổ cái token BỀN vào token_ledger.json TRƯỚC khi metering. Runner Actions xoá
     file mỗi run -> không hydrate thì sổ luôn rỗng = mất tích luỹ. Hai nguồn bền: KV và bản
     sao trong state.json (Actions cache, ghi ĐỘC LẬP với KV). Lấy bản đi XA nhất trong
@@ -1649,10 +1697,11 @@ def hydrate_ledger_from_kv(state: dict = None) -> None:
         cands = []
         raw = kv_get(_ledger_kv_key())
         if raw:
-            try:
-                cands.append(("KV", json.loads(raw)))
-            except (ValueError, TypeError):
-                pass
+            body = _kv_open(raw, private_key)      # chỉ nhận bản agent tự ký
+            if body is not None:
+                cands.append(("KV", body))
+            else:
+                print("[ledger] bỏ qua sổ KV không có chữ ký hợp lệ của agent")
         snap = (state or {}).get(_ledger_snapshot_key())
         if snap:
             cands.append(("state", snap))
@@ -1766,11 +1815,12 @@ def persist_ledger_to_kv(private_key, did) -> None:
         body = None
         # Cắt dần tới khi VỪA giới hạn. Số dư và các tổng chạy không suy từ entries, nên
         # mất log cũ không làm sai số liệu — mất cả bản ghi mới là sai.
+        sealed = None
         for cap in (LEDGER_KV_ENTRY_CAP, 10, 5, 0):
-            cand = json.dumps({**base, "entries": entries[-cap:] if cap else []},
-                              ensure_ascii=False)
+            obj = {**base, "entries": entries[-cap:] if cap else []}
+            cand = _kv_seal(private_key, obj)           # đo CẢ phần niêm phong
             if len(cand) <= KV_VALUE_MAX:
-                body = cand
+                body, sealed = json.dumps(obj, ensure_ascii=False), cand
                 break
         if body is None:
             print(f"[ledger] KHÔNG đẩy được lên KV — ngay cả bản không entries vẫn "
@@ -1778,7 +1828,7 @@ def persist_ledger_to_kv(private_key, did) -> None:
             return
         # Bản sao vào state.json TRƯỚC khi ghi KV: Actions cache lưu nó dù KV lỗi.
         save_state({_ledger_snapshot_key(): json.loads(body)})
-        if not kv_set(private_key, did, _ledger_kv_key(), body):
+        if not kv_set(private_key, did, _ledger_kv_key(), sealed):
             # Im lặng ở đây nghĩa là sổ cái NGỪNG BỀN mà không ai biết — đúng lỗi vừa rồi.
             print(f"[ledger] ⚠️ ĐẨY KV THẤT BẠI ({len(body)} ký tự) — sổ cái KHÔNG còn bền, "
                   "chi tiêu sẽ bị tua ngược ở run sau")
@@ -3974,8 +4024,8 @@ def main():
     state = load_state()
     # Hydrate mốc cooldown/cursor BỀN từ KV -> chống re-post khi state cục bộ mất/lệch giữa runner
     # và đồng bộ cooldown giữa 2 runner. Đặt TRƯỚC mọi kiểm tra _due bên dưới.
-    hydrate_durable_from_kv(state)
-    hydrate_ledger_from_kv(state)     # sổ cái BỀN (KV + bản sao state.json) -> không tua ngược
+    hydrate_durable_from_kv(state, private_key)
+    hydrate_ledger_from_kv(state, private_key)   # sổ cái BỀN (KV ký + bản sao state.json)
     # Nạp danh sách model Gemini đã 404 (vĩnh viễn) -> run này khỏi thử lại, không phí call.
     _gemini_404.update(state.get("gemini_404") or [])
     # Model chạy được lần trước + model đang né 429 -> run này gọi thẳng, không dò lại.

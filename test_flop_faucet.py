@@ -271,3 +271,11 @@ def test_seconds_until_next(paths, monkeypatch):
     ff.run_faucet_cycle(claim_fn=CLAIM_OK, now=NOW, log=lambda m: None, **paths)
     assert ff.seconds_until_next(now=NOW + 3500, faucet_state=fs) == 100
     assert ff.seconds_until_next(now=NOW + 4000, faucet_state=fs) == 0
+
+
+def test_merge_state_drops_far_future_stamps():
+    import time as _t
+    now = int(_t.time())
+    m = ff.merge_state({"FLOP": {"last_claim_ts": now - 100}},
+                       {"FLOP": {"last_claim_ts": now + 10**6, "next_claim_ts": now + 10**8}})
+    assert m["FLOP"]["last_claim_ts"] == now - 100 and m["FLOP"].get("next_claim_ts", 0) == 0
