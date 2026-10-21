@@ -114,3 +114,17 @@ Source: docs.flop.network FAQ "Testnet & Launch Timeline" (updated 2026-10-20).
 6. Watch the first runs: `session=N✓ settle/spent_onchain … due=…`. `pace-wait` all day
    means the price floor is above the budget; `submit/skipped_unconfigured` means an
    endpoint is still missing.
+7. **Miner selection (code, once the API shows what it returns about miners).** FLOP lets
+   buyers choose ("buyers choose their miners"; "pick a capable miner"), but no miner
+   list, price, status or error history is published yet, so do not guess weights. Build
+   it from the real API fields, in this priority order:
+   1. **Filter:** serves the pinned model, meets the latency bound, not a fleet miner
+      (`PROACTIVE_DENY_DIDS` — "Independent demand only"), not recently failed/challenged.
+   2. **Spread:** cap any one miner's share of our sessions (the `[miners]` concentration
+      line already measures it; warning at `FLOP_MINER_CONC_WARN`). Prefer the eligible
+      miner we have bought from least.
+   3. **Price only as a tie-break.** Ranking by cheapest first concentrates spend on one
+      miner, and if the airdrop counts FLOP spent, a cheaper miner does not raise it.
+   Never skip a session to "save budget": unspent faucet FLOP is lost ("If you don't use
+   it, you lose it"). Wrong work is already handled by the protocol — the agent pays
+   nothing and can challenge (100 FLOP bond; upheld fraud slashes the miner in full).

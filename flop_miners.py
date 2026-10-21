@@ -2,9 +2,12 @@
 """flop_miners — đo ĐỘ PHÂN TÁN thợ đào mà agent đã mua compute (thuần, không mạng).
 
 Vì sao cần: luật airdrop ghi "Independent demand only — spend routed to a miner under
-common control ... is not credited as demand". Agent KHÔNG chọn được thợ đào (mempool
-ghép rồi trả `miner_did` về), nên thứ duy nhất làm được là ĐO: mua của bao nhiêu người
-khác nhau, và phần tập trung nhất chiếm bao nhiêu.
+common control ... is not credited as demand". FLOP cho phép agent CHỌN thợ đào ("buyers
+choose their miners" — FAQ testnet; "pick a capable miner" — trang agent), nhưng API trả
+danh sách/giá/trạng thái thợ đào CHƯA công bố (docs.flop.network/networks/testnet:
+"Unavailable"). Tới lúc đó scaffold để mempool ghép rồi trả `miner_did` về, nên việc làm
+được là ĐO: mua của bao nhiêu người khác nhau, và phần tập trung nhất chiếm bao nhiêu.
+Bộ chọn thợ đào: xem STRATEGY.md, checklist ngày 1, mục 7.
 
 Nếu phần lớn chi tiêu rơi vào MỘT thợ đào, nó trông giống quan hệ cặp đôi kể cả khi ta
 không hề chọn — và nếu không đo thì tới lúc bị hỏi sẽ không có gì để trả lời. Đếm số lần
