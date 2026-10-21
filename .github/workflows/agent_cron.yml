@@ -283,6 +283,11 @@ jobs:
           FLOP_SESSION_MAX_FLOPS: ${{ vars.FLOP_SESSION_MAX_FLOPS }}
           # (testnet) Trần phiên chờ proof: đủ N thì ngừng đăng phiên mới (mặc định 3, 0 = tắt).
           FLOP_SESSION_MAX_PENDING: ${{ vars.FLOP_SESSION_MAX_PENDING }}
+          # Mạng ép phí cố định mỗi phiên -> đặt mức đó (rỗng = theo đơn giá).
+          FLOP_SESSION_FIXED_FEE: ${{ vars.FLOP_SESSION_FIXED_FEE }}
+          # Radar testnet chỉ đọc (mặc định BẬT, 1 giờ/lần): route/trang/trạng thái mới -> Telegram.
+          FLOP_TESTNET_RADAR: ${{ vars.FLOP_TESTNET_RADAR }}
+          FLOP_TESTNET_RADAR_HOURS: ${{ vars.FLOP_TESTNET_RADAR_HOURS }}
           # Bộ canh chi thật (testnet): báo Telegram sau N run liền không có phiên spent_onchain.
           FLOP_REAL_SPEND_ALERT_RUNS: ${{ vars.FLOP_REAL_SPEND_ALERT_RUNS }}
           FLOP_REAL_SPEND_REALERT_HOURS: ${{ vars.FLOP_REAL_SPEND_REALERT_HOURS }}

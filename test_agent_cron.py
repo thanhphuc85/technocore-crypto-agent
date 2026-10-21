@@ -3023,3 +3023,27 @@ def test_main_testnet_stops_new_sessions_at_pending_cap(monkeypatch, tmp_path):
     ac.main()
     assert calls == []                                   # không đăng phiên mới
     assert "pending-cap(3)" in repr(out)
+
+
+# --- radar testnet: Telegram lỗi thì KHÔNG đánh dấu đã thấy (giờ sau báo lại) ----------------
+def test_radar_step_keeps_alert_when_telegram_fails(monkeypatch):
+    import flop_radar
+    monkeypatch.setattr(ac, "TESTNET_RADAR", True)
+    monkeypatch.setattr(flop_radar, "check",
+                        lambda st, f: st.update({flop_radar.KEY: {"paths": ["/faucet"]}}) or "🚨 x")
+    saved = {}
+    monkeypatch.setattr(ac, "save_state", lambda d: saved.update(d))
+    monkeypatch.setattr(ac, "_telegram_send", lambda t: False)
+    st = {}
+    assert ac.testnet_radar_step(st, 10_000) == "alert-unsent"
+    assert st.get(flop_radar.KEY) is None and "last_radar" not in saved   # lần sau báo lại
+    monkeypatch.setattr(ac, "_telegram_send", lambda t: True)
+    assert ac.testnet_radar_step(st, 10_000) == "ALERT"
+    assert saved["last_radar"] == 10_000 and saved[flop_radar.KEY] == {"paths": ["/faucet"]}
+    assert ac.testnet_radar_step(st, 10_000 + 60) == "skip"                # chưa tới giờ
+
+
+def test_radar_step_off_and_durable(monkeypatch):
+    monkeypatch.setattr(ac, "TESTNET_RADAR", False)
+    assert ac.testnet_radar_step({}, 1) == "off"
+    assert "last_radar" in ac._TS_DURABLE_KEYS and "testnet_radar" in ac._BLOB_DURABLE_KEYS

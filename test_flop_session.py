@@ -292,3 +292,20 @@ def test_day_one_async_proof_is_pending_with_diagnostics(tmp_path, monkeypatch):
         log=lambda *a: None)
     assert out["stage"] == "await_poui" and out["outcome"] == "pending"
     assert out["session_id"] == "net-1" and "channel" in out["reason"]
+
+
+# --- mạng ÉP phí cố định mỗi phiên (FLOP_SESSION_FIXED_FEE) -----------------------------
+def test_fixed_fee_every_session_pays_exactly_that():
+    plan = fsess.plan_session_spend("1.05", "0.001", 1_000_000, max_sessions=20, fixed_fee="0.1")
+    assert plan == [("0.1", 1_000_000)] * 10                # phần lẻ 0.05 để run sau
+
+
+def test_fixed_fee_capped_by_sessions_per_run_and_below_price():
+    assert len(fsess.plan_session_spend("5", "0.001", 10, max_sessions=4, fixed_fee="0.1")) == 4
+    assert fsess.plan_session_spend("0.05", "0.001", 10, max_sessions=4, fixed_fee="0.1") == []
+    assert fsess.plan_session_spend("1", "0.001", 10, max_sessions=4, fixed_fee="junk") == []
+
+
+def test_blank_fixed_fee_keeps_unit_price_plan():
+    a = fsess.plan_session_spend("1", "0.1", 100, max_sessions=3, fixed_fee="")
+    assert a and abs(sum(float(f) for f, _ in a) - 1.0) < 1e-6

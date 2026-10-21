@@ -1156,6 +1156,43 @@ POST_GOVERNOR = os.environ.get("FLOP_POST_GOVERNOR", "").strip().lower() not in 
 # Tính năng ĐĂNG TIN phải có KẾT QUẢ (flop_outcomes): tclk/engage tỉ lệ kết quả quá thấp ->
 # tự tạm dừng 7 ngày + Telegram. Mặc định BẬT; FLOP_OUTCOME_GUARD=off để tắt.
 OUTCOME_GUARD = os.environ.get("FLOP_OUTCOME_GUARD", "").strip().lower() not in ("0", "false", "off", "no")
+# Radar testnet (flop_radar, CHỈ ĐỌC): mỗi FLOP_TESTNET_RADAR_HOURS giờ đọc openapi technocore.chat
+# + llms.txt + trạng thái testnet, có cái mới -> Telegram. Mặc định BẬT; =off để tắt.
+TESTNET_RADAR = os.environ.get("FLOP_TESTNET_RADAR", "").strip().lower() not in ("0", "false", "off", "no")
+TESTNET_RADAR_H = max(0.25, _env_float("FLOP_TESTNET_RADAR_HOURS", 1))
+
+
+def _radar_fetch(url: str):
+    """GET chỉ-đọc cho radar; lỗi/không 200 -> None (radar bỏ qua nguồn đó)."""
+    try:
+        r = requests.get(url, headers={"User-Agent": UA}, timeout=15)
+        return r.text if r.status_code == 200 else None
+    except requests.RequestException:
+        return None
+
+def testnet_radar_step(state: dict, now: int) -> str:
+    """Một nhịp radar testnet (xem flop_radar). Trả trạng thái cho dòng [run]. Gửi Telegram
+    thất bại thì KHÔNG ghi nhận "đã thấy" và KHÔNG đóng cổng giờ -> lần sau báo lại."""
+    if not TESTNET_RADAR:
+        return "off"
+    if not _due(state, "last_radar", TESTNET_RADAR_H, now):
+        return "skip"
+    try:
+        import flop_radar
+        prev = state.get(flop_radar.KEY)
+        alert = flop_radar.check(state, _radar_fetch)
+        if alert:
+            print(f"[radar] {alert}")
+            if not _telegram_send(alert):
+                state[flop_radar.KEY] = prev
+                return "alert-unsent"
+        save_state({"last_radar": now, flop_radar.KEY: state.get(flop_radar.KEY)})
+        state["last_radar"] = now
+        return "ALERT" if alert else "ok"
+    except Exception as e:
+        print(f"[radar] bỏ qua ({str(e)[:80]})")
+        return "error"
+
 
 
 def _outcome_check(state: dict, name: str, now: int) -> None:
@@ -1471,8 +1508,8 @@ def primary_alive(now: int, within_min: float) -> bool:
 # runner chính lẫn phụ) rồi hydrate lúc khởi động -> cooldown được tôn trọng ở mọi nơi.
 _TS_DURABLE_KEYS = ("last_seq", "last_telemetry", "last_manifest", "last_digest",
                     "last_status_feed", "last_recap", "last_weekly_sample",
-                    "last_daily_report")
-_BLOB_DURABLE_KEYS = ("weekly_samples", "last_alert_price")
+                    "last_daily_report", "last_radar")
+_BLOB_DURABLE_KEYS = ("weekly_samples", "last_alert_price", "testnet_radar")
 # Khóa BỘ ĐẾM cộng dồn: hợp nhất bằng MAX từng ô (đếm chỉ tăng) — KHÔNG dùng luật blob
 # "local có thì local thắng", vì state.json rỗng sau khi cache mất sẽ nuốt số đã tích.
 _COUNTER_DURABLE_KEYS = ("kibble_lifetime", "kibble_lifetime_clean")
@@ -3792,7 +3829,8 @@ def session_budget_plan(sess_fee, sess_flops, sess_max, now: int = None):
         max_flops = None                      # rác -> bỏ trần, không làm hỏng cả khối phiên
     plan = flop_session.plan_session_spend(
         due or "0", sess_fee or "0.001", sess_flops,
-        max_sessions=sess_max, max_flops=max_flops)
+        max_sessions=sess_max, max_flops=max_flops,
+        fixed_fee=os.environ.get("FLOP_SESSION_FIXED_FEE", "").strip() or None)
     return plan, due
 
 
@@ -4236,6 +4274,7 @@ def main():
                 # -> chi HẾT số khả dụng trong ngày, rải đều qua các run bằng pacer (tự bù
                 # run lỗi, kẹp FLOP_MAX_PER_RUN). Rỗng -> hành vi cũ: _sess_max phiên cố định.
                 _plan, _sess_due = session_budget_plan(_sess_fee, _sess_flops, _sess_max)
+                _fixed_fee = os.environ.get("FLOP_SESSION_FIXED_FEE", "").strip() or None
                 _settled = 0
                 _last = {}
                 # Trần phiên CHỜ PROOF (chỉ testnet): proof bất đồng bộ chưa có đường poll, mỗi
@@ -4254,6 +4293,8 @@ def main():
                         # Ngân sách: giữ model xoay + latency jitter; phí/FLOPs theo kế hoạch
                         # (cùng đơn giá, tổng = phần đến hạn của run này).
                         _fe, _fl = _plan[_i]
+                    elif _fixed_fee:
+                        _fe, _fl = _fixed_fee, _sess_flops     # mạng ép phí cố định: không jitter
                     # G2: submit_fn HTTP mặc định (đăng mempool). Simulation bỏ qua (thợ đào giả);
                     # testnet dùng nó. submit_tx (settle) tự nạp từ env trong spend().
                     r = flop_session.maybe_run_session(
@@ -4286,6 +4327,22 @@ def main():
                 session_status = f"{_settled}✓ {_last.get('stage', '-')}/{_last.get('outcome', '?')}"
                 if _plan is not None and not _plan:
                     session_status = "0✓ pace-wait"     # chưa tới nhịp / số dư dưới giá sàn
+                if _fixed_fee and _plan and _sess_due is not None:
+                    try:
+                        from decimal import Decimal as _D
+                        _left = _D(str(_sess_due)) - sum(_D(f) for f, _ in _plan)
+                        _day = time.strftime("%Y-%m-%d", time.gmtime(now))
+                        if _left >= _D(_fixed_fee) and state.get("fixed_fee_warn_day") != _day:
+                            _msg = (f"⚠️ Phí cố định {_fixed_fee}/phiên: run này chạm "
+                                    f"FLOP_SESSION_MAX_PER_RUN={_sess_max} mà còn {_left} FLOP đến hạn "
+                                    "chưa chi — tăng FLOP_SESSION_MAX_PER_RUN, nếu không sẽ không chi "
+                                    "hết faucet trong ngày.")
+                            print(f"[session] {_msg}")
+                            if _telegram_send(_msg):
+                                save_state({"fixed_fee_warn_day": _day})
+                                state["fixed_fee_warn_day"] = _day
+                    except Exception:
+                        pass
                 if _pend_block:
                     session_status = f"0✓ pending-cap({_npend})"
                     _last = {"reason": (f"{_npend} phiên đang chờ proof (≥ FLOP_SESSION_MAX_PENDING) "
@@ -4361,6 +4418,10 @@ def main():
         except Exception as e:
             print(f"[unlock] publish bỏ qua ({str(e)[:80]})")
 
+    # 3c0) RADAR TESTNET (chỉ đọc): có route/trang/trạng thái MỚI -> Telegram. Gửi Telegram
+    #      thất bại thì KHÔNG ghi nhận "đã thấy" -> giờ sau báo lại, không nuốt mất tin.
+    radar_status = testnet_radar_step(state, now)
+
     # 3c) Lưu model Gemini 404 học được trong run này -> run sau không thử lại (bền qua KV).
     if _gemini_404:
         save_state({"gemini_404": sorted(_gemini_404)[:GEMINI_404_MAX]})
@@ -4387,7 +4448,7 @@ def main():
         f"- recap: **{recap_status}**",
         f"- kibble: **{kibble_status}**",
         f"- tclk: **{tclk_status}** · complete: **{tclk_done_status}**",
-        f"- faucet: **{faucet_status}** · session: **{session_status}**",
+        f"- faucet: **{faucet_status}** · session: **{session_status}** · radar: **{radar_status}**",
         f"- replies: **{replies}** · proactive: **{proactive}**",
         f"- technocore.chat 200s: **{_server_ok_count}**",
     ]
@@ -4395,7 +4456,7 @@ def main():
           f"digest={digest_status} status_feed={status_feed_status} recap={recap_status} kibble={kibble_status} "
           f"kibble_req={kibble_req_status} "
           f"tclk={tclk_status} tclk_done={tclk_done_status} tclk_offer={tclk_offer_status} "
-          f"faucet={faucet_status} session={session_status} "
+          f"faucet={faucet_status} session={session_status} radar={radar_status} "
           f"replies={replies} "
           f"proactive={proactive} server200s={_server_ok_count}")
 

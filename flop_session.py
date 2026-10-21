@@ -87,7 +87,7 @@ def mempool_url() -> str:
 # --- Yêu cầu phiên (5 trường) ------------------------------------------------------
 
 def plan_session_spend(due, base_fee, base_flops, max_sessions: int = 1,
-                       max_flops: int = None, rng=None) -> list:
+                       max_flops: int = None, rng=None, fixed_fee=None) -> list:
     """Chia lượng `due` FLOP của run này thành các phiên MUA COMPUTE.
 
     ĐƠN GIÁ GIỮ NGUYÊN = base_fee / base_flops (cặp giá operator đặt theo thị trường).
@@ -99,13 +99,23 @@ def plan_session_spend(due, base_fee, base_flops, max_sessions: int = 1,
     thêm) hoặc tham số hỏng. `max_flops` (tùy chọn) là trần FLOPs MỘT phiên: chạm trần thì
     tăng số phiên tới `max_sessions`; vẫn không đủ thì chi ít hơn due — pacer bù run sau.
     Không có trần thì chia tối đa `max_sessions` phiên, mỗi phiên >= base_fee.
-    `rng` (có .uniform) chia KHÔNG đều nhau ±20% để n phiên trong run không giống hệt."""
+    `rng` (có .uniform) chia KHÔNG đều nhau ±20% để n phiên trong run không giống hệt.
+
+    `fixed_fee` (FLOP_SESSION_FIXED_FEE): phòng khi mạng ÉP mỗi phiên đúng một mức phí — mọi
+    phiên trả ĐÚNG số đó với `base_flops`, số phiên = floor(due / fixed_fee) (kẹp max_sessions);
+    phần lẻ không đủ 1 phiên để pacer dồn sang run sau."""
     from decimal import Decimal, ROUND_CEILING, ROUND_DOWN
     d, fee0 = tm._parse_amount(due), tm._parse_amount(base_fee)
     try:
         fl0 = int(base_flops)
     except (TypeError, ValueError):
         return []
+    if fixed_fee is not None and str(fixed_fee).strip():
+        ff = tm._parse_amount(fixed_fee)
+        if d is None or ff is None or ff <= 0 or fl0 <= 0 or d < ff:
+            return []
+        n = min(max(1, int(max_sessions or 1)), int(d / ff))
+        return [(tm._fmt(ff), fl0)] * n
     if d is None or fee0 is None or fee0 <= 0 or fl0 <= 0 or d < fee0:
         return []
     unit = fee0 / Decimal(fl0)                       # FLOP phải trả cho mỗi FLOPs
