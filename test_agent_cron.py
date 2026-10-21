@@ -3129,3 +3129,37 @@ def test_faucet_step_refuses_real_faucet_while_ledger_is_simulation(monkeypatch,
     monkeypatch.setattr(ac, "_faucet_claim_fn", lambda req: calls.append(1) or {"amount": "10"})
     assert ac.faucet_step({}, None, None) == "skipped_simulation"
     assert calls == []                                     # không tiêu lượt faucet thật
+
+
+
+# --- sổ cái: KV lỗi ghi một lần KHÔNG được làm sổ quên khoản vừa chi --------------------
+def test_ledger_survives_a_failed_kv_write(monkeypatch, tmp_path):
+    import token_manager as tm
+    led = tmp_path / "ledger.json"
+    monkeypatch.setenv("TOKEN_LEDGER_FILE", str(led))
+    state = {}
+    monkeypatch.setattr(ac, "save_state", lambda d: state.update(json.loads(json.dumps(d))))
+    kv = {}
+    monkeypatch.setattr(ac, "kv_set", lambda pk, did, k, v: kv.update({k: v}) or True)
+    monkeypatch.setattr(ac, "kv_get", lambda k, *a, **kw: kv.get(k))
+    tm.credit("10", path=str(led))
+    tm.spend("1", "inference-session:a", path=str(led))
+    ac.persist_ledger_to_kv(None, None)                       # run 1: KV + bản sao đều có
+    tm.spend("2", "inference-session:b", path=str(led))
+    monkeypatch.setattr(ac, "kv_set", lambda *a, **k: False)   # run 2: KV lỗi ghi
+    ac.persist_ledger_to_kv(None, None)
+    led.unlink()                                              # run 3: runner mới
+    ac.hydrate_ledger_from_kv(state)
+    assert tm.check_balance(path=str(led)) == "7"             # nhớ đủ cả khoản 2 (không tua về 9)
+    assert tm.load_ledger(str(led))["session_cumulative"]["FLOP"] == "3"
+
+
+def test_ledger_snapshot_of_other_mode_is_ignored(monkeypatch, tmp_path):
+    import token_manager as tm
+    led = tmp_path / "ledger.json"
+    monkeypatch.setenv("TOKEN_LEDGER_FILE", str(led))
+    monkeypatch.setattr(ac, "kv_get", lambda *a, **k: None)
+    bogus = {"mode": "testnet", "balances": {"FLOP": "999"}, "entries": [],
+             "spent_cumulative": {"FLOP": "50"}}
+    ac.hydrate_ledger_from_kv({ac._ledger_snapshot_key(): bogus})   # đang ở simulation
+    assert tm.check_balance(path=str(led)) == "0"

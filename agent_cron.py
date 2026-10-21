@@ -1627,32 +1627,54 @@ def _ledger_progress(led) -> tuple:
     return (1 if cum > 0 else 0, cum, _ledger_spent_magnitude(led))
 
 
-def hydrate_ledger_from_kv() -> None:
-    """Kéo sổ cái token BỀN từ KV vào token_ledger.json TRƯỚC khi metering. Runner Actions xoá
-    file mỗi run -> không hydrate thì sổ luôn rỗng = mất tích luỹ. Lấy bản KV nếu nó tích luỹ
-    NHIỀU hơn (|balance| ≥ local) -> runner mới/cache mất không ghi đè bản đầy. Bọc kín."""
-    raw = kv_get(_ledger_kv_key())
-    if not raw:
-        return
-    try:
-        remote = json.loads(raw)
-    except (ValueError, TypeError):
-        return
-    if not (isinstance(remote, dict) and isinstance(remote.get("balances"), dict)
-            and isinstance(remote.get("entries"), list)):
-        return
+def _ledger_snapshot_key() -> str:
+    import token_manager
+    return f"ledger_snapshot_{token_manager.ledger_mode()}"
+
+
+def _valid_ledger(d) -> bool:
+    return (isinstance(d, dict) and isinstance(d.get("balances"), dict)
+            and isinstance(d.get("entries"), list))
+
+
+def hydrate_ledger_from_kv(state: dict = None) -> None:
+    """Kéo sổ cái token BỀN vào token_ledger.json TRƯỚC khi metering. Runner Actions xoá
+    file mỗi run -> không hydrate thì sổ luôn rỗng = mất tích luỹ. Hai nguồn bền: KV và bản
+    sao trong state.json (Actions cache, ghi ĐỘC LẬP với KV). Lấy bản đi XA nhất trong
+    {KV, bản sao, local} -> một lần KV lỗi ghi (502/timeout đã từng xảy ra) không còn làm
+    sổ quên các khoản vừa chi. Bọc kín."""
     try:
         import token_manager
-        # Chốt thứ hai: khoá đúng mà nội dung là sổ của CHẾ ĐỘ KHÁC thì vẫn không nạp.
-        if remote.get("mode") and remote.get("mode") != token_manager.ledger_mode():
-            print(f"[ledger] bỏ qua sổ KV chế độ {remote.get('mode')} "
-                  f"(đang chạy {token_manager.ledger_mode()})")
+        mode = token_manager.ledger_mode()
+        cands = []
+        raw = kv_get(_ledger_kv_key())
+        if raw:
+            try:
+                cands.append(("KV", json.loads(raw)))
+            except (ValueError, TypeError):
+                pass
+        snap = (state or {}).get(_ledger_snapshot_key())
+        if snap:
+            cands.append(("state", snap))
+        best = None
+        for src, d in cands:
+            if not _valid_ledger(d):
+                continue
+            # Chốt thứ hai: khoá đúng mà nội dung là sổ của CHẾ ĐỘ KHÁC thì vẫn không nạp.
+            if d.get("mode") and d.get("mode") != mode:
+                print(f"[ledger] bỏ qua sổ {src} chế độ {d.get('mode')} (đang chạy {mode})")
+                continue
+            if best is None or _ledger_progress(d) > _ledger_progress(best[1]):
+                best = (src, d)
+        if best is None:
             return
         local = token_manager.load_ledger()
         # CHẶT CHẼ (>) chứ không phải >=: hoà nhau thì GIỮ bản local. Bản local là bản vừa
-        # được ghi trong run này, lấy bản KV khi hoà chỉ tạo thêm cơ hội tua ngược.
-        if _ledger_progress(remote) > _ledger_progress(local):
-            token_manager.save_ledger(remote)
+        # được ghi trong run này, lấy bản bền khi hoà chỉ tạo thêm cơ hội tua ngược.
+        if _ledger_progress(best[1]) > _ledger_progress(local):
+            token_manager.save_ledger(best[1])
+            if best[0] != "KV":
+                print("[ledger] dùng bản sao trong state.json (bản KV cũ hơn — lần ghi KV trước lỗi)")
     except Exception as e:
         print(f"[ledger] hydrate bỏ qua ({str(e)[:80]})")
 
@@ -1754,6 +1776,8 @@ def persist_ledger_to_kv(private_key, did) -> None:
             print(f"[ledger] KHÔNG đẩy được lên KV — ngay cả bản không entries vẫn "
                   f"> {KV_VALUE_MAX} ký tự")
             return
+        # Bản sao vào state.json TRƯỚC khi ghi KV: Actions cache lưu nó dù KV lỗi.
+        save_state({_ledger_snapshot_key(): json.loads(body)})
         if not kv_set(private_key, did, _ledger_kv_key(), body):
             # Im lặng ở đây nghĩa là sổ cái NGỪNG BỀN mà không ai biết — đúng lỗi vừa rồi.
             print(f"[ledger] ⚠️ ĐẨY KV THẤT BẠI ({len(body)} ký tự) — sổ cái KHÔNG còn bền, "
@@ -3951,7 +3975,7 @@ def main():
     # Hydrate mốc cooldown/cursor BỀN từ KV -> chống re-post khi state cục bộ mất/lệch giữa runner
     # và đồng bộ cooldown giữa 2 runner. Đặt TRƯỚC mọi kiểm tra _due bên dưới.
     hydrate_durable_from_kv(state)
-    hydrate_ledger_from_kv()          # sổ cái token BỀN qua KV -> metering tích luỹ, không mất mỗi run
+    hydrate_ledger_from_kv(state)     # sổ cái BỀN (KV + bản sao state.json) -> không tua ngược
     # Nạp danh sách model Gemini đã 404 (vĩnh viễn) -> run này khỏi thử lại, không phí call.
     _gemini_404.update(state.get("gemini_404") or [])
     # Model chạy được lần trước + model đang né 429 -> run này gọi thẳng, không dò lại.
