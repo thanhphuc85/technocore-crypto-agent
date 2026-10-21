@@ -38,10 +38,11 @@ jobs:
         with:
           python-version: '3.12'
 
+      # Bước sau chạy VỚI seed trong env -> chỉ cài đúng các bản đã khoá + khớp hash
+      # (requirements.lock). Bản mới bị đầu độc trên PyPI không lọt vào được. Không cần
+      # `pip install -e .`: agent chạy từ thư mục repo nên import trực tiếp các module.
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e .
+        run: pip install --require-hashes --no-deps -r requirements.lock
 
       # Khôi phục state (cursor last_seq) từ lần chạy trước
       - name: Restore agent state

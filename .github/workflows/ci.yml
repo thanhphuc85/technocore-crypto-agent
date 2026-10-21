@@ -5,13 +5,17 @@ on:
     branches: [main]
   pull_request:
 
+# Chỉ đọc: CI chạy cả code từ PR (kể cả fork) -> không bao giờ cần quyền ghi.
+permissions:
+  contents: read
+
 jobs:
   guard-generated-file:
     # contributions-log.md is generated & bot-maintained on main; a PR must not edit it.
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5 (pinned)
         with:
           fetch-depth: 0
       - name: Reject hand-edits to contributions-log.md
@@ -23,16 +27,37 @@ jobs:
           fi
           echo "OK: PR does not modify the generated contributions-log.md."
 
+  # Workflow cầm seed (agent_cron) và workflow có quyền ghi (contributions-log) chỉ cài từ
+  # file khoá + hash. Job này bắt lệch: thêm phụ thuộc vào pyproject mà quên tạo lại khoá
+  # thì agent sẽ hỏng lúc chạy thật — báo ở PR thay vì lúc đó.
+  lockfiles:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5 (pinned)
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6 (pinned)
+        with:
+          python-version: '3.12'
+      - name: Agent runtime installs from requirements.lock alone
+        run: |
+          python -m venv /tmp/rt && /tmp/rt/bin/pip install -q --require-hashes --no-deps -r requirements.lock
+          /tmp/rt/bin/python -m pip check
+          /tmp/rt/bin/python -c "import agent_cron, token_manager, flop_session, flop_governor, flop_outcomes; print('runtime imports OK')"
+      - name: Dev lock installs and collects tests
+        run: |
+          python -m venv /tmp/dev && /tmp/dev/bin/pip install -q --require-hashes --no-deps -r requirements-dev.lock
+          /tmp/dev/bin/python -m pip check
+          /tmp/dev/bin/python -m pytest --collect-only -q | tail -1
+
   test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
         python-version: ['3.9', '3.10', '3.11', '3.12']
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5 (pinned)
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6 (pinned)
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -47,7 +72,7 @@ jobs:
 
       - name: Upload coverage to Codecov
         if: matrix.python-version == '3.12'
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac  # v5.5.5 (pinned)
         with:
           files: ./coverage.xml
           fail_ci_if_error: false
