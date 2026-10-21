@@ -706,6 +706,12 @@ def meter_inference(amount: str = None, memo: str = "Gemini Inference",
     Chạm trần -> skipped_rate_cap (không chi)."""
     if not _env_flag("FLOP_METER_ENABLED"):
         return {"outcome": "skipped_off", "reason": "FLOP_METER_ENABLED tắt"}
+    if testnet_enabled():
+        # Metering là PROXY mô phỏng (trừ FLOP cho mỗi lần gọi LLM bên ngoài). Ở testnet,
+        # spend() là giao dịch ON-CHAIN thật: memo "gemini kibble" sẽ đốt FLOP thật mà
+        # không được tính (chỉ phiên đã settle mới tính), và giành ngân sách của phiên.
+        return {"outcome": "skipped_testnet",
+                "reason": "testnet: metering proxy không chi on-chain — chi thật chỉ qua phiên"}
     if organic_only() and not (event_id and str(event_id).strip()):
         return {"outcome": "skipped_synthetic",
                 "reason": ("FLOP_ORGANIC_ONLY: từ chối chi cho inference không gắn sự kiện "

@@ -3557,6 +3557,33 @@ def start_jitter_seconds(raw, rng=None):
     return (rng or random).uniform(0, n)
 
 
+def session_budget_plan(sess_fee, sess_flops, sess_max, now: int = None):
+    """Kế hoạch chi phiên cho FLOP_SESSION_BUDGET=auto -> (plan, due).
+
+    (None, None) khi tắt -> caller giữ hành vi cũ (sess_max phiên cố định/run).
+    Bật: ngân sách = số KHẢ DỤNG hôm nay (số dư + đã chi hôm nay, đứng yên trong ngày, chỉ
+    tăng khi faucet nạp); pacer tính phần đến hạn theo giờ (tự bù run lỗi, kẹp
+    FLOP_MAX_PER_RUN); plan_session_spend chia phần đó thành phiên CÙNG đơn giá.
+    plan == [] -> chưa tới nhịp hoặc số dư dưới giá sàn. Không ném lỗi."""
+    if os.environ.get("FLOP_SESSION_BUDGET", "").strip().lower() != "auto":
+        return None, None
+    import flop_pacer
+    import flop_session
+    import token_manager
+    lp = token_manager.ledger_path()
+    due = flop_pacer.next_spend_amount(
+        budget=token_manager.available_today(now=now, path=lp), ledger_path=lp, now=now)
+    raw = os.environ.get("FLOP_SESSION_MAX_FLOPS", "").strip()
+    try:
+        max_flops = int(raw) if raw else None
+    except ValueError:
+        max_flops = None                      # rác -> bỏ trần, không làm hỏng cả khối phiên
+    plan = flop_session.plan_session_spend(
+        due or "0", sess_fee or "0.001", sess_flops,
+        max_sessions=sess_max, max_flops=max_flops)
+    return plan, due
+
+
 def main():
     private_key = load_private_key()
     did = did_of(private_key)
@@ -3974,12 +4001,21 @@ def main():
                 _sess_jit = max(0.0, min(50.0, float(os.environ.get("FLOP_SESSION_JITTER_PCT", "").strip() or "20")))
                 # G4: nhiều phiên/run (earn = tuyến tính pro-rata theo spend). Mặc định 1.
                 _sess_max = max(1, int(os.environ.get("FLOP_SESSION_MAX_PER_RUN", "").strip() or "1"))
+                # Chế độ NGÂN SÁCH (FLOP_SESSION_BUDGET=auto). FLOP: "an agent's inference
+                # volume on testnet is bounded by the faucet" và token nằm im không được gì
+                # -> chi HẾT số khả dụng trong ngày, rải đều qua các run bằng pacer (tự bù
+                # run lỗi, kẹp FLOP_MAX_PER_RUN). Rỗng -> hành vi cũ: _sess_max phiên cố định.
+                _plan, _sess_due = session_budget_plan(_sess_fee, _sess_flops, _sess_max)
                 _settled = 0
                 _last = {}
-                for _ in range(_sess_max):
+                for _i in range(len(_plan) if _plan is not None else _sess_max):
                     # Mỗi phiên: model xoay + flops/latency/fee jitter -> đa dạng hữu cơ.
                     _m, _fl, _lt, _fe = flop_session.vary_request(
                         _sess_models, _sess_flops, _sess_lat, _sess_fee, jitter_pct=_sess_jit)
+                    if _plan is not None:
+                        # Ngân sách: giữ model xoay + latency jitter; phí/FLOPs theo kế hoạch
+                        # (cùng đơn giá, tổng = phần đến hạn của run này).
+                        _fe, _fl = _plan[_i]
                     # G2: submit_fn HTTP mặc định (đăng mempool). Simulation bỏ qua (thợ đào giả);
                     # testnet dùng nó. submit_tx (settle) tự nạp từ env trong spend().
                     r = flop_session.maybe_run_session(
@@ -4010,7 +4046,11 @@ def main():
                     else:
                         break   # off/unconfigured/no_miner/insufficient/error -> KHÔNG spin vòng
                 session_status = f"{_settled}✓ {_last.get('stage', '-')}/{_last.get('outcome', '?')}"
+                if _plan is not None and not _plan:
+                    session_status = "0✓ pace-wait"     # chưa tới nhịp / số dư dưới giá sàn
                 extra = ""
+                if _sess_due is not None:
+                    extra += f" due={_sess_due}"
                 if _last.get("fee"):
                     extra += f" fee={_last['fee']}"
                 if _last.get("tx_hash"):

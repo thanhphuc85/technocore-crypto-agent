@@ -565,3 +565,18 @@ def test_organic_only_explicit_off(monkeypatch):
     for v in ("0", "false", "off", "no", "OFF"):
         monkeypatch.setenv("FLOP_ORGANIC_ONLY", v)
         assert tm.organic_only() is False
+
+
+
+def test_meter_never_spends_onchain_on_testnet(ledger, monkeypatch):
+    # Metering là proxy mô phỏng. Ở testnet spend() là giao dịch THẬT: memo "gemini kibble"
+    # đốt FLOP thật không được tính, và giành ngân sách của phiên.
+    tm.credit("50", path=ledger)
+    monkeypatch.setenv("FLOP_METER_ENABLED", "true")
+    monkeypatch.setenv("TESTNET_ENABLED", "true")
+    monkeypatch.setenv("FLOP_RPC_URL", "http://rpc.invalid")
+    sent = []
+    r = tm.meter_inference(event_id="job1", path=ledger,
+                           submit_tx=lambda tx: sent.append(tx) or {"tx_hash": "0x1"})
+    assert r["outcome"] == "skipped_testnet"
+    assert sent == [] and tm.check_balance(path=ledger) == "50"

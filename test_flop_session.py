@@ -192,3 +192,48 @@ def test_mock_miner_pool_spreads_deterministically():
 def test_mock_miner_tolerates_bad_pool():
     for bad in ("x", None, -3):
         assert fsess._mock_miner("r", bad) == fsess._mock_miner("r", 1)
+
+
+# --- plan_session_spend: chi theo ngân sách, ĐƠN GIÁ không đổi ----------------------
+from decimal import Decimal as _D
+
+
+def _unit(fee, flops):
+    return _D(fee) / _D(flops)
+
+
+def test_plan_below_price_floor_waits():
+    assert fsess.plan_session_spend("0.0005", "0.001", 10**9, max_sessions=3) == []
+
+
+def test_plan_spends_exactly_due_at_constant_unit_price():
+    rng = _random.Random(1)
+    plan = fsess.plan_session_spend("347.2", "0.001", 10**9, max_sessions=3, rng=rng)
+    assert len(plan) == 3
+    assert sum(_D(f) for f, _ in plan) == _D("347.2")              # chi ĐÚNG phần đến hạn
+    base = _unit("0.001", 10**9)
+    for f, fl in plan:                                            # mua thêm FLOPs, KHÔNG trả giá cao hơn
+        assert abs(_unit(f, fl) - base) / base < _D("0.000001")
+    assert len({f for f, _ in plan}) == 3                         # không 3 phiên giống hệt
+
+
+def test_plan_each_session_at_least_price_floor():
+    for due in ("0.0015", "0.0035", "0.01", "1"):
+        for seed in range(20):
+            plan = fsess.plan_session_spend(due, "0.001", 10**9, max_sessions=5,
+                                            rng=_random.Random(seed))
+            assert plan and all(_D(f) >= _D("0.001") for f, _ in plan), (due, seed, plan)
+
+
+def test_plan_respects_max_flops_cap_and_leaves_rest_for_pacer():
+    plan = fsess.plan_session_spend("347.2", "0.001", 10**9, max_sessions=3,
+                                    max_flops=5 * 10**11, rng=_random.Random(2))
+    assert len(plan) == 3
+    assert all(fl <= 5 * 10**11 and _D(f) <= _D("0.5") for f, fl in plan)
+    assert sum(_D(f) for f, _ in plan) <= _D("1.5")               # phần dư -> run sau
+
+
+def test_plan_rejects_garbage():
+    for args in [("x", "0.001", 10**9), ("1", "0", 10**9), ("1", "0.001", 0),
+                 ("1", "0.001", "nope"), (None, "0.001", 10**9)]:
+        assert fsess.plan_session_spend(*args) == []

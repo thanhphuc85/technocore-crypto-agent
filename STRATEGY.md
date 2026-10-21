@@ -69,27 +69,48 @@ question sets, cross-denied miner DIDs — see `PROACTIVE_DENY_DIDS`).
 
 ## Technical gaps to close when FLOP opens testnet
 
-1. **Proxy vs real spend.** `meter_inference()` currently debits FLOP per external
-   Gemini/OpenAI call as a *proxy*. Real earning = spending **testnet FLOP on FLOP's own
-   inference network** (miners earn 85% of the fee), reached through the `spend()` seam
-   (`TESTNET_ENABLED` + `FLOP_RPC_URL`/`FLOP_SUBMIT_URL` + injected `submit_tx`). Point that
-   seam at FLOP's real inference-payment endpoint once published — accounting logic is
-   unchanged.
-2. **Faucet spec.** `flop_faucet.py` refuses to POST to a guessed endpoint. Fill
-   `FLOP_FAUCET_URL` + inject a real `claim_fn` when the scheme is announced. Check whether
-   the real faucet has a cooldown/cap (the module assumes a 24h default that may not match).
-3. **The real throughput ceiling** is *faucet acquisition rate × miner inference capacity*,
-   not ambition. Measure it on day one of testnet.
-4. **Make every session a real need.** Today a session is bought once per run and its
-   inference output is not used — kibble/tclk answers still come from Gemini. Once FLOP
-   publishes how a session returns output, route that real workload through sessions so
-   each purchase serves a job. Do not "anchor" session counts to job counts before then:
-   that only looks organic while the compute still goes unused.
+1. **Proxy vs real spend.** `meter_inference()` debits FLOP per external Gemini/OpenAI
+   call as a *proxy* — in **simulation only**. With `TESTNET_ENABLED` it returns
+   `skipped_testnet`: there `spend()` is a real on-chain transaction, and a "gemini kibble"
+   memo would burn real testnet FLOP that never counts and competes with sessions for the
+   faucet allowance. Real earning goes through settled sessions only.
+2. **Faucet + mempool spec.** `flop_faucet.py` and the mempool submit refuse to POST to
+   guessed endpoints. Fill `FLOP_FAUCET_URL` / `FLOP_MEMPOOL_URL` and fit the scaffold
+   wire format once FLOP publishes them. The faucet has **per-identity limits** and a
+   claim period ("hourly or daily — not yet decided"): match `FLOP_FAUCET_MAX_PER_DAY` /
+   `FLOP_FAUCET_COOLDOWN_HOURS` to it and do **not** set `FLOP_FAUCET_REFILL_BELOW`, so the
+   agent claims its full allowance every period.
+3. **Spend the whole allowance.** FLOP: *"an agent's inference volume on testnet is bounded
+   by the faucet"*, and *"If you don't use it, you lose it."* `FLOP_SESSION_BUDGET=auto`
+   spends everything available today, spread evenly over the day's runs by the pacer
+   (catches up after failed runs, capped per run by `FLOP_MAX_PER_RUN`). Sessions keep a
+   **constant unit price** (`FLOP_INFERENCE_COST` / `FLOP_SESSION_FLOPS`): spending more
+   buys more FLOPs, it never pays more for the same work. Set that price pair from the real
+   market on day one; `FLOP_SESSION_MAX_FLOPS` caps one session's size if miners need it.
+4. **Sessions serving real jobs — nice to have, not required.** FLOP: *"Instruct your
+   agent to actually spend it on an inference request; the task itself does not matter."*
+   Routing kibble/tclk inference through sessions would still be better use of the
+   compute; do it once FLOP documents how a session returns output.
 
 ## Timeline
 
-- **Testnet:** Q4 2026, runs ~90 days.
-- **Mainnet:** Q1 2027.
-- Implication: **don't over-build now.** The highest-value next action is to watch for
-  FLOP's published (a) faucet + inference endpoint spec and (b) any anti-sybil rules —
-  those two facts finalize the posture above.
+Source: docs.flop.network FAQ "Testnet & Launch Timeline" (updated 2026-10-20).
+
+- **Testnet: target Tuesday 3 November 2026**, ~90 days; a target, confirmed as devnet
+  onboarding completes. *"earlier participation means a larger share of the low-supply
+  months"* — be live on day one.
+- **Mainnet / TGE:** early February 2027.
+- Watch **docs.flop.network/networks/testnet**: RPC, Gateway and Model catalog read
+  "Unavailable — no verified public value" until the network is ready.
+
+### Day-one checklist (Variables only — no code change)
+1. `TESTNET_ENABLED=true`; `FLOP_TESTNET_START=2026-11-03` (or the confirmed date).
+2. `FLOP_SESSION_MODEL_HASH` from the published model catalog; delete
+   `FLOP_SESSION_SIM_MODEL_HASH`.
+3. `FLOP_MEMPOOL_URL`, `FLOP_RPC_URL`/`FLOP_SUBMIT_URL` (+ `FLOP_TX_MODE`).
+4. `FLOP_FAUCET_ENABLED=on`, `FLOP_FAUCET_URL`, faucet period/cap per item 2 above.
+5. `FLOP_SESSION_BUDGET=auto`, `FLOP_MAX_PER_RUN=2%`, `FLOP_SESSION_MAX_PER_RUN=3`,
+   `FLOP_INFERENCE_COST` + `FLOP_SESSION_FLOPS` = observed market price.
+6. Watch the first runs: `session=N✓ settle/spent_onchain … due=…`. `pace-wait` all day
+   means the price floor is above the budget; `submit/skipped_unconfigured` means an
+   endpoint is still missing.

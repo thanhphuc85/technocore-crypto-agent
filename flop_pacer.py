@@ -196,13 +196,21 @@ def _spent_today(rec: dict, token: str, now: int, ledger_path: str = None) -> De
 
 
 def next_spend_amount(token: str = None, now: int = None, path: str = None, rng=None,
-                      ledger_path: str = None):
+                      ledger_path: str = None, budget=None):
     """Số FLOP NÊN chi lần chạy này để bám lịch rải đều. Trả:
        None  -> pacer tắt (FLOP_DAILY_BUDGET chưa đặt) -> caller dùng phí cố định;
        "0"   -> chưa tới nhịp (đã bám kịp mục tiêu, hoặc phần đến hạn < FLOP_MIN_SPEND);
        "x.y" -> lượng nên chi để đuổi kịp mục tiêu tuyến tính, đã kẹp trần/lần.
-    `rng` (tùy chọn) là nguồn ngẫu nhiên cho jitter, tiêm được để test tất định."""
-    budget = daily_budget(token, ledger_path)
+    `rng` (tùy chọn) là nguồn ngẫu nhiên cho jitter, tiêm được để test tất định.
+    `budget` (tùy chọn) ĐÈ FLOP_DAILY_BUDGET: để phiên inference dùng pacer mà không phải
+    bật FLOP_DAILY_BUDGET — biến đó còn điều khiển giá metering, và bật nó từng làm MỘT
+    lần suy luận kibble bị tính 2 FLOP thay vì 0.001 (chi phồng, không phải mua thêm)."""
+    if budget is not None:
+        budget = _dec(budget)
+        if budget is None or budget <= 0:
+            return None
+    else:
+        budget = daily_budget(token, ledger_path)
     if budget is None:
         return None
     now = int(now if now is not None else time.time())

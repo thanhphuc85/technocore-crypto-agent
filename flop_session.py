@@ -86,6 +86,55 @@ def mempool_url() -> str:
 
 # --- Yêu cầu phiên (5 trường) ------------------------------------------------------
 
+def plan_session_spend(due, base_fee, base_flops, max_sessions: int = 1,
+                       max_flops: int = None, rng=None) -> list:
+    """Chia lượng `due` FLOP của run này thành các phiên MUA COMPUTE.
+
+    ĐƠN GIÁ GIỮ NGUYÊN = base_fee / base_flops (cặp giá operator đặt theo thị trường).
+    Chi nhiều hơn nghĩa là mua NHIỀU FLOPs hơn ở cùng giá — không phải trả giá cao hơn
+    cho cùng một việc. (Lỗi cũ: để pacer quyết phí metering làm MỘT lần suy luận bị tính
+    2 FLOP thay vì 0.001 — chi phồng chứ không mua thêm.)
+
+    Trả list[(fee_str, flops_int)], tổng fee <= due. Rỗng khi due < base_fee (chờ tích
+    thêm) hoặc tham số hỏng. `max_flops` (tùy chọn) là trần FLOPs MỘT phiên: chạm trần thì
+    tăng số phiên tới `max_sessions`; vẫn không đủ thì chi ít hơn due — pacer bù run sau.
+    Không có trần thì chia tối đa `max_sessions` phiên, mỗi phiên >= base_fee.
+    `rng` (có .uniform) chia KHÔNG đều nhau ±20% để n phiên trong run không giống hệt."""
+    from decimal import Decimal, ROUND_CEILING, ROUND_DOWN
+    d, fee0 = tm._parse_amount(due), tm._parse_amount(base_fee)
+    try:
+        fl0 = int(base_flops)
+    except (TypeError, ValueError):
+        return []
+    if d is None or fee0 is None or fee0 <= 0 or fl0 <= 0 or d < fee0:
+        return []
+    unit = fee0 / Decimal(fl0)                       # FLOP phải trả cho mỗi FLOPs
+    n_max = max(1, int(max_sessions or 1))
+    cap_fee = unit * Decimal(int(max_flops)) if max_flops else None
+    if cap_fee is not None and cap_fee >= fee0:
+        need = int((d / cap_fee).to_integral_value(rounding=ROUND_CEILING))
+        n = min(n_max, max(1, need))
+        total = min(d, cap_fee * n)
+    else:
+        cap_fee = None
+        # 1.5x: trọng số ±20% sau chuẩn hoá vẫn giữ mỗi phần >= base_fee
+        n = min(n_max, max(1, int(d / (fee0 * Decimal("1.5")))))
+        total = d
+    r = rng or random
+    w = [Decimal(str(1 + r.uniform(-0.2, 0.2))) for _ in range(n)]
+    q = Decimal("0.000001")
+    fees = [(total * x / sum(w)).quantize(q, rounding=ROUND_DOWN) for x in w]
+    fees[-1] = (total - sum(fees[:-1])).quantize(q, rounding=ROUND_DOWN)
+    out = []
+    for f in fees:
+        if cap_fee is not None and f > cap_fee:      # trọng số đẩy vượt trần -> kẹp
+            f = cap_fee.quantize(q, rounding=ROUND_DOWN)
+        if f <= 0:
+            continue
+        out.append((tm._fmt(f), int(f / unit)))
+    return out
+
+
 def build_request(model_hash: str, max_latency_ms: int, flops: int,
                   security_flags=None, fee: str = None, *, token: str = None,
                   private_key=None, did: str = None, nonce: str = None) -> dict:

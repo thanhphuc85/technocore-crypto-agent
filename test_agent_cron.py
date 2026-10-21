@@ -2556,3 +2556,78 @@ def test_miner_stats_accumulate_across_runs(tmp_path, monkeypatch):
     summ = fm.summarize(ac.load_state()["miner_stats"])
     assert summ["total"] == 3 and summ["distinct"] == 2       # tích luỹ, không reset
     ac._miner_stats.clear()
+
+
+# ── chi phiên theo NGÂN SÁCH (FLOP_SESSION_BUDGET=auto) ────────────────────────────────
+import calendar as _cal
+from decimal import Decimal as _Dec
+
+_DAY = "2026-11-03"
+
+
+def _at(h, m=0):
+    return _cal.timegm((2026, 11, 3, h, m, 0))
+
+
+def _budget_env(tmp_path, monkeypatch, balance, spent_today="0", max_per_run=None):
+    import token_manager as tm
+    monkeypatch.setenv("TOKEN_LEDGER_FILE", str(tmp_path / "led.json"))
+    monkeypatch.setenv("FLOP_PACER_FILE", str(tmp_path / "pacer.json"))
+    monkeypatch.setenv("FLOP_SESSION_BUDGET", "auto")
+    monkeypatch.setenv("FLOP_PACE_JITTER_PCT", "0")             # tất định
+    monkeypatch.delenv("FLOP_DAILY_BUDGET", raising=False)
+    monkeypatch.delenv("FLOP_SESSION_MAX_FLOPS", raising=False)
+    if max_per_run:
+        monkeypatch.setenv("FLOP_MAX_PER_RUN", max_per_run)
+    else:
+        monkeypatch.delenv("FLOP_MAX_PER_RUN", raising=False)
+    tm.save_ledger({"balances": {"FLOP": balance}, "entries": [],
+                    "spent_by_day": {"FLOP": {_DAY: spent_today}}})
+
+
+def test_session_budget_off_keeps_old_behaviour(monkeypatch):
+    monkeypatch.delenv("FLOP_SESSION_BUDGET", raising=False)
+    assert ac.session_budget_plan("0.001", 10**9, 1) == (None, None)
+
+
+def test_session_budget_follows_linear_target(tmp_path, monkeypatch):
+    # Faucet nạp 100, chưa chi gì, 12:00 UTC -> mục tiêu 50 -> chi 50, cùng đơn giá.
+    _budget_env(tmp_path, monkeypatch, balance="100")
+    plan, due = ac.session_budget_plan("0.001", 10**9, 3, now=_at(12))
+    assert due == "50"
+    assert sum(_Dec(f) for f, _ in plan) == _Dec("50")
+
+
+def test_session_budget_catches_up_after_failed_runs(tmp_path, monkeypatch):
+    # Run lỗi cả buổi sáng: 12:00 mới chạy lại, sổ ghi đã chi 10 (mục tiêu 50).
+    # Phần thiếu được bù dần: mỗi run tối đa 2% ngân sách ngày, không dump một lần.
+    _budget_env(tmp_path, monkeypatch, balance="90", spent_today="10", max_per_run="2%")
+    plan, due = ac.session_budget_plan("0.001", 10**9, 3, now=_at(12))
+    assert due == "2"                                             # 2% của 100 khả dụng
+    assert sum(_Dec(f) for f, _ in plan) == _Dec("2")
+
+
+def test_session_budget_waits_when_on_target(tmp_path, monkeypatch):
+    _budget_env(tmp_path, monkeypatch, balance="50", spent_today="50")
+    plan, due = ac.session_budget_plan("0.001", 10**9, 3, now=_at(12))
+    assert due == "0" and plan == []
+
+
+def test_session_budget_waits_below_price_floor(tmp_path, monkeypatch):
+    _budget_env(tmp_path, monkeypatch, balance="0.0005")
+    plan, _ = ac.session_budget_plan("0.001", 10**9, 3, now=_at(12))
+    assert plan == []
+
+
+def test_session_budget_spends_whole_day_by_midnight(tmp_path, monkeypatch):
+    # Cuối ngày mục tiêu ~ toàn bộ ngân sách: không để token nằm im qua đêm.
+    _budget_env(tmp_path, monkeypatch, balance="100")
+    _, due = ac.session_budget_plan("0.001", 10**9, 3, now=_at(23, 59))
+    assert _Dec(due) > _Dec("99.9")
+
+
+def test_session_budget_ignores_garbage_max_flops(tmp_path, monkeypatch):
+    _budget_env(tmp_path, monkeypatch, balance="100")
+    monkeypatch.setenv("FLOP_SESSION_MAX_FLOPS", "lots")
+    plan, _ = ac.session_budget_plan("0.001", 10**9, 3, now=_at(12))
+    assert sum(_Dec(f) for f, _ in plan) == _Dec("50")             # rác -> bỏ trần, không vỡ

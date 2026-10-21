@@ -295,3 +295,15 @@ def test_jitter_on_by_default_and_explicit_zero_disables(monkeypatch):
     assert fp.jitter_pct() == Decimal(20)
     monkeypatch.setenv("FLOP_PACE_JITTER_PCT", "0")
     assert fp.jitter_pct() == Decimal(0)
+
+
+
+def test_explicit_budget_works_without_daily_budget_env(pfile, monkeypatch):
+    # Phiên dùng pacer qua tham số `budget`, KHÔNG bật FLOP_DAILY_BUDGET (biến đó còn
+    # điều khiển giá metering — bật nó từng làm 1 lần suy luận bị tính 2 FLOP).
+    monkeypatch.delenv("FLOP_DAILY_BUDGET", raising=False)
+    noon = calendar.timegm((2026, 11, 3, 12, 0, 0))
+    assert fp.next_spend_amount(now=noon, path=pfile) is None     # không budget -> tắt
+    assert fp.next_spend_amount(now=noon, path=pfile, budget="100") == "50"
+    for bad in ("0", "-5", "abc"):
+        assert fp.next_spend_amount(now=noon, path=pfile, budget=bad) is None
