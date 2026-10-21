@@ -2802,3 +2802,19 @@ def test_session_budget_ignores_garbage_max_flops(tmp_path, monkeypatch):
     monkeypatch.setenv("FLOP_SESSION_MAX_FLOPS", "lots")
     plan, _ = ac.session_budget_plan("0.001", 10**9, 3, now=_at(12))
     assert sum(_Dec(f) for f, _ in plan) == _Dec("50")             # rác -> bỏ trần, không vỡ
+
+
+
+def test_hydrate_durable_merges_clean_counter_by_max(monkeypatch):
+    remote = {"kibble_lifetime_clean": {"useful": 50, "not": 9}}
+    monkeypatch.setattr(ac, "kv_get", lambda k: json.dumps(remote))
+    state = {"kibble_lifetime_clean": {"useful": 52, "not": 7}}
+    ac.hydrate_durable_from_kv(state)
+    assert state["kibble_lifetime_clean"] == {"useful": 52, "not": 9}
+    assert "kibble_lifetime_clean" in ac.DURABLE_STATE_KEYS
+
+
+def test_kibble_prompt_states_the_real_length_limit():
+    # Prompt cũ bảo "you have room" rồi code chặt ở 1200 -> bài cụt giữa chữ.
+    assert "you have room" not in ac.KIBBLE_SYSTEM
+    assert str(ac.KIBBLE_MAX_CHARS) in ac.KIBBLE_SYSTEM and "complete sentence" in ac.KIBBLE_SYSTEM

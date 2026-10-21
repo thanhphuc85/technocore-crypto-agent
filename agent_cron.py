@@ -480,8 +480,10 @@ KIBBLE_SYSTEM = (
     "as described. Deliver a COMPLETE, correct answer that satisfies every stated success "
     "criterion; if the task has multiple parts, cover each one. Be concrete and verifiable: "
     "give specific values, names, and steps rather than vague generalities, and show the key "
-    "reasoning or working when it makes the result checkable. Use as much space as the task "
-    "genuinely needs (you have room) but zero filler, hedging, or restating the prompt. If the "
+    "reasoning or working when it makes the result checkable. HARD LENGTH LIMIT: your whole reply "
+    f"must fit in about {max(300, KIBBLE_MAX_CHARS - 200)} characters (anything past "
+    f"{KIBBLE_MAX_CHARS} is cut off) — lead with the core answer, cover each part compactly, and "
+    "end on a complete sentence. Zero filler, hedging, or restating the prompt. If the "
     "task is underspecified, state your assumption in one clause and proceed. Reply with exactly "
     "'SKIP' and nothing else ONLY if you cannot do it correctly, cannot verify facts it requires "
     "(never invent data or citations), or it is empty/unsafe. Plain text, no markdown, no preamble."
@@ -1388,7 +1390,8 @@ def tclk_do_work(meta: dict):
     if _is_refusal(text):
         print("[tclk] work bỏ: model từ chối (refusal)")
         return None
-    text = text[:KIBBLE_MAX_CHARS]
+    import flop_kibble
+    text = flop_kibble.trim_to_sentence(text, KIBBLE_MAX_CHARS)   # không chặt ngang chữ
     _meter_flop(f"{provider} tclk-work", event_id=meta.get("offer_id") or "tclk")
     return text
 
@@ -1422,7 +1425,7 @@ _TS_DURABLE_KEYS = ("last_seq", "last_telemetry", "last_manifest", "last_digest"
 _BLOB_DURABLE_KEYS = ("weekly_samples", "last_alert_price")
 # Khóa BỘ ĐẾM cộng dồn: hợp nhất bằng MAX từng ô (đếm chỉ tăng) — KHÔNG dùng luật blob
 # "local có thì local thắng", vì state.json rỗng sau khi cache mất sẽ nuốt số đã tích.
-_COUNTER_DURABLE_KEYS = ("kibble_lifetime",)
+_COUNTER_DURABLE_KEYS = ("kibble_lifetime", "kibble_lifetime_clean")
 DURABLE_STATE_KEYS = _TS_DURABLE_KEYS + _BLOB_DURABLE_KEYS + _COUNTER_DURABLE_KEYS
 STATE_KV_KEY = "state"
 
@@ -1449,12 +1452,13 @@ def hydrate_durable_from_kv(state: dict) -> None:
     for k in _BLOB_DURABLE_KEYS:
         if k in remote and not state.get(k):
             state[k] = remote[k]
-    if "kibble_lifetime" in remote:              # bộ đếm cộng dồn -> MAX, không ghi đè
-        try:
-            import flop_kibble_track as kt
-            kt.merge_lifetime(state, remote["kibble_lifetime"])
-        except Exception:
-            pass
+    for k in _COUNTER_DURABLE_KEYS:              # bộ đếm cộng dồn -> MAX, không ghi đè
+        if k in remote:
+            try:
+                import flop_kibble_track as kt
+                kt.merge_lifetime(state, remote[k], key=k)
+            except Exception:
+                pass
 
 
 def persist_durable_to_kv(private_key, did) -> None:
@@ -2553,7 +2557,8 @@ def answer_kibble_job(job: dict):
     if _is_refusal(text):                        # model TỪ CHỐI (vd "I cannot comply...") -> không claim
         print(f"[kibble:{provider}] skip {job.get('jobid')} — model từ chối (refusal)")
         return None
-    text = text[:KIBBLE_MAX_CHARS]
+    import flop_kibble
+    text = flop_kibble.trim_to_sentence(text, KIBBLE_MAX_CHARS)   # không chặt ngang chữ
     _meter_flop(f"{provider} kibble:{jtype}", event_id=job.get("jobid"))
     print(f"[kibble:{provider}] answered {job.get('jobid')} ({jtype})")
     _kibble_remember(fp)
@@ -3878,7 +3883,8 @@ def main():
                         kt.record_deliveries(state, ks["delivered_items"], now * 1000)
                     sm = kt.reconcile(state, ks.get("messages", []), now * 1000)
                     save_state({"kibble_deliveries": state.get("kibble_deliveries", []),
-                                "kibble_lifetime": state.get("kibble_lifetime", {})})
+                                "kibble_lifetime": state.get("kibble_lifetime", {}),
+                                kt.CLEAN_KEY: state.get(kt.CLEAN_KEY, {})})
                     line = kt.summary_line(sm)
                     kv_set(private_key, did, "kibble-score", line)   # audit công khai 1 GET
                     kibble_status += f" | {line}"

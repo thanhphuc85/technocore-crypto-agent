@@ -34,6 +34,17 @@ _ALGOS = ("sha256", "sha1", "md5", "sha3_256")
 _JOBID_RE = re.compile(r"^k[0-9a-f]{10}$")
 LIFETIME_KEY = "kibble_lifetime"   # bộ đếm CỘNG DỒN (không theo cửa sổ) trong state
 _LT_FIELDS = ("useful", "not")
+# Bộ đếm "SẠCH" song song (bộ cũ GIỮ NGUYÊN để so với mốc cũ). Đo 2026-10-21 trên board:
+#  - 37/37 job của ta CÒN bài của worker khác (bot nộp câu mẫu "Completed work on ...");
+#    phiếu quy kết theo jobid nên chấm bài của họ bị tính vào ta: trong phiếu 'not' có rh,
+#    chỉ 1/13 khớp bài của ta.
+# Bộ sạch CHỈ bỏ phiếu 'not' có rh KHÔNG khớp bài của ta — bằng chứng chắc chắn phiếu đó
+# chấm bài khác. KHÔNG lọc attester "chỉ chấm một loại": đã thử trên board thật và nó gạt cả
+# người chấm nghiêm túc (board ~nửa là rác bot nên 20 phiếu 'not' liền nhau là bình thường)
+# lẫn phiếu 'useful' — kết quả sai hơn bộ cũ.
+# Còn lệch LÊN: phiếu 'useful' không kèm rh nên không tách được phiếu chấm bài người khác.
+# So hai giai đoạn trên CÙNG bộ đếm thì độ lệch triệt tiêu; đọc con số tuyệt đối thì thận trọng.
+CLEAN_KEY = "kibble_lifetime_clean"
 
 
 def _as_count(v) -> int:
@@ -44,25 +55,25 @@ def _as_count(v) -> int:
         return 0
 
 
-def _bump_lifetime(state: dict, verdict: str) -> None:
+def _bump_lifetime(state: dict, verdict: str, key: str = LIFETIME_KEY) -> None:
     """+1 cho bộ đếm cộng dồn khi MỘT delivery vừa chốt. Gọi đúng 1 lần/delivery vì
     reconcile chỉ xử lý bản 'pending' rồi đổi status ngay sau đó."""
     if verdict not in _LT_FIELDS:
         return
-    lt = state.get(LIFETIME_KEY)
+    lt = state.get(key)
     lt = dict(lt) if isinstance(lt, dict) else {}
     lt[verdict] = _as_count(lt.get(verdict)) + 1
-    state[LIFETIME_KEY] = lt
+    state[key] = lt
 
 
-def lifetime(state: dict) -> dict:
+def lifetime(state: dict, key: str = LIFETIME_KEY) -> dict:
     """{useful, not, n, rate} từ bộ đếm cộng dồn. rate=None khi chưa có mẫu nào chốt.
 
     Vì sao cần: `useful_rate` ở summary() chỉ tính trên DELIVERIES_CAP bản gần nhất —
     với nhịp giao hiện tại đó là cửa sổ vài GIỜ, nên nó dao động theo việc attestor nào
     đang thức (có attestor chấm 'not' toàn tập). Bộ đếm này cộng dồn qua mọi cửa sổ nên
     phản ánh chất lượng THẬT theo thời gian, không bị chu kỳ ngày-đêm làm nhiễu."""
-    lt = state.get(LIFETIME_KEY)
+    lt = state.get(key)
     lt = lt if isinstance(lt, dict) else {}
     u, n = _as_count(lt.get("useful")), _as_count(lt.get("not"))
     tot = u + n
@@ -70,19 +81,19 @@ def lifetime(state: dict) -> dict:
             "rate": (round(u / tot, 3) if tot else None)}
 
 
-def merge_lifetime(state: dict, remote) -> None:
+def merge_lifetime(state: dict, remote, key: str = LIFETIME_KEY) -> None:
     """Hợp nhất bộ đếm từ nguồn khác (KV) vào state — lấy MAX từng ô vì đếm CHỈ TĂNG.
     Dùng khi cache runner mất state.json: không để bản rỗng/cũ nuốt mất số đã tích."""
     if not isinstance(remote, dict):
         return
-    cur = state.get(LIFETIME_KEY)
+    cur = state.get(key)
     cur = dict(cur) if isinstance(cur, dict) else {}
     for f in _LT_FIELDS:
         m = max(_as_count(cur.get(f)), _as_count(remote.get(f)))
         if m:
             cur[f] = m
     if cur:
-        state[LIFETIME_KEY] = cur
+        state[key] = cur
 
 
 def _one_line(s: str) -> str:
@@ -138,6 +149,7 @@ def record_deliveries(state: dict, items, now_ms: int) -> None:
             "jobid": jid,
             "ts": now_ms,
             "status": "pending",
+            "clean": "pending",                  # quyết định cho bộ đếm SẠCH (song song)
             "cands": candidate_hashes(jid, it.get("answer", "")),
         }
     merged = sorted(by_id.values(), key=lambda d: d.get("ts", 0))
@@ -163,35 +175,53 @@ def reconcile(state: dict, messages, now_ms: int, expire_ms: int = 48 * 3600 * 1
 
     unresolved = 0                               # có ATTEST nhưng hoà phiếu -> chưa chốt
     for d in state.get("kibble_deliveries", []):
-        if not isinstance(d, dict) or d.get("status") != "pending":
+        if not isinstance(d, dict):
+            continue
+        old_pending = d.get("status") == "pending"
+        clean_pending = d.get("clean") == "pending"      # bản ghi cũ (không có khoá) -> bỏ
+        if not (old_pending or clean_pending):
             continue
         job_atts = by_job.get(d.get("jobid"), [])
         if not job_atts:                         # chưa thấy attest nào cho jobid này
             if now_ms - d.get("ts", now_ms) > expire_ms:
-                d["status"] = "unattested"
+                if old_pending:
+                    d["status"] = "unattested"
+                if clean_pending:
+                    d["clean"] = "unattested"
                 d.pop("cands", None)
             continue
-        # rh khớp ứng viên -> lộ recipe thật + đánh dấu xác nhận bằng rh (bonus, không bắt buộc)
         cand = d.get("cands") or {}
         cand_vals = set(cand.values())
-        for a in job_atts:
-            if a["rh"] and a["rh"] in cand_vals:
-                for recipe, h in cand.items():
-                    if h == a["rh"]:
-                        d["matched_recipe"] = recipe
-                        break
-                d["matched_by"] = "rh"
-                break
-        # đa số phiếu trên MỌI attest của jobid (1 worker/job -> đều nói về ta)
-        useful_votes = sum(1 for a in job_atts if a["verdict"].startswith("useful"))
-        not_votes = sum(1 for a in job_atts if a["verdict"].startswith("not"))
-        if useful_votes == not_votes:            # hoà (kể cả 0-0: verdict lạ) -> chưa chốt
-            unresolved += 1
-            continue
-        d["status"] = "useful" if useful_votes > not_votes else "not"
-        _bump_lifetime(state, d["status"])   # cộng dồn TRƯỚC khi bản này rơi khỏi cửa sổ
-        d.setdefault("matched_by", "jobid")      # quy kết bằng jobid nếu rh không lộ recipe
-        d.pop("cands", None)                      # đã chốt -> bỏ tập hash cho gọn state
+        if old_pending:
+            # rh khớp ứng viên -> lộ recipe thật + đánh dấu xác nhận bằng rh (bonus)
+            for a in job_atts:
+                if a["rh"] and a["rh"] in cand_vals:
+                    for recipe, h in cand.items():
+                        if h == a["rh"]:
+                            d["matched_recipe"] = recipe
+                            break
+                    d["matched_by"] = "rh"
+                    break
+            # đa số phiếu trên MỌI attest của jobid (bộ đếm cũ — giữ nguyên để so mốc)
+            useful_votes = sum(1 for a in job_atts if a["verdict"].startswith("useful"))
+            not_votes = sum(1 for a in job_atts if a["verdict"].startswith("not"))
+            if useful_votes == not_votes:        # hoà (kể cả 0-0: verdict lạ) -> chưa chốt
+                unresolved += 1
+            else:
+                d["status"] = "useful" if useful_votes > not_votes else "not"
+                _bump_lifetime(state, d["status"])
+                d.setdefault("matched_by", "jobid")
+        if clean_pending:
+            votes = [a for a in job_atts                 # bỏ phiếu 'not' chấm bài KHÁC
+                     if not (a["verdict"].startswith("not") and a["rh"]
+                             and cand_vals and a["rh"] not in cand_vals)]
+            cu = sum(1 for a in votes if a["verdict"].startswith("useful"))
+            cn = sum(1 for a in votes if a["verdict"].startswith("not"))
+            if cu != cn:
+                d["clean"] = "useful" if cu > cn else "not"
+                _bump_lifetime(state, d["clean"], CLEAN_KEY)
+        if d.get("status") != "pending" and d.get("clean") != "pending":
+            d.pop("cands", None)                  # cả hai đã chốt -> bỏ tập hash cho gọn
     return summary(state, ambiguous_now=unresolved)
 
 
@@ -208,6 +238,9 @@ def summary(state: dict, ambiguous_now: int = 0) -> dict:
     lt = lifetime(state)                      # cộng dồn: không bị cửa sổ vài giờ làm nhiễu
     c["lt_useful"], c["lt_not"], c["lt_n"] = lt["useful"], lt["not"], lt["n"]
     c["lifetime_rate"] = lt["rate"]
+    cl = lifetime(state, CLEAN_KEY)           # SẠCH: bỏ phiếu 'not' chấm bài người khác
+    c["clean_useful"], c["clean_not"], c["clean_n"] = cl["useful"], cl["not"], cl["n"]
+    c["clean_rate"] = cl["rate"]
     # recipe đã học được (nếu có) — thuật toán rh thật, dùng cho các lần sau
     recipes = {d["matched_recipe"] for d in ds if d.get("matched_recipe")}
     c["recipe"] = sorted(recipes)
@@ -220,8 +253,10 @@ def summary_line(c: dict) -> str:
     rec = ("|rh=" + ",".join(c["recipe"])) if c.get("recipe") else ""
     lt = ("" if c.get("lifetime_rate") is None else
           f" lifetime={c['lifetime_rate']*100:.0f}%/n={c.get('lt_n', 0)}")
+    cl = ("" if c.get("clean_rate") is None else
+          f" clean={c['clean_rate']*100:.0f}%/n={c.get('clean_n', 0)}")
     return (f"kibble-score delivered={c['delivered']} useful={c['useful']} not={c['not']} "
-            f"useful_rate={rate} pending={c['pending']} unattested={c['unattested']}{lt}{rec}")
+            f"useful_rate={rate} pending={c['pending']} unattested={c['unattested']}{lt}{cl}{rec}")
 
 
 if __name__ == "__main__":                        # demo offline

@@ -393,3 +393,45 @@ def test_select_jobs_takes_family_again_after_ttl():
                            recent_fps=recent, dup_sim=0.85, now_ms=late,
                            ttl_ms=6 * 3600 * 1000)
     assert sum(1 for p in picked if "dupe-filter" in p["title"]) == 1   # hết hạn -> làm lại
+
+
+# --- trim_to_sentence: không chặt ngang chữ (bài cụt "...a heap fetch f") -------------
+def _long(n_sentences=40, tail=" Use a composite index to perform a heap fetch f"):
+    return ("Composite indexes reduce random IO for range scans. " * n_sentences) + tail
+
+
+def test_trim_short_text_unchanged():
+    assert k.trim_to_sentence("  A short answer.  ", 1200) == "A short answer."
+
+
+def test_trim_ends_on_complete_sentence_not_mid_word():
+    s = _long()
+    assert len(s) > 1200
+    out = k.trim_to_sentence(s, 1200)
+    assert len(out) <= 1200 and out.endswith("scans.")
+    assert not s[:1200].endswith(".")                      # bản cắt cứng cũ thì cụt
+
+
+def test_trim_drops_dangling_list_marker_after_sentence():
+    s = ("Latency bounds hold for each region. " * 40) + "4. Next step continues here"
+    cap = s.index("4.") + 2                                # cắt ngay sau "4."
+    out = k.trim_to_sentence(s, cap)
+    assert out.endswith("region.") and not out.endswith("4.")
+
+
+def test_trim_keeps_a_real_number_ending_a_sentence():
+    s = ("x " * 300) + "The answer is 4. " + ("word " * 300)
+    cap = s.index("4.") + 2
+    assert k.trim_to_sentence(s, cap).endswith("is 4.")
+
+
+def test_trim_decimal_is_not_a_sentence_end():
+    s = ("word " * 300) + "Version 3.5 adds support for" + (" more words" * 50)
+    out = k.trim_to_sentence(s, len(s) - 20)
+    assert not out.endswith("3.")
+
+
+def test_trim_without_sentence_end_cuts_on_word_and_marks_it():
+    s = "word " * 400
+    out = k.trim_to_sentence(s, 1200)
+    assert len(out) <= 1201 and out.endswith("…") and out[:-1].endswith("word")

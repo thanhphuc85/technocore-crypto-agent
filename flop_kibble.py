@@ -205,6 +205,30 @@ def remember_fingerprint(recent, fp, keep: int = DUP_KEEP, *,
     return out[: max(0, int(keep))]
 
 
+_SENT_END = re.compile(r"[.!?](?=\s|$)")
+# Đầu mục danh sách bị treo ngay sau một câu ("... bounds. 4.") — chỉ khi đứng SAU dấu kết
+# câu, để không xoá con số thật cuối câu ("the answer is 4.").
+_DANGLING_ITEM = re.compile(r"(?<=[.!?:])\s+(?:\d{1,2}[.)]|\*)$")
+
+
+def trim_to_sentence(text: str, cap: int) -> str:
+    """Rút `text` về <= cap ký tự, kết thúc ở CUỐI CÂU hoàn chỉnh gần nhất.
+
+    Vì sao: cắt cứng text[:cap] chặt ngang chữ ("...a potential bottlen") — đo 2026-10-21:
+    độ dài trung vị bài giao đúng bằng trần 1200, gần như bài nào cũng cụt. Bài cụt trông
+    như rác. Chỉ nhận điểm cắt ở nửa sau (>= 50% trần) để không vứt quá nhiều nội dung;
+    không có điểm kết câu nào ở đó thì cắt ở ranh giới từ và thêm '…' cho trung thực."""
+    t = (text or "").strip()
+    if cap <= 0 or len(t) <= cap:
+        return t
+    head = t[:cap]
+    ends = [m.end() for m in _SENT_END.finditer(head) if m.end() >= cap * 0.5]
+    if ends:
+        return _DANGLING_ITEM.sub("", head[:ends[-1]]).rstrip()
+    cut = head.rsplit(None, 1)[0] if " " in head else head[:-1]
+    return cut.rstrip(" ,;:-") + "…"
+
+
 def format_claim(jobid: str) -> str:
     return f"CLAIM v1 | {jobid} | worker"
 

@@ -387,3 +387,10 @@ def test_session_fields_default_to_zero_when_absent():
     s = fr.summarize({"balances": {}, "entries": []}, NOW)
     assert s["session_total"] == "0" and s["session_count"] == 0
     assert s["session_today"] == "0"
+
+
+
+def test_compact_kibble_shows_clean_score_when_present():
+    full = _FULL + " clean=82%/n=40"
+    assert "sạch 82% (n=40)" in fr.compact_kibble(full)
+    assert "sạch" not in fr.compact_kibble(_FULL)          # chưa có bộ sạch -> không bịa

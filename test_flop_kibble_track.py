@@ -211,3 +211,61 @@ def test_summary_line_shows_lifetime():
 
 def test_summary_line_omits_lifetime_when_empty():
     assert "lifetime=" not in kt.summary_line(kt.summary({}))
+
+
+# --- bộ đếm SẠCH: bỏ phiếu chấm bài NGƯỜI KHÁC và attester "đóng dấu" ----------------
+JOB = "kab00000001"
+
+
+def _att(jobid, verdict, who, rh=None, why="x"):
+    mid = f" | rh:{rh}" if rh else ""
+    return {"text": f"ATTEST v1 | {jobid} | {verdict}{mid} | {why}", "from": who}
+
+
+def _deliver(st, jobid=JOB, answer="a real technical answer with specifics"):
+    kt.record_deliveries(st, [{"jobid": jobid, "answer": answer}], 1000)
+    return st["kibble_deliveries"][-1]["cands"]
+
+
+def test_foreign_rh_not_vote_ignored_by_clean_but_kept_by_old():
+    # Đúng board thật: phiếu 'not' có rh của bài bot "Completed work on ..." cùng jobid.
+    st = {}
+    _deliver(st)
+    msgs = [_att(JOB, "useful", "did:a"),
+            _att(JOB, "not", "did:b", rh="ffffffffffffffff"),
+            _att(JOB, "not", "did:c", rh="eeeeeeeeeeeeeeee")]
+    sm = kt.reconcile(st, msgs, 2000)
+    assert st["kibble_lifetime"] == {"not": 1}             # bộ cũ: 1 useful vs 2 not
+    assert st[kt.CLEAN_KEY] == {"useful": 1}               # bộ sạch: 2 phiếu kia chấm bài khác
+    assert sm["clean_rate"] == 1.0 and "clean=100%/n=1" in kt.summary_line(sm)
+
+
+def test_not_vote_with_matching_rh_counts_in_clean():
+    st = {}
+    cands = _deliver(st)
+    mine = cands["sha256/body"]
+    kt.reconcile(st, [_att(JOB, "not", "did:b", rh=mine)], 2000)
+    assert st[kt.CLEAN_KEY] == {"not": 1}
+
+
+def test_clean_waits_on_tie_while_old_decides_and_keeps_cands():
+    st = {}
+    _deliver(st)
+    msgs = [_att(JOB, "useful", "did:a"), _att(JOB, "not", "did:b"),
+            _att(JOB, "not", "did:c", rh="ffffffffffffffff")]
+    kt.reconcile(st, msgs, 2000)
+    d = st["kibble_deliveries"][-1]
+    assert d["status"] == "not" and d["clean"] == "pending"
+    assert d.get("cands")                                  # còn cần hash cho bộ sạch
+
+
+def test_legacy_delivery_without_clean_key_never_counted_in_clean():
+    st = {"kibble_deliveries": [{"jobid": JOB, "ts": 1000, "status": "pending"}]}
+    kt.reconcile(st, [_att(JOB, "useful", "did:a")], 2000)
+    assert st["kibble_lifetime"] == {"useful": 1} and not st.get(kt.CLEAN_KEY)
+
+
+def test_merge_lifetime_works_for_clean_key():
+    st = {kt.CLEAN_KEY: {"useful": 5, "not": 1}}
+    kt.merge_lifetime(st, {"useful": 3, "not": 4}, key=kt.CLEAN_KEY)
+    assert st[kt.CLEAN_KEY] == {"useful": 5, "not": 4}

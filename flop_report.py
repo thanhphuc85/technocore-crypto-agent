@@ -129,6 +129,7 @@ def summarize(ledger, now: int, token: str = "FLOP", window_s: int = WINDOW_S,
 _K_DELIVERED = re.compile(r"(\d+)\u2713")
 _K_RATE = re.compile(r"useful_rate=(\d+%|n/a)")
 _K_LIFETIME = re.compile(r"lifetime=(\d+)%/n=(\d+)")
+_K_CLEAN = re.compile(r"clean=(\d+)%/n=(\d+)")
 
 
 def compact_kibble(status: str) -> str:
@@ -157,6 +158,9 @@ def compact_kibble(status: str) -> str:
     m = _K_LIFETIME.search(txt)
     if m:
         parts.append(f"lifetime {m.group(1)}% (n={m.group(2)})")
+    m = _K_CLEAN.search(txt)               # bỏ phiếu 'not' chấm bài của người khác
+    if m:
+        parts.append(f"sạch {m.group(1)}% (n={m.group(2)})")
     return " \u00b7 ".join(parts) if parts else txt
 
 
