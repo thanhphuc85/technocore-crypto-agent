@@ -1821,6 +1821,55 @@ _gemini_404 = set()
 GEMINI_404_MAX = 50                  # trần kích thước -> state không phình
 
 
+# Model Gemini vừa trả 429 (hết quota) -> {model: hết hạn lúc (epoch)}. KHÁC 404: 429 là
+# TẠM THỜI nên chỉ né trong một khoảng; hết hạn thì thử lại. Không nhớ thì MỖI run mới
+# lại thử từ đầu danh sách ưu tiên: log đo được 3 model 429 liên tiếp ở mọi run trước
+# khi tới model chạy được. Bền qua state như _gemini_404.
+_gemini_429 = {}
+GEMINI_429_COOLDOWN_SEC = int(_env_float("GEMINI_429_COOLDOWN_SEC", 3 * 3600))
+
+
+def _is_http_429(e) -> bool:
+    return getattr(getattr(e, "response", None), "status_code", None) == 429
+
+
+def _gemini_cooling(model, now: float = None) -> bool:
+    """True nếu model đang trong thời gian né sau một lần 429."""
+    until = _gemini_429.get(model)
+    return bool(until) and until > (now if now is not None else time.time())
+
+
+def _gemini_note_429(model, e, now: float = None) -> None:
+    """Né model vừa 429 trong GEMINI_429_COOLDOWN_SEC. Chỉ 429 — 503/timeout không né."""
+    if model and _is_http_429(e) and GEMINI_429_COOLDOWN_SEC > 0:
+        _gemini_429[model] = (now if now is not None else time.time()) + GEMINI_429_COOLDOWN_SEC
+
+
+def gemini_memory_load(state: dict, now: float = None) -> None:
+    """Đầu run: nạp model chạy được lần trước + các model đang né 429 (bỏ mục hết hạn)."""
+    global _gemini_model_cache
+    now = now if now is not None else time.time()
+    last = state.get("gemini_last_good")
+    if isinstance(last, str) and last and last not in _gemini_404 and not _gemini_model_cache:
+        _gemini_model_cache = last
+    for m, until in (state.get("gemini_429") or {}).items():
+        try:
+            if float(until) > now:
+                _gemini_429[m] = float(until)
+        except (TypeError, ValueError):
+            continue
+
+
+def gemini_memory_dump(now: float = None) -> dict:
+    """Cuối run: thứ cần lưu (chỉ mục còn hạn, có trần) — {} nếu không có gì."""
+    now = now if now is not None else time.time()
+    live = {m: u for m, u in _gemini_429.items() if u > now}
+    out = {"gemini_429": dict(sorted(live.items(), key=lambda kv: -kv[1])[:GEMINI_404_MAX])}
+    if _gemini_model_cache:
+        out["gemini_last_good"] = _gemini_model_cache
+    return out
+
+
 def _is_http_404(e) -> bool:
     """True nếu lỗi là HTTP 404 — dựa vào status_code THẬT, không so chuỗi thông báo."""
     return getattr(getattr(e, "response", None), "status_code", None) == 404
@@ -1860,7 +1909,7 @@ def _gemini_candidates():
     happy-path (ghim/cache chạy được) KHÔNG tốn thêm call nào. Chỉ khi model ghim FAIL,
     generator mới chạy tiếp -> lúc đó mới list để lọc 404 cho các fallback."""
     pinned = GEMINI_MODEL
-    if pinned and pinned not in _gemini_404:
+    if pinned and pinned not in _gemini_404 and not _gemini_cooling(pinned):
         yield pinned                     # thử model ghim trước — chưa cần list
     # Tới đây = ghim đã fail (hoặc không ghim) -> giờ mới list để lọc model không tồn tại.
     try:
@@ -1868,12 +1917,13 @@ def _gemini_candidates():
     except Exception as e:
         print(f"[llm:gemini] list models failed | {e}")
         for p in GEMINI_PREFERRED:       # không list được -> đành đoán (hành vi cũ)
-            if p != pinned and p not in _gemini_404:
+            if p != pinned and p not in _gemini_404 and not _gemini_cooling(p):
                 yield p
         return
     print(f"[llm:gemini] available ({len(models)}): {', '.join(models[:12])}"
           + (" ..." if len(models) > 12 else ""))
     seen = set(_gemini_404)              # model đã 404 -> coi như đã loại
+    seen.update(m for m in models if _gemini_cooling(m))   # đang né 429 -> tạm loại
     if pinned:
         seen.add(pinned)
     for p in GEMINI_PREFERRED:           # ưu tiên trước — nhưng CHỈ cái có trên key
@@ -1923,6 +1973,7 @@ def _gemini_reply(user_text: str, system: str, temperature: float,
             print(f"[llm:gemini] cached {_gemini_model_cache} -> {str(e)[:80]}, fallback")
             tried.add(_gemini_model_cache)
             _gemini_note_404(_gemini_model_cache, e)
+            _gemini_note_429(_gemini_model_cache, e)
             _gemini_model_cache = None
 
     # 2) Lùi về danh sách ưu tiên (áp dụng cả khi user ghim GEMINI_MODEL nhưng nó fail).
@@ -1939,6 +1990,7 @@ def _gemini_reply(user_text: str, system: str, temperature: float,
             print(f"[llm:gemini] {model} -> {str(e)[:80]}")
             tried.add(model)
             _gemini_note_404(model, e)
+            _gemini_note_429(model, e)
     raise last_err or RuntimeError("no gemini model available")
 
 
@@ -3606,6 +3658,8 @@ def main():
     hydrate_ledger_from_kv()          # sổ cái token BỀN qua KV -> metering tích luỹ, không mất mỗi run
     # Nạp danh sách model Gemini đã 404 (vĩnh viễn) -> run này khỏi thử lại, không phí call.
     _gemini_404.update(state.get("gemini_404") or [])
+    # Model chạy được lần trước + model đang né 429 -> run này gọi thẳng, không dò lại.
+    gemini_memory_load(state)
     # Nạp vân tay job đã trả lời -> chống-trùng hiệu lực XUYÊN run, không chỉ trong 1 run.
     # Mục ĐỊNH DẠNG CŨ (list trần, không mốc) được giữ nguyên ở đây; _live_fingerprints
     # coi chúng là đã hết hạn nên chúng không chặn gì, và lần remember kế tiếp dọn sạch.
@@ -4093,6 +4147,7 @@ def main():
     # 3c) Lưu model Gemini 404 học được trong run này -> run sau không thử lại (bền qua KV).
     if _gemini_404:
         save_state({"gemini_404": sorted(_gemini_404)[:GEMINI_404_MAX]})
+    save_state(gemini_memory_dump())
 
     # 4) Tổng kết run + PHÁT HIỆN OUTAGE TOÀN PHẦN.
     #    Nếu KHÔNG một call nào tới technocore.chat thành công trong cả run này

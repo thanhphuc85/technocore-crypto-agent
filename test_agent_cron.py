@@ -2192,6 +2192,95 @@ def test_gemini_candidates_skips_pinned_when_it_404ed(monkeypatch):
     assert out[0] == "good-flash"
 
 
+
+# --- Gemini: né model 429 có thời hạn + nhớ model chạy được qua run ------------------
+def _gemini_fresh(monkeypatch, listed, failing):
+    """listed: model có trên key; failing: {model: status} trả lỗi. Đếm từng call."""
+    monkeypatch.setattr(ac, "GEMINI_MODEL", "")
+    monkeypatch.setattr(ac, "GEMINI_PREFERRED", [])
+    monkeypatch.setattr(ac, "_gemini_404", set())
+    monkeypatch.setattr(ac, "_gemini_429", {})
+    monkeypatch.setattr(ac, "_gemini_model_cache", None)
+    calls = {"list": 0, "gen": []}
+
+    def _list():
+        calls["list"] += 1
+        return list(listed)
+
+    def _call(model, *a, **k):
+        calls["gen"].append(model)
+        if model in failing:
+            raise _FakeHTTPError(failing[model])
+        return "ok"
+    monkeypatch.setattr(ac, "_gemini_list_models", _list)
+    monkeypatch.setattr(ac, "_gemini_call", _call)
+    return calls
+
+
+_LOG_MODELS = ["gemini-flash-lite-latest", "gemini-flash-latest", "gemini-3-flash-preview",
+               "gemini-3.1-flash-lite-preview"]
+_LOG_429 = {m: 429 for m in _LOG_MODELS[:3]}
+
+
+def test_gemini_429_only_temporary_and_only_429(monkeypatch):
+    monkeypatch.setattr(ac, "_gemini_429", {})
+    ac._gemini_note_429("busy", _FakeHTTPError(503), now=1000)
+    ac._gemini_note_429("quota", _FakeHTTPError(429), now=1000)
+    assert "busy" not in ac._gemini_429                     # 503 không né
+    assert ac._gemini_cooling("quota", now=1000 + 60)
+    assert not ac._gemini_cooling("quota", now=1000 + ac.GEMINI_429_COOLDOWN_SEC + 1)
+    assert "quota" not in ac._gemini_404                    # 429 KHÔNG bao giờ thành 404
+
+
+def test_gemini_second_run_skips_429_models_from_log(monkeypatch):
+    # Run 1: đúng như log — 3 model 429 rồi mới tới model chạy được.
+    calls = _gemini_fresh(monkeypatch, _LOG_MODELS, _LOG_429)
+    assert ac._gemini_reply("q", "sys", 0.2) == "ok"
+    assert calls["gen"] == _LOG_MODELS
+    saved = ac.gemini_memory_dump()
+    assert saved["gemini_last_good"] == "gemini-3.1-flash-lite-preview"
+    assert set(saved["gemini_429"]) == set(_LOG_429)
+
+    # Run 2: process mới (bộ nhớ trong RAM mất), nạp lại từ state.
+    calls = _gemini_fresh(monkeypatch, _LOG_MODELS, _LOG_429)
+    ac.gemini_memory_load(saved)
+    assert ac._gemini_reply("q", "sys", 0.2) == "ok"
+    assert calls["gen"] == ["gemini-3.1-flash-lite-preview"]   # gọi thẳng, 0 call hỏng
+    assert calls["list"] == 0                                   # khỏi list models
+
+
+def test_gemini_last_good_failing_skips_cooling_models(monkeypatch):
+    # Model chạy được lần trước cũng 429 -> dò lại, nhưng bỏ qua model còn đang né.
+    calls = _gemini_fresh(monkeypatch, _LOG_MODELS + ["gemini-other-flash"],
+                          dict(_LOG_429, **{"gemini-3.1-flash-lite-preview": 429}))
+    now = __import__("time").time()
+    ac.gemini_memory_load({"gemini_last_good": "gemini-3.1-flash-lite-preview",
+                           "gemini_429": {m: now + 600 for m in _LOG_429}})
+    assert ac._gemini_reply("q", "sys", 0.2) == "ok"
+    assert calls["gen"] == ["gemini-3.1-flash-lite-preview", "gemini-other-flash"]
+
+
+def test_gemini_memory_load_drops_expired_and_garbage(monkeypatch):
+    monkeypatch.setattr(ac, "_gemini_429", {})
+    monkeypatch.setattr(ac, "_gemini_404", {"ghost"})
+    monkeypatch.setattr(ac, "_gemini_model_cache", None)
+    ac.gemini_memory_load({"gemini_last_good": "ghost",           # đã 404 -> không dùng
+                           "gemini_429": {"old": 10, "new": 2000, "bad": "x"}}, now=1000)
+    assert ac._gemini_model_cache is None
+    assert ac._gemini_429 == {"new": 2000.0}
+    assert "old" not in ac.gemini_memory_dump(now=1000)["gemini_429"]
+
+
+def test_gemini_all_cooling_falls_through_to_next_provider(monkeypatch):
+    # Mọi model trên key đang né -> Gemini báo lỗi để chuỗi provider chuyển sang openrouter,
+    # thay vì đốt call vào model biết chắc đang 429.
+    calls = _gemini_fresh(monkeypatch, _LOG_MODELS[:3], {})
+    now = __import__("time").time()
+    ac.gemini_memory_load({"gemini_429": {m: now + 600 for m in _LOG_MODELS[:3]}})
+    with pytest.raises(Exception):
+        ac._gemini_reply("q", "sys", 0.2)
+    assert calls["gen"] == []
+
 # --- review fallback + chống job gần trùng (A) ----------------------------------------
 
 def _review_job(jobid="k0000000001", title="", body=""):
