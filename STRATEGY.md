@@ -128,3 +128,14 @@ Source: docs.flop.network FAQ "Testnet & Launch Timeline" (updated 2026-10-20).
    Never skip a session to "save budget": unspent faucet FLOP is lost ("If you don't use
    it, you lose it"). Wrong work is already handled by the protocol — the agent pays
    nothing and can challenge (100 FLOP bond; upheld fraud slashes the miner in full).
+8. **Settlement / payment model (code, from the real API).** The scaffold assumes the proof
+   comes back in the mempool response and then pays with a separate signed transfer that
+   has **no recipient**. The docs describe something else: the miner opens a compute
+   channel that pins the **escrowed payment**, proves later, and validators settle in a
+   block. Day-one simulation of both realistic shapes paid **0 FLOP**. Fit from the real
+   API: (a) how a session's payment is escrowed/released, (b) how to poll a pending
+   session (`flop_pending_sessions` in state keeps them meanwhile), (c) record spend when
+   the network confirms settlement, and reconcile the ledger with the on-chain balance.
+   The `[real-spend]` watchdog sends a Telegram alert after `FLOP_REAL_SPEND_ALERT_RUNS`
+   (default 6 ≈ 30 min) runs without a `spent_onchain` session, with the stage it is stuck
+   at and the real field names returned — that log is the fitting guide.

@@ -2877,6 +2877,7 @@ def _mempool_submit_fn(req: dict) -> dict:
         "session_id": data.get("session_id") or data.get("sessionId") or body.get("id"),
         "miner_did": data.get("miner_did") or data.get("minerDid") or data.get("miner"),
         "poui": data.get("poui") or data.get("PoUI") or data.get("proof"),
+        "_raw_keys": sorted(data)[:15],      # tên trường THẬT -> sửa adapter nhanh ngày đầu
     }
 
 
@@ -2890,7 +2891,13 @@ def _faucet_claim_fn(req: dict) -> dict:
     data = r.json() if r.content else {}
     if not isinstance(data, dict):
         data = {}
-    return {"amount": data.get("amount") or data.get("granted") or data.get("value") or req.get("amount")}
+    amt = data.get("amount") or data.get("granted") or data.get("value")
+    if not amt:
+        # Ghi theo lượng XIN là đoán: sổ có thể lệch số dư thật trên chain. Báo to + in khoá.
+        print(f"[faucet] ⚠️ phản hồi không có trường số lượng — tạm ghi theo yêu cầu "
+              f"(keys: {sorted(data)[:15]})")
+        amt = req.get("amount")
+    return {"amount": amt}
 
 
 # --- Giao thức AGENT-TO-AGENT (#5): cho agent khác "gọi API" bằng tin nhắn ---
@@ -4063,6 +4070,7 @@ def main():
     #      Cần FLOP_SESSION_MODEL_HASH (hash trọng số mô hình); thiếu -> skip, KHÔNG bịa hash.
     #      Bọc kín: lỗi bị nuốt, không làm sập run.
     session_status = "off"
+    _wd_settled, _wd_last = 0, {}              # cho bộ canh chi thật (testnet) bên dưới
     if os.environ.get("FLOP_SESSION_ENABLED", "").strip().lower() in ("1", "true", "on", "yes"):
         # Danh sách model_hash (CSV hoặc '|') -> mỗi phiên xoay 1 cái. Thiếu -> skip, KHÔNG bịa.
         # PHẢI import ở ĐẦU nhánh: resolve_model_hashes được gọi NGAY dưới đây, còn import
@@ -4151,6 +4159,9 @@ def main():
                 if _last.get("tx_hash"):
                     extra += f" tx={str(_last['tx_hash'])[:12]}…"
                 print(f"[session] {session_status}{extra}")
+                if _last.get("reason") and not _settled:
+                    print(f"[session] lý do: {str(_last['reason'])[:200]}")
+                _wd_settled, _wd_last = _settled, _last
                 try:
                     import flop_miners as _fm
                     _ms = _fm.summarize(_miner_stats)
@@ -4164,6 +4175,32 @@ def main():
             except Exception as e:
                 session_status = "error"
                 print(f"[session] bỏ qua ({str(e)[:100]})")
+
+    # 3a9b) Bộ canh CHI THẬT (chỉ testnet): N run liền không có phiên spent_onchain -> Telegram.
+    #       Đường chi thật dựng trên giả định API chưa công bố; im lặng = mất các ngày đầu.
+    if session_status != "off":
+        try:
+            import token_manager as _tmw
+            if _tmw.testnet_enabled():
+                import flop_watchdog as _wd
+                _pend = _wd.note_pending(state, _wd_last, now)
+                _led = _tmw.load_ledger()
+                _today = time.strftime("%Y-%m-%d", time.gmtime(now))
+                _sbd = ((_led.get("session_by_day") or {}).get(_tmw.default_token()) or {})
+                _w = _wd.observe(
+                    state, settled_onchain=_wd_settled, status=session_status,
+                    spent_today_onchain=_sbd.get(_today, 0), now=now,
+                    balance=_tmw.check_balance(), pending=_pend,
+                    reason=_wd_last.get("reason", ""),
+                    alert_runs=int(_env_float("FLOP_REAL_SPEND_ALERT_RUNS", 6)),
+                    realert_sec=int(_env_float("FLOP_REAL_SPEND_REALERT_HOURS", 6) * 3600))
+                save_state({_wd.KEY: state.get(_wd.KEY), _wd.PENDING_KEY: state.get(_wd.PENDING_KEY)})
+                for _k in ("alert", "recovered"):
+                    if _w.get(_k):
+                        print(f"[real-spend] {_w[_k].splitlines()[0]}")
+                        _telegram_send(_w[_k])
+        except Exception as e:
+            print(f"[real-spend] bỏ qua ({str(e)[:100]})")
 
     # 3b) (Tùy chọn, GATED) Công khai tiến độ MỞ KHÓA MAINNET 3:1 vào KV note `unlock`
     #     để ai cũng audit được (GET /kv/<ns>/unlock). Mặc định TẮT (FLOP_PUBLISH_UNLOCK)

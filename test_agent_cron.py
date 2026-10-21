@@ -2818,3 +2818,25 @@ def test_kibble_prompt_states_the_real_length_limit():
     # Prompt cũ bảo "you have room" rồi code chặt ở 1200 -> bài cụt giữa chữ.
     assert "you have room" not in ac.KIBBLE_SYSTEM
     assert str(ac.KIBBLE_MAX_CHARS) in ac.KIBBLE_SYSTEM and "complete sentence" in ac.KIBBLE_SYSTEM
+
+
+
+def _resp_with_body(data):
+    r = _Resp(data=data)
+    r.content = b"{...}"                      # adapter chỉ parse JSON khi có body
+    return r
+
+
+def test_mempool_adapter_reports_real_field_names(monkeypatch):
+    monkeypatch.setattr(ac.requests, "post", lambda *a, **k: _resp_with_body(
+        data={"sessionId": "net-9", "miner": "did:key:zM", "channel": {"escrow": "1"}}))
+    out = ac._mempool_submit_fn({"url": "http://m", "request": {"id": "r"}})
+    assert out["session_id"] == "net-9" and out["miner_did"] == "did:key:zM"
+    assert out["_raw_keys"] == ["channel", "miner", "sessionId"]
+
+
+def test_faucet_adapter_warns_when_amount_field_missing(monkeypatch, capsys):
+    monkeypatch.setattr(ac.requests, "post", lambda *a, **k: _resp_with_body({"tx": "0xabc"}))
+    out = ac._faucet_claim_fn({"faucet_url": "http://f", "signed": {}, "amount": "100"})
+    assert out["amount"] == "100"
+    assert "không có trường số lượng" in capsys.readouterr().out

@@ -236,7 +236,8 @@ def submit_request(request: dict, *, submit_fn=None, log=print, sim_miner_pool: 
         except Exception as e:
             return {"outcome": "error_submit", "reason": f"đăng mempool thất bại: {e}"}
         if not accept.get("session_id") or not accept.get("miner_did"):
-            return {"outcome": "no_miner", "reason": "không thợ đào nào nhận phiên"}
+            return {"outcome": "no_miner",
+                    "reason": f"không thợ đào nào nhận phiên (keys: {accept.get('_raw_keys') or sorted(accept)})"}
         return {"outcome": "accepted", "accept": accept}
 
     # SIMULATION: thợ đào giả nhận ngay + trả PoUI giả.
@@ -249,16 +250,31 @@ def submit_request(request: dict, *, submit_fn=None, log=print, sim_miner_pool: 
 
 # --- Xác minh PoUI (liên kết + hiện diện; KHÔNG phải xác minh mật mã đầy đủ) --------
 
-def verify_poui(request: dict, poui: dict) -> dict:
-    """Kiểm PoUI trả về có KHỚP phiên không: gắn đúng session_id, có commitment + chữ ký thợ
-    đào. CHỦ Ý CHỈ kiểm liên kết/hiện diện — KHÔNG kiểm tính đúng mật mã của commitment (cần
-    spec FLOP). Trả {ok, reason}."""
+# Tên trường theo thuật ngữ tài liệu FLOP ("activation commitments and a co-signed
+# transcript root") + tên của PoUI giả trong simulation. Wire-format thật chưa công bố;
+# lỗi vẫn in ra danh sách khoá thật để sửa nhanh ngày đầu.
+_POUI_COMMIT_KEYS = ("commitment", "commitments", "activation_commitments",
+                     "activation_commitment", "transcript_root", "proof_hash")
+_POUI_SIG_KEYS = ("miner_sig", "miner_signature", "signature", "cosig", "co_signature",
+                  "cosignature", "transcript_sig")
+_POUI_SESSION_KEYS = ("session_id", "sessionId", "session")
+
+
+def verify_poui(request: dict, poui: dict, session_id: str = None) -> dict:
+    """Kiểm PoUI trả về có KHỚP phiên không + có commitment và chữ ký. CHỦ Ý CHỈ kiểm liên
+    kết/hiện diện — KHÔNG kiểm mật mã (cần spec FLOP; sai thì mạng xử qua challenge game).
+
+    Phiên được nhận diện bằng mã MẠNG cấp (`session_id` từ mempool) HOẶC mã yêu cầu của ta:
+    mạng gần như chắc chắn cấp mã riêng, trước đây đòi trùng mã của ta nên proof thật luôn
+    bị loại. Trả {ok, reason}."""
     if not isinstance(poui, dict):
         return {"ok": False, "reason": "PoUI rỗng/không hợp lệ"}
-    if poui.get("session_id") != request.get("id"):
-        return {"ok": False, "reason": "PoUI không gắn đúng phiên (session_id lệch)"}
-    if not poui.get("commitment") or not poui.get("miner_sig"):
-        return {"ok": False, "reason": "PoUI thiếu commitment hoặc chữ ký thợ đào"}
+    keys = sorted(poui)[:15]
+    sid = next((poui.get(k) for k in _POUI_SESSION_KEYS if poui.get(k)), None)
+    if sid is not None and sid not in {request.get("id"), session_id} - {None}:
+        return {"ok": False, "reason": f"PoUI không gắn đúng phiên (session_id {str(sid)[:24]} lệch; keys: {keys})"}
+    if not any(poui.get(k) for k in _POUI_COMMIT_KEYS) or not any(poui.get(k) for k in _POUI_SIG_KEYS):
+        return {"ok": False, "reason": f"PoUI thiếu commitment hoặc chữ ký thợ đào (keys: {keys})"}
     return {"ok": True, "reason": "PoUI khớp phiên (liên kết + hiện diện; chưa xác minh mật mã)"}
 
 
@@ -319,8 +335,9 @@ def run_inference_session(model_hash: str, max_latency_ms: int, flops: int,
     if poui is None:
         # Testnet có thể trả bất đồng bộ (PoUI tới sau) -> báo pending, caller xử tiếp.
         return {"stage": "await_poui", "outcome": "pending", "request_id": req["id"],
-                "session_id": accept.get("session_id"), "miner_did": accept.get("miner_did")}
-    ver = verify_poui(req, poui)
+                "session_id": accept.get("session_id"), "miner_did": accept.get("miner_did"),
+                "reason": f"mempool nhận phiên nhưng chưa trả proof (keys: {accept.get('_raw_keys') or sorted(accept)})"}
+    ver = verify_poui(req, poui, accept.get("session_id"))
     if not ver["ok"]:
         d = dispute(req, poui, ver["reason"], path=path, log=log)
         return {"stage": "verify", "request_id": req["id"], **d}

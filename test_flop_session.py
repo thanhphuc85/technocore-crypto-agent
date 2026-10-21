@@ -61,7 +61,7 @@ def test_run_session_simulation_happy_path(tmp_path):
 def test_run_session_disputes_on_bad_poui(tmp_path, monkeypatch):
     p = _ledger(tmp_path)
     tm.credit("10", path=p)
-    monkeypatch.setattr(fsess, "verify_poui", lambda req, poui: {"ok": False, "reason": "sai"})
+    monkeypatch.setattr(fsess, "verify_poui", lambda req, poui, *a: {"ok": False, "reason": "sai"})
     out = fsess.run_inference_session("a" * 16, 2000, 1000, [], "0.05", path=p)
     assert out["stage"] == "verify" and out["outcome"] == "disputed"
     # Khiếu nại -> KHÔNG thanh toán -> số dư giữ nguyên.
@@ -237,3 +237,58 @@ def test_plan_rejects_garbage():
     for args in [("x", "0.001", 10**9), ("1", "0", 10**9), ("1", "0.001", 0),
                  ("1", "0.001", "nope"), (None, "0.001", 10**9)]:
         assert fsess.plan_session_spend(*args) == []
+
+
+# --- Ngày đầu testnet: proof theo mã phiên MẠNG cấp + thuật ngữ tài liệu ---------------
+_REQ = {"id": "our-req-1"}
+_DOC_POUI = {"session_id": "net-7f3a", "activation_commitments": ["ab12"],
+             "transcript_root": "cd34", "cosig": "sig"}
+
+
+def test_verify_accepts_network_session_id_and_doc_terms():
+    assert fsess.verify_poui(_REQ, _DOC_POUI, "net-7f3a")["ok"]
+
+
+def test_verify_still_accepts_our_own_id_and_mock_poui():
+    mock = {"session_id": "our-req-1", "commitment": "c", "miner_sig": "s"}
+    assert fsess.verify_poui(_REQ, mock)["ok"]
+    assert fsess.verify_poui(_REQ, mock, "net-other")["ok"]
+
+
+def test_verify_rejects_foreign_session_and_reports_real_keys():
+    r = fsess.verify_poui(_REQ, dict(_DOC_POUI, session_id="net-OTHER"), "net-7f3a")
+    assert not r["ok"] and "lệch" in r["reason"] and "activation_commitments" in r["reason"]
+    r = fsess.verify_poui(_REQ, {"session_id": "net-7f3a", "blob": "x"}, "net-7f3a")
+    assert not r["ok"] and "keys: ['blob', 'session_id']" in r["reason"]
+
+
+def test_day_one_doc_shaped_proof_now_settles_onchain(tmp_path, monkeypatch):
+    # Kịch bản 2 từng ra verify/disputed và 0 giao dịch thật.
+    p = _ledger(tmp_path)
+    monkeypatch.setenv("TESTNET_ENABLED", "true")
+    monkeypatch.setenv("FLOP_MEMPOOL_URL", "http://mempool.test")
+    monkeypatch.setenv("FLOP_RPC_URL", "http://rpc.test")
+    tm.credit("50", path=p)
+    paid = []
+    out = fsess.run_inference_session(
+        "real-model", 2000, 10**9, [], "0.5", path=p,
+        submit_fn=lambda req: {"session_id": "net-7f3a", "miner_did": "did:key:zM",
+                               "poui": _DOC_POUI},
+        submit_tx=lambda tx: paid.append(tx) or {"tx_hash": "0x" + "c" * 62},
+        log=lambda *a: None)
+    assert out["stage"] == "settle" and out["outcome"] == "spent_onchain" and len(paid) == 1
+
+
+def test_day_one_async_proof_is_pending_with_diagnostics(tmp_path, monkeypatch):
+    # Kịch bản 1: mempool nhận phiên, proof đến sau -> pending, kèm tên trường thật để sửa.
+    p = _ledger(tmp_path)
+    monkeypatch.setenv("TESTNET_ENABLED", "true")
+    monkeypatch.setenv("FLOP_MEMPOOL_URL", "http://mempool.test")
+    tm.credit("50", path=p)
+    out = fsess.run_inference_session(
+        "real-model", 2000, 10**9, [], "0.5", path=p,
+        submit_fn=lambda req: {"session_id": "net-1", "miner_did": "did:key:zM",
+                               "_raw_keys": ["channel", "miner", "session"]},
+        log=lambda *a: None)
+    assert out["stage"] == "await_poui" and out["outcome"] == "pending"
+    assert out["session_id"] == "net-1" and "channel" in out["reason"]
