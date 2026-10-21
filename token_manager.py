@@ -229,6 +229,7 @@ def _unlock_state(state: dict) -> dict:
     return u
 
 
+HOUR_KEEP = 25               # đủ cho cửa sổ 24h trượt
 DAY_KEEP = 7                 # giữ 7 ngày gần nhất (đủ cho pacer + báo cáo), chặn phình
 
 
@@ -307,6 +308,18 @@ def _accrue_cumulative(state: dict, token: str, amount: Decimal) -> None:
         cc[token] = int(cc.get(token, 0)) + 1
     except (TypeError, ValueError):
         cc[token] = 1
+    # Đếm theo GIỜ UTC (giữ HOUR_KEEP giờ): đếm "trong 1h/24h qua" từ entries sẽ hụt khi
+    # log bị cắt còn 20 bản ghi -> trần FLOP_MAX_SPENDS_PER_HOUR >20 vô tác dụng.
+    by = state.setdefault("spend_count_by_hour", {})
+    tok = by.get(token) if isinstance(by.get(token), dict) else {}
+    hour = time.strftime("%Y-%m-%dT%H", time.gmtime(int(time.time())))
+    try:
+        tok[hour] = int(tok.get(hour, 0)) + 1
+    except (TypeError, ValueError):
+        tok[hour] = 1
+    for h in sorted(tok)[:-HOUR_KEEP]:
+        tok.pop(h, None)
+    by[token] = tok
 
 
 def cumulative_spent(state: dict, token: str = None) -> Decimal:
@@ -552,16 +565,39 @@ def max_spends_per_hour():
 
 
 def _recent_spend_count(token: str, now: int, window: int = 3600, path: str = None) -> int:
-    """Số entry kind='spend' của `token` trong `window` giây gần đây (mặc định 1 giờ)."""
+    """Số lần chi `token` trong `window` giây gần đây (mặc định 1 giờ).
+
+    Entries phủ HẾT cửa sổ (có bản ghi cũ hơn mốc cắt) -> đếm chính xác từ entries. Ngược
+    lại log có thể đã bị cắt (KV chỉ giữ 20 bản ghi) -> dùng bộ đếm theo giờ, tính cả giờ
+    chứa mốc cắt nên là CẬN TRÊN (an toàn cho trần tần suất: thà chặn sớm hơn đếm hụt)."""
     cutoff = now - window
-    n = 0
-    for e in load_ledger(path).get("entries", []):
-        if e.get("kind") != "spend" or e.get("token") != token:
+    led = load_ledger(path)
+    n, covered = 0, False
+    for e in led.get("entries", []):
+        if not isinstance(e, dict) or e.get("kind") != "spend" or e.get("token") != token:
             continue
         ts = _parse_ts(e.get("ts"))
-        if ts is not None and ts >= cutoff:
+        if ts is None:
+            continue
+        if ts >= cutoff:
             n += 1
-    return n
+        else:
+            covered = True
+    if covered:
+        return n
+    by = led.get("spend_count_by_hour")
+    tok = by.get(token) if isinstance(by, dict) else None
+    if not isinstance(tok, dict):
+        return n
+    start = cutoff - cutoff % 3600
+    est = 0
+    for h, v in tok.items():
+        try:
+            if calendar.timegm(time.strptime(h, "%Y-%m-%dT%H")) >= start:
+                est += int(v)
+        except (TypeError, ValueError):
+            continue
+    return max(n, est)
 
 
 def available_today(token: str = None, now: int = None, path: str = None) -> str:
@@ -614,8 +650,14 @@ def spend_stats(token: str = None, now: int = None, path: str = None) -> dict:
     theo thời gian -> farm sẽ lộ (chi tách rời hoạt động). Thuần, đọc từ sổ cái."""
     token = (token or default_token())
     now = int(now if now is not None else time.time())
-    entries = load_ledger(path).get("entries", [])
+    led = load_ledger(path)
+    entries = led.get("entries", [])
     total = sum(1 for e in entries if e.get("kind") == "spend" and e.get("token") == token)
+    cc = led.get("spend_count_cumulative")
+    try:                                     # tổng chạy thắng: entries đã bị cắt còn 20
+        total = max(total, int((cc or {}).get(token, 0)))
+    except (TypeError, ValueError, AttributeError):
+        pass
     last_24h = _recent_spend_count(token, now, 86400, path)
     return {"token": token, "spend_count_total": total, "spend_count_24h": last_24h}
 

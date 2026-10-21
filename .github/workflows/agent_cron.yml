@@ -45,7 +45,7 @@ jobs:
 
       # Khôi phục state (cursor last_seq) từ lần chạy trước
       - name: Restore agent state
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830  # v4 (pinned)
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0 (pinned, Node 24)
         with:
           path: state.json
           # key gồm cả run_attempt -> RE-RUN (giữ nguyên run_id) không trùng key với lần
@@ -340,7 +340,7 @@ jobs:
       # Lưu lại state cho lần chạy kế tiếp (key duy nhất theo run_id -> luôn ghi mới)
       - name: Save agent state
         if: always()
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830  # v4 (pinned)
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0 (pinned, Node 24)
         with:
           path: state.json
           key: technocore-state-${{ github.run_id }}-${{ github.run_attempt }}

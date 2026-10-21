@@ -580,3 +580,40 @@ def test_meter_never_spends_onchain_on_testnet(ledger, monkeypatch):
                            submit_tx=lambda tx: sent.append(tx) or {"tx_hash": "0x1"})
     assert r["outcome"] == "skipped_testnet"
     assert sent == [] and tm.check_balance(path=ledger) == "50"
+
+
+def test_spend_counts_survive_kv_entry_trim(ledger, monkeypatch):
+    # Bản đẩy KV chỉ giữ 20 entries: đếm 24h/tổng phải lấy từ tổng chạy, không hụt về 20.
+    monkeypatch.setenv("FLOP_METER_ENABLED", "true")
+    tm.credit("1", path=ledger)
+    for _ in range(30):
+        tm.meter_inference(path=ledger, event_id="e")
+    led = tm.load_ledger(ledger)
+    led["entries"] = led["entries"][-20:]
+    with open(ledger, "w") as f:
+        json.dump(led, f)
+    st = tm.spend_stats(path=ledger)
+    assert st["spend_count_total"] == 30
+    assert st["spend_count_24h"] == 30
+
+
+def test_rate_cap_holds_above_20_after_trim(ledger, monkeypatch):
+    monkeypatch.setenv("FLOP_METER_ENABLED", "true")
+    monkeypatch.setenv("FLOP_MAX_SPENDS_PER_HOUR", "25")
+    tm.credit("1", path=ledger)
+    for _ in range(25):
+        assert tm.meter_inference(path=ledger, event_id="e")["outcome"] == "spent_simulated"
+    led = tm.load_ledger(ledger)
+    led["entries"] = led["entries"][-20:]               # mô phỏng hydrate từ KV
+    with open(ledger, "w") as f:
+        json.dump(led, f)
+    assert tm.meter_inference(path=ledger, event_id="e")["outcome"] == "skipped_rate_cap"
+
+
+def test_hour_buckets_are_bounded(ledger, monkeypatch):
+    st = {}
+    t0 = 1_800_000_000
+    for i in range(40):
+        monkeypatch.setattr(tm.time, "time", lambda i=i: t0 + i * 3600)
+        tm._accrue_cumulative(st, "FLOP", tm.Decimal("0.001"))
+    assert len(st["spend_count_by_hour"]["FLOP"]) == tm.HOUR_KEEP

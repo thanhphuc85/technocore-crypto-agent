@@ -1693,6 +1693,7 @@ def persist_ledger_to_kv(private_key, did) -> None:
                 "session_by_day": led.get("session_by_day", {}),
                 "sim_credit_count": led.get("sim_credit_count", {}),
                 "spend_count_cumulative": led.get("spend_count_cumulative", {}),
+                "spend_count_by_hour": led.get("spend_count_by_hour", {}),
                 "first_spend_day": led.get("first_spend_day"),
                 "unlock": led.get("unlock", {})}
         entries = (led.get("entries", []) or [])
@@ -4412,8 +4413,10 @@ def main():
     try:                                     # telemetry: đo đóng góp inference tích luỹ (mock/testnet)
         import token_manager
         _st = token_manager.spend_stats()
-        print(f"[ledger] spent_total_mock={token_manager.check_balance()} "
-              f"spend_24h={_st['spend_count_24h']} spend_recent={_st['spend_count_total']}")
+        _led = token_manager.load_ledger()
+        print(f"[ledger] {token_manager.ledger_mode()} balance={token_manager.check_balance()} "
+              f"spent_total={token_manager.cumulative_spent(_led, _st['token'])} "
+              f"spends_total={_st['spend_count_total']} spends_24h={_st['spend_count_24h']}")
     except Exception:
         pass
 
