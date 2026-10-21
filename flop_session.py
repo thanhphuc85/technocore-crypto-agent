@@ -333,6 +333,14 @@ def run_inference_session(model_hash: str, max_latency_ms: int, flops: int,
     chi cho miner cùng-nhóm + là cờ sybil. Chốt an toàn khi match tự nhiên lỡ rơi vào miner nhà."""
     req = build_request(model_hash, max_latency_ms, flops, security_flags, fee,
                         token=token, private_key=private_key, did=did)
+    # Kiểm số dư TRƯỚC khi đăng: đăng rồi mới phát hiện thiếu tiền lúc settle = thợ đào đã
+    # chạy inference mà không được trả (trông như quỵt). Chế độ ngân sách vốn kẹp kế hoạch
+    # <= số dư; chế độ phí cố định / số dư tụt giữa run thì không — chốt ở đây cho mọi đường.
+    bal = tm._parse_amount(tm.check_balance(req["token"], path=path)) or 0
+    fee_d = tm._parse_amount(req["fee"])
+    if fee_d is None or fee_d <= 0 or bal < fee_d:
+        return {"stage": "precheck", "outcome": "skipped_insufficient", "request_id": req["id"],
+                "reason": f"số dư {tm._fmt(bal)} < phí {req['fee']} — KHÔNG đăng phiên không trả nổi"}
     sub = submit_request(req, submit_fn=submit_fn, log=log,
                          sim_miner_pool=sim_miner_pool)
     if sub["outcome"] != "accepted":

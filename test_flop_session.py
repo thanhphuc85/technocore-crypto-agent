@@ -333,3 +333,16 @@ def test_plan_never_emits_zero_flops_sessions():
             assert all(fl >= 1 and float(f) > 0 for f, fl in plan)
             for f, fl in plan:
                 fsess.build_request("a" * 64, 2000, fl, fee=f)        # không còn ValueError
+
+
+
+def test_session_not_posted_when_balance_cannot_cover_fee(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLOP_SESSION_ENABLED", "true")
+    p = str(tmp_path / "l.json")
+    posted = []
+    sub = lambda req: posted.append(1) or {"session_id": "s", "miner_did": "did:key:zM"}
+    r = fsess.maybe_run_session("a" * 64, 2000, 10**9, fee="5", path=p, submit_fn=sub)
+    assert r["outcome"] == "skipped_insufficient" and r["stage"] == "precheck" and posted == []
+    tm.credit("5", path=p)
+    r2 = fsess.run_inference_session("a" * 64, 2000, 10**9, fee="5", path=p)
+    assert r2["stage"] == "settle" and r2["outcome"] == "spent_simulated"     # đủ tiền -> chạy bình thường
