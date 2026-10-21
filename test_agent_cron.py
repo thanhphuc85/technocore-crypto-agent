@@ -32,6 +32,12 @@ class _Resp:
 
 
 @pytest.fixture(autouse=True)
+def _fresh_post_governor(monkeypatch):
+    """Bộ đếm phanh cứng là biến toàn cục: reset mỗi test để đếm không dồn qua các test."""
+    monkeypatch.setattr(ac, "_post_gov_state", {})
+
+
+@pytest.fixture(autouse=True)
 def _no_post_pacing(monkeypatch):
     """Tắt pacing/jitter đường ghi trong test (nhanh + tất định); test pacing bật lại tường minh."""
     monkeypatch.setattr(ac, "POST_PACE_MS", 0)
@@ -2890,3 +2896,50 @@ def test_telemetry_gate_respects_six_hours():
     st = {"last_telemetry": 1_000_000}
     assert not ac._due(st, "last_telemetry", 6, 1_000_000 + 5 * 60)      # 5 phút sau: chưa
     assert ac._due(st, "last_telemetry", 6, 1_000_000 + 6 * 3600)        # đủ 6 giờ: tới hạn
+
+
+# --- Phanh cứng gắn vào post_message --------------------------------------------------------
+def test_governor_blocks_post_at_cap_without_network_or_outage_signal(pk, monkeypatch):
+    import time as _t
+    import flop_governor as g
+    calls, alerts = [], []
+    monkeypatch.setattr(ac.requests, "post", lambda *a, **k: calls.append(1) or _Resp(status=200))
+    monkeypatch.setattr(ac, "_telegram_send", lambda text: alerts.append(text) or True)
+    monkeypatch.setenv("FLOP_POST_CAPS", "flop=2")
+    fails_before = ac._post_fail_count
+    did = ac.did_of(pk)
+    assert ac.post_message(pk, did, "a", room="flop") is True
+    assert ac.post_message(pk, did, "b", room="flop") is True
+    assert ac.post_message(pk, did, "c", room="flop") is False          # tin thứ 3: chặn
+    assert ac.post_message(pk, did, "d", room="flop") is False
+    assert len(calls) == 2                                              # không gọi mạng khi chặn
+    assert len(alerts) == 1 and "r/flop" in alerts[0]                   # báo đúng 1 lần
+    assert ac._post_fail_count == fails_before                          # KHÔNG bị tính là sự cố
+    assert ac._post_gov_state[g.KEY]["rooms"]["flop"] == 2
+    assert ac.post_message(pk, did, "e", room="kibble") is True         # phòng khác không ảnh hưởng
+
+
+def test_governor_counts_only_successful_posts(pk, monkeypatch):
+    import flop_governor as g
+    monkeypatch.setattr(ac.requests, "post", lambda *a, **k: _Resp(status=503))
+    ac.post_message(pk, ac.did_of(pk), "x", room="flop")
+    assert ac._post_gov_state.get(g.KEY, {}).get("rooms", {}).get("flop", 0) == 0
+
+
+def test_governor_can_be_switched_off(pk, monkeypatch):
+    monkeypatch.setattr(ac, "POST_GOVERNOR", False)
+    monkeypatch.setenv("FLOP_POST_CAPS", "flop=0")
+    monkeypatch.setattr(ac.requests, "post", lambda *a, **k: _Resp(status=200))
+    assert ac.post_message(pk, ac.did_of(pk), "x", room="flop") is True
+
+
+def test_post_counts_survive_cache_loss_via_kv(monkeypatch):
+    import time as _t
+    import flop_governor as g
+    today = _t.strftime("%Y-%m-%d", _t.gmtime())
+    remote = {"post_counts": {"day": today, "rooms": {"flop": 33}}}
+    monkeypatch.setattr(ac, "kv_get", lambda k: json.dumps(remote))
+    state = {}                                       # cache runner mất sạch
+    ac.hydrate_durable_from_kv(state)
+    assert state["post_counts"]["rooms"]["flop"] == 33
+    assert "post_counts" in ac.DURABLE_STATE_KEYS

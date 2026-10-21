@@ -283,6 +283,9 @@ jobs:
           # Bộ canh chi thật (testnet): báo Telegram sau N run liền không có phiên spent_onchain.
           FLOP_REAL_SPEND_ALERT_RUNS: ${{ vars.FLOP_REAL_SPEND_ALERT_RUNS }}
           FLOP_REAL_SPEND_REALERT_HOURS: ${{ vars.FLOP_REAL_SPEND_REALERT_HOURS }}
+          # Phanh cứng số tin chat/phòng/ngày (mặc định BẬT). FLOP_POST_CAPS đè trần, vd 'flop=40,*=30'.
+          FLOP_POST_GOVERNOR: ${{ vars.FLOP_POST_GOVERNOR }}
+          FLOP_POST_CAPS: ${{ vars.FLOP_POST_CAPS }}
           # Đa dạng hóa request (chống bot/sybil): jitter ±% flops/latency/fee + xoay model list.
           # Mặc định 20 (code), kẹp 0..50. MODEL_HASH nhận NHIỀU hash (CSV/'|') để xoay vòng.
           FLOP_SESSION_JITTER_PCT: ${{ vars.FLOP_SESSION_JITTER_PCT }}

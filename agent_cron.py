@@ -1150,7 +1150,28 @@ def _retry_after_seconds(res, default: float = 2.0) -> float:
     return default
 
 
+# PHANH CỨNG số tin chat/phòng/ngày UTC (flop_governor). Mặc định BẬT; FLOP_POST_CAPS
+# ('flop=40,kibble=1300,*=30') đè trần. Lưới an toàn cho bug kiểu #154 (telemetry 5 phút/lần).
+POST_GOVERNOR = os.environ.get("FLOP_POST_GOVERNOR", "").strip().lower() not in ("0", "false", "off", "no")
+_post_gov_state = {}                 # {flop_governor.KEY: ...} — nạp từ state đầu run, lưu cuối run
+
+
+def _post_caps() -> dict:
+    import flop_governor
+    return flop_governor.parse_caps(os.environ.get("FLOP_POST_CAPS", ""))
+
+
 def post_message(private_key, did, text, room=ROOM) -> bool:
+    if POST_GOVERNOR:
+        import flop_governor as _gov
+        _g = _gov.check(_post_gov_state, room, _post_caps(), time.time())
+        if not _g["allowed"]:
+            # KHÔNG gọi _note_post(False): bị phanh không phải sự cố đường ghi — nếu đếm như
+            # lỗi thì posts_degraded() tưởng server sập và tắt luôn các luồng khác.
+            print(f"[governor] ⛔ chặn r/{room}: đã {_g['count']}/{_g['cap']} tin hôm nay")
+            if _g["alert"]:
+                _telegram_send(_g["alert"])
+            return False
     text = sweep_for_sign(text)          # quét sạch (control/bidi/zero-width), KHÔNG cắt, TRƯỚC khi ký
     nonce = next_nonce()
     to_sign = f"{room}|{nonce}|{text}"   # canonical ký theo ĐÚNG room sẽ đăng
@@ -1177,6 +1198,9 @@ def post_message(private_key, did, text, room=ROOM) -> bool:
         ok = res.status_code == 200
         if ok:
             _note_server_ok()
+            if POST_GOVERNOR:
+                import flop_governor as _gov
+                _gov.record(_post_gov_state, room, time.time())
         _note_post(ok)                   # đếm sức khoẻ đường GHI (kể cả 503/429 -> fail)
         print(f"[post] {res.status_code} | r/{room} | {text[:60]}")
         return ok
@@ -1426,7 +1450,10 @@ _BLOB_DURABLE_KEYS = ("weekly_samples", "last_alert_price")
 # Khóa BỘ ĐẾM cộng dồn: hợp nhất bằng MAX từng ô (đếm chỉ tăng) — KHÔNG dùng luật blob
 # "local có thì local thắng", vì state.json rỗng sau khi cache mất sẽ nuốt số đã tích.
 _COUNTER_DURABLE_KEYS = ("kibble_lifetime", "kibble_lifetime_clean")
-DURABLE_STATE_KEYS = _TS_DURABLE_KEYS + _BLOB_DURABLE_KEYS + _COUNTER_DURABLE_KEYS
+# Đếm tin theo phòng trong NGÀY (flop_governor): mất cache không được biến thành "xoá đếm".
+_DAYCOUNT_DURABLE_KEYS = ("post_counts",)
+DURABLE_STATE_KEYS = (_TS_DURABLE_KEYS + _BLOB_DURABLE_KEYS + _COUNTER_DURABLE_KEYS
+                      + _DAYCOUNT_DURABLE_KEYS)
 STATE_KV_KEY = "state"
 
 
@@ -1452,6 +1479,12 @@ def hydrate_durable_from_kv(state: dict) -> None:
     for k in _BLOB_DURABLE_KEYS:
         if k in remote and not state.get(k):
             state[k] = remote[k]
+    if "post_counts" in remote:                  # đếm tin trong ngày -> MAX từng phòng, cùng ngày
+        try:
+            import flop_governor
+            flop_governor.merge(state, remote["post_counts"], time.time())
+        except Exception:
+            pass
     for k in _COUNTER_DURABLE_KEYS:              # bộ đếm cộng dồn -> MAX, không ghi đè
         if k in remote:
             try:
@@ -3719,6 +3752,10 @@ def main():
     _gemini_404.update(state.get("gemini_404") or [])
     # Model chạy được lần trước + model đang né 429 -> run này gọi thẳng, không dò lại.
     gemini_memory_load(state)
+    # Đếm tin/phòng hôm nay cho phanh cứng (đã hợp nhất với KV ở hydrate_durable_from_kv).
+    _post_gov_state.clear()
+    if isinstance(state.get("post_counts"), dict):
+        _post_gov_state["post_counts"] = state["post_counts"]
     # Nạp vân tay job đã trả lời -> chống-trùng hiệu lực XUYÊN run, không chỉ trong 1 run.
     # Mục ĐỊNH DẠNG CŨ (list trần, không mốc) được giữ nguyên ở đây; _live_fingerprints
     # coi chúng là đã hết hạn nên chúng không chặn gì, và lần remember kế tiếp dọn sạch.
@@ -4237,6 +4274,13 @@ def main():
     if _gemini_404:
         save_state({"gemini_404": sorted(_gemini_404)[:GEMINI_404_MAX]})
     save_state(gemini_memory_dump())
+    if _post_gov_state.get("post_counts"):
+        save_state({"post_counts": _post_gov_state["post_counts"]})
+        try:
+            import flop_governor
+            print(f"[governor] hôm nay: {flop_governor.summary_line(_post_gov_state, _post_caps(), time.time())}")
+        except Exception:
+            pass
 
     # 4) Tổng kết run + PHÁT HIỆN OUTAGE TOÀN PHẦN.
     #    Nếu KHÔNG một call nào tới technocore.chat thành công trong cả run này
