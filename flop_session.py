@@ -139,9 +139,12 @@ def plan_session_spend(due, base_fee, base_flops, max_sessions: int = 1,
     for f in fees:
         if cap_fee is not None and f > cap_fee:      # trọng số đẩy vượt trần -> kẹp
             f = cap_fee.quantize(q, rounding=ROUND_DOWN)
-        if f <= 0:
+        fl = int(f / unit)
+        if f <= 0 or fl <= 0:
+            # Phần lẻ không mua nổi 1 FLOPs (trần/phiên sát giá nền): bỏ, pacer dồn sang run
+            # sau — thay vì gửi phiên "có phí, 0 FLOPs" mà build_request từ chối, phí slot.
             continue
-        out.append((tm._fmt(f), int(f / unit)))
+        out.append((tm._fmt(f), fl))
     return out
 
 

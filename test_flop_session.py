@@ -320,3 +320,16 @@ def test_burst_of_identical_sessions_gets_unique_ids_and_nonces(monkeypatch):
     assert len({r["id"] for r in reqs}) == 3
     nonces = [int(r["nonce"]) for r in reqs]
     assert nonces == sorted(nonces) and len(set(nonces)) == 3
+
+
+
+def test_plan_never_emits_zero_flops_sessions():
+    # Trần FLOPs/phiên = đúng 1 đơn vị nền -> trọng số ±20% đẩy phiên dưới 1 đơn vị.
+    import random
+    r = random.Random(1)
+    for due in ("80", "99", "242.391641"):
+        for fee in ("0.1", "1", "0.001"):
+            plan = fsess.plan_session_spend(due, fee, 1, max_sessions=10, max_flops=1, rng=r)
+            assert all(fl >= 1 and float(f) > 0 for f, fl in plan)
+            for f, fl in plan:
+                fsess.build_request("a" * 64, 2000, fl, fee=f)        # không còn ValueError
