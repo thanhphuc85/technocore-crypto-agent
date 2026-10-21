@@ -43,7 +43,30 @@ technocore-agent = "agent_cron:main"
 # Ship BOTH: the new `technocore_agent` facade package AND the flat modules, so
 # `import technocore_agent` and `import agent_cron` / `import token_manager` all work.
 packages = ["technocore_agent"]
-py-modules = ["agent_cron", "token_manager", "flop_pacer", "flop_faucet", "flop_tx", "flop_rail_x402", "flop_kibble", "flop_kibble_track"]
+# MỌI module agent_cron import lúc chạy phải nằm đây — thiếu là bản `pip install` gãy khi chạy
+# `technocore-agent` (test_packaging.py giữ danh sách này khớp với flop_*.py).
+py-modules = [
+    "agent_cron",
+    "token_manager",
+    "flop_engage",
+    "flop_faucet",
+    "flop_governor",
+    "flop_kibble",
+    "flop_kibble_track",
+    "flop_miners",
+    "flop_outcomes",
+    "flop_pacer",
+    "flop_radar",
+    "flop_rail_x402",
+    "flop_report",
+    "flop_session",
+    "flop_stake",
+    "flop_status_feed",
+    "flop_tclk",
+    "flop_tx",
+    "flop_units",
+    "flop_watchdog",
+]
 
 [tool.setuptools.package-data]
 technocore_agent = ["py.typed"]
