@@ -3058,6 +3058,7 @@ def test_faucet_state_survives_fresh_runner(monkeypatch, tmp_path):
     monkeypatch.setenv("FLOP_FAUCET_STATE", str(fpath))
     monkeypatch.setenv("FLOP_FAUCET_COOLDOWN_HOURS", "24")
     monkeypatch.setenv("TOKEN_LEDGER_FILE", str(tmp_path / "ledger.json"))
+    monkeypatch.setenv("TESTNET_ENABLED", "true")
     monkeypatch.setattr(ac, "save_state", lambda d: None)
     calls = []
     monkeypatch.setattr(ac, "_faucet_claim_fn", lambda req: calls.append(1) or {"amount": "50"})
@@ -3104,7 +3105,7 @@ def test_faucet_step_waits_in_run_when_next_slot_is_minutes_away(monkeypatch, tm
     for k, v in {"FLOP_FAUCET_ENABLED": "true", "FLOP_FAUCET_URL": "https://f.test",
                  "FLOP_FAUCET_COOLDOWN_HOURS": "auto", "FLOP_FAUCET_JITTER_MIN": "0",
                  "FLOP_FAUCET_STATE": str(tmp_path / "f.json"),
-                 "TOKEN_LEDGER_FILE": str(tmp_path / "l.json")}.items():
+                 "TOKEN_LEDGER_FILE": str(tmp_path / "l.json"), "TESTNET_ENABLED": "true"}.items():
         monkeypatch.setenv(k, v)
     monkeypatch.setattr(ac, "save_state", lambda d: None)
     monkeypatch.setattr(ac, "_faucet_claim_fn", lambda req: {"amount": "10"})
@@ -3116,3 +3117,15 @@ def test_faucet_step_waits_in_run_when_next_slot_is_minutes_away(monkeypatch, tm
     clock["t"] += 3600 - 1200                                     # còn 20 phút: KHÔNG chờ
     assert ac.faucet_step(state, None, None) == "skipped_cooldown"
     assert slept == [123]
+
+
+
+def test_faucet_step_refuses_real_faucet_while_ledger_is_simulation(monkeypatch, tmp_path):
+    monkeypatch.setenv("FLOP_FAUCET_ENABLED", "true")
+    monkeypatch.setenv("FLOP_FAUCET_URL", "https://f.test")
+    monkeypatch.setenv("FLOP_FAUCET_STATE", str(tmp_path / "f.json"))
+    monkeypatch.delenv("TESTNET_ENABLED", raising=False)
+    calls = []
+    monkeypatch.setattr(ac, "_faucet_claim_fn", lambda req: calls.append(1) or {"amount": "10"})
+    assert ac.faucet_step({}, None, None) == "skipped_simulation"
+    assert calls == []                                     # không tiêu lượt faucet thật

@@ -3078,6 +3078,14 @@ def faucet_step(state: dict, private_key, did) -> str:
     if os.environ.get("FLOP_FAUCET_ENABLED", "").strip().lower() not in ("1", "true", "on", "yes"):
         return "off"
     try:
+        import token_manager
+        if not token_manager.testnet_enabled():
+            # Faucet THẬT khi sổ đang ở chế độ MÔ PHỎNG: FLOP thật bị ghi vào sổ mô phỏng, sổ
+            # testnet (file/khoá KV riêng) vẫn 0 -> ngày bật testnet agent không chi được, mà
+            # lượt faucet (theo giờ/ngày) đã bị tiêu. Bật TESTNET_ENABLED trước.
+            print("[faucet] bỏ qua — FLOP_FAUCET_ENABLED bật nhưng TESTNET_ENABLED tắt: "
+                  "faucet thật chỉ chạy cùng sổ testnet (bật TESTNET_ENABLED trước).")
+            return "skipped_simulation"
         import flop_faucet
         fpath = flop_faucet.state_path()
         flop_faucet._save(flop_faucet.merge_state(flop_faucet._load(fpath), state.get("faucet_state")),
