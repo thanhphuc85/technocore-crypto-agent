@@ -2967,3 +2967,24 @@ def test_outcome_guard_can_be_switched_off(monkeypatch):
     o.evaluate(st, "engage", 1_800_000_000)
     monkeypatch.setattr(ac, "OUTCOME_GUARD", False)
     assert ac._outcome_paused(st, "engage", 1_800_000_060) == 0
+
+
+# --- faucet/mempool trả 200 kèm lỗi hoặc amount=0: KHÔNG được ghi khống vào sổ --------------
+def test_faucet_adapter_keeps_explicit_zero(monkeypatch):
+    monkeypatch.setattr(ac.requests, "post", lambda *a, **k: _resp_with_body({"amount": 0}))
+    assert ac._faucet_claim_fn({"faucet_url": "http://f", "signed": {}, "amount": "100"})["amount"] == 0
+
+
+def test_faucet_adapter_raises_on_error_body(monkeypatch):
+    import pytest
+    for body in ({"error": "cooldown"}, {"ok": False, "message": "quota"}, {"success": False}):
+        monkeypatch.setattr(ac.requests, "post", lambda *a, b=body, **k: _resp_with_body(b))
+        with pytest.raises(RuntimeError):
+            ac._faucet_claim_fn({"faucet_url": "http://f", "signed": {}, "amount": "100"})
+
+
+def test_mempool_adapter_raises_on_error_body(monkeypatch):
+    import pytest
+    monkeypatch.setattr(ac.requests, "post", lambda *a, **k: _resp_with_body({"error": "bad model"}))
+    with pytest.raises(RuntimeError):
+        ac._mempool_submit_fn({"url": "http://m", "request": {"id": "r"}})

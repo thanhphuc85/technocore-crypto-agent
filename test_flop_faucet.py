@@ -169,3 +169,26 @@ def test_faucet_jitter_on_by_default_and_explicit_zero_disables(monkeypatch):
     assert ff.jitter_minutes() == 30.0
     monkeypatch.setenv("FLOP_FAUCET_JITTER_MIN", "0")
     assert ff.jitter_minutes() == 0.0
+
+
+NOW = 1_000_000
+
+
+def _enable(monkeypatch):
+    monkeypatch.setenv("FLOP_FAUCET_ENABLED", "true")
+    monkeypatch.setenv("FLOP_FAUCET_URL", "https://faucet.test")
+
+
+def test_zero_amount_is_not_credited(paths, monkeypatch):
+    _enable(monkeypatch)
+    r = ff.run_faucet_cycle(claim_fn=lambda req: {"amount": 0}, now=NOW, log=lambda m: None, **paths)
+    assert r["outcome"] == "claimed_zero"
+    assert tm.check_balance(path=paths["ledger_path"]) == "0"
+    r2 = ff.run_faucet_cycle(claim_fn=CLAIM_OK, now=NOW + 60, log=lambda m: None, **paths)
+    assert r2["outcome"] == "skipped_cooldown"               # không gõ lại ngay
+
+
+def test_missing_amount_still_falls_back_to_requested(paths, monkeypatch):
+    _enable(monkeypatch)
+    r = ff.run_faucet_cycle(claim_fn=lambda req: {}, now=NOW, log=lambda m: None, **paths)
+    assert r["outcome"] == "claimed" and r["amount"] == ff.faucet_amount()

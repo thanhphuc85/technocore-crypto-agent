@@ -199,7 +199,16 @@ def run_faucet_cycle(claim_fn=None, token: str = None, now: int = None,
     except Exception as e:
         return {"outcome": "error_claim", "reason": f"claim faucet thất bại: {e}"}
 
-    amt = str(result.get("amount") or faucet_amount())
+    raw_amt = result.get("amount")
+    amt = str(faucet_amount() if raw_amt is None else raw_amt)
+    parsed = tm._parse_amount(amt)
+    if parsed is None or parsed <= 0:
+        # Faucet trả 0/rác: KHÔNG ghi sổ, KHÔNG tính là 1 lần claim (không đốt trần ngày).
+        # Vẫn đặt mốc thời gian để không gõ lại faucet mỗi 5 phút.
+        st.setdefault(token, {})["last_claim_ts"] = now
+        _save(st, faucet_state)
+        return {"outcome": "claimed_zero", "amount": "0",
+                "reason": f"faucet trả số lượng {raw_amt!r} — không ghi sổ"}
     cr = tm.credit(amt, token=token, memo="faucet claim", path=ledger_path)
     rec = st.setdefault(token, {})
     rec["last_claim_ts"] = now

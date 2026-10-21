@@ -2922,6 +2922,20 @@ def _engage_question(peer_text: str):
 #     (đăng session request) và faucet (xin test token). SCAFFOLD: POST payload ĐÃ KÝ rồi
 #     chuẩn hóa tên trường phổ biến. CHỈ chạy khi TESTNET_ENABLED + có URL thật; simulation
 #     KHÔNG bao giờ gọi chúng. Khi FLOP công bố wire-format thật -> sửa ĐÚNG 2 hàm này. ---
+def _api_error(data: dict):
+    """HTTP 200 nhưng thân báo lỗi ({"error": ...} / ok=false / success=false) -> chuỗi lỗi,
+    ngược lại None. Nhiều API trả 200 kèm lỗi; coi đó là thành công sẽ ghi sổ thứ không có."""
+    if not isinstance(data, dict):
+        return None
+    err = data.get("error") or data.get("errors")
+    if err:
+        return str(err)[:200]
+    for k in ("ok", "success"):
+        if data.get(k) is False:
+            return str(data.get("message") or data.get("reason") or f"{k}=false")[:200]
+    return None
+
+
 def _mempool_submit_fn(req: dict) -> dict:
     """Đăng 1 yêu cầu phiên (đã ký trong build_request) lên FLOP mempool; chuẩn hóa về
     {session_id, miner_did, poui?}. Ném lỗi (để flop_session báo error_submit) nếu HTTP fail."""
@@ -2933,6 +2947,9 @@ def _mempool_submit_fn(req: dict) -> dict:
     data = r.json() if r.content else {}
     if not isinstance(data, dict):
         data = {}
+    err = _api_error(data)
+    if err:
+        raise RuntimeError(f"mempool từ chối: {err}")
     return {
         "session_id": data.get("session_id") or data.get("sessionId") or body.get("id"),
         "miner_did": data.get("miner_did") or data.get("minerDid") or data.get("miner"),
@@ -2951,8 +2968,13 @@ def _faucet_claim_fn(req: dict) -> dict:
     data = r.json() if r.content else {}
     if not isinstance(data, dict):
         data = {}
-    amt = data.get("amount") or data.get("granted") or data.get("value")
-    if not amt:
+    err = _api_error(data)
+    if err:
+        raise RuntimeError(f"faucet từ chối: {err}")   # -> error_claim, KHÔNG ghi sổ
+    # `is not None` chứ không phải `or`: faucet trả amount=0 (hết hạn mức) là 0, không phải
+    # "thiếu trường" -> trước đây rơi về lượng XIN và ghi khống vào sổ.
+    amt = next((data[k] for k in ("amount", "granted", "value") if data.get(k) is not None), None)
+    if amt is None:
         # Ghi theo lượng XIN là đoán: sổ có thể lệch số dư thật trên chain. Báo to + in khoá.
         print(f"[faucet] ⚠️ phản hồi không có trường số lượng — tạm ghi theo yêu cầu "
               f"(keys: {sorted(data)[:15]})")
@@ -3782,8 +3804,9 @@ def main():
     # Jitter khởi động (TÙY CHỌN, mặc định TẮT): ngủ ngẫu nhiên 0..FLOP_START_JITTER_MAX_SEC
     # giây TRƯỚC khi làm việc. Khi 3 agent (main + 2 fork độc lập) bị trigger cùng mốc 5 phút,
     # mỗi cái ngủ khác nhau -> post không lockstep -> giảm tín hiệu "coordinated cluster" cho
-    # census/anti-sybil. Chạy ngay trên GitHub Actions, KHÔNG cần VPS. Mỗi runner nên đặt giá
-    # trị KHÁC nhau. Scheduled run đi qua workflow_dispatch nên KHÔNG gate theo event.
+    # census/anti-sybil. Chạy ngay trên GitHub Actions, KHÔNG cần VPS. Giá trị chỉ là BIÊN, độ
+    # trễ rút ngẫu nhiên mỗi run nên cùng giá trị vẫn lệch nhau — KHÔNG cần (và không nên) phân
+    # giá trị khác nhau cho từng fork. Scheduled run đi qua workflow_dispatch nên KHÔNG gate theo event.
     _jit = start_jitter_seconds(os.environ.get("FLOP_START_JITTER_MAX_SEC"))
     if _jit > 0:
         print(f"[jitter] ngủ {_jit:.0f}s trước khi chạy (chống lockstep)")
