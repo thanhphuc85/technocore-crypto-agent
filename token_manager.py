@@ -440,6 +440,18 @@ def _agent_key():
 
 # --- Ký giao dịch (Ed25519 THẬT — canonical: did|token|amount|nonce|memo) ----------
 
+_last_nonce = 0
+
+
+def next_nonce() -> str:
+    """Nonce mili-giây TĂNG NGHIÊM NGẶT trong tiến trình: nhiều phiên/giao dịch trong cùng
+    một mili-giây (vd 3 phiên phí cố định/run) trước đây ra CÙNG nonce -> cùng id yêu cầu,
+    và mạng coi lần 2, 3 là gửi lại (replay). Giữa các run, đồng hồ đã tự tăng."""
+    global _last_nonce
+    _last_nonce = max(int(time.time() * 1000), _last_nonce + 1)
+    return str(_last_nonce)
+
+
 def sign_transaction(private_key, did: str, token: str, amount: str, memo: str,
                      nonce: str = None) -> dict:
     """Ký 1 'giao dịch' token bằng Ed25519 (chữ ký THẬT, dùng lại sign_message của
@@ -447,7 +459,7 @@ def sign_transaction(private_key, did: str, token: str, amount: str, memo: str,
     payload đã ký (proof-of-intent), hoặc None nếu SDK ký không khả dụng."""
     if sign_message is None or private_key is None or did is None:
         return None
-    nonce = nonce or str(int(time.time() * 1000))
+    nonce = nonce or next_nonce()
     canonical = f"{did}|{token}|{amount}|{nonce}|{memo}"
     return {
         "did": did, "token": token, "amount": amount, "nonce": nonce,

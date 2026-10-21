@@ -160,7 +160,7 @@ def build_request(model_hash: str, max_latency_ms: int, flops: int,
         raise ValueError("flops và max_latency_ms phải là số nguyên dương")
     fee = str(fee if fee is not None else os.environ.get("FLOP_INFERENCE_COST", "").strip() or "0.001")
     flags = sorted({str(f).strip() for f in (security_flags or []) if str(f).strip()})
-    nonce = nonce or str(int(time.time() * 1000))
+    nonce = nonce or tm.next_nonce()
     canonical = f"{did or ''}|{model_hash}|{max_latency_ms}|{flops}|{','.join(flags)}|{fee}|{nonce}"
     req_id = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
     sig = sign_message(private_key, canonical) if (sign_message and private_key and did) else None

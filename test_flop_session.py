@@ -309,3 +309,14 @@ def test_fixed_fee_capped_by_sessions_per_run_and_below_price():
 def test_blank_fixed_fee_keeps_unit_price_plan():
     a = fsess.plan_session_spend("1", "0.1", 100, max_sessions=3, fixed_fee="")
     assert a and abs(sum(float(f) for f, _ in a) - 1.0) < 1e-6
+
+
+
+def test_burst_of_identical_sessions_gets_unique_ids_and_nonces(monkeypatch):
+    # Phí cố định + 1 model: 3 phiên trong CÙNG một mili-giây trước đây trùng id lẫn nonce.
+    monkeypatch.setattr(fsess.time, "time", lambda: 1_800_000_000.0)
+    monkeypatch.setattr(tm.time, "time", lambda: 1_800_000_000.0)
+    reqs = [fsess.build_request("a" * 64, 2000, 10**9, fee="0.1") for _ in range(3)]
+    assert len({r["id"] for r in reqs}) == 3
+    nonces = [int(r["nonce"]) for r in reqs]
+    assert nonces == sorted(nonces) and len(set(nonces)) == 3

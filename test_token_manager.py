@@ -627,3 +627,10 @@ def test_testnet_spend_without_tx_hash_is_not_booked(ledger, monkeypatch):
     assert r["outcome"] == "error_submit" and "tx hash" in r["reason"]
     assert tm.check_balance(path=ledger) == "5"
     assert tm.load_ledger(ledger).get("session_cumulative", {}) == {}
+
+
+
+def test_next_nonce_strictly_increases_within_one_millisecond(monkeypatch):
+    monkeypatch.setattr(tm.time, "time", lambda: 1_800_000_000.0)
+    seq = [int(tm.next_nonce()) for _ in range(5)]
+    assert seq == sorted(seq) and len(set(seq)) == 5
