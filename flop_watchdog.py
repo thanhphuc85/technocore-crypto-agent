@@ -43,6 +43,14 @@ def note_pending(state: dict, result: dict, now: int) -> int:
     return len(state[PENDING_KEY])
 
 
+def pending_block(state: dict, now: int, cap: int) -> tuple:
+    """(chặn?, số phiên đang chờ proof). Phiên chờ proof có thể ĐÃ khoá phí (escrow) trên
+    chain mà sổ cái chưa ghi -> pacer tưởng chưa chi và cứ đăng phiên mới mỗi run. Đủ `cap`
+    phiên chờ (còn trong TTL) thì dừng đăng tới khi chúng được xử lý/hết hạn. cap<=0 = tắt."""
+    n = note_pending(state, {}, now)          # chỉ dọn mục quá hạn, không thêm gì
+    return (cap > 0 and n >= cap), n
+
+
 def observe(state: dict, *, settled_onchain: int, status: str, spent_today_onchain,
             now: int, balance=None, pending: int = 0, reason: str = "",
             alert_runs: int = 6, realert_sec: int = 6 * 3600) -> dict:

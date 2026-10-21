@@ -505,6 +505,11 @@ def spend(amount, memo, token: str = None, *, path: str = None,
         except Exception as e:
             return {**base, "outcome": "error_submit",
                     "reason": f"gửi giao dịch testnet thất bại: {e}"}
+        if not tx_hash:
+            # Không có tx hash = không có bằng chứng giao dịch đã lên chain -> KHÔNG trừ sổ,
+            # KHÔNG tính là chi thật (trước đây adapter tiêm tay trả {} vẫn thành spent_onchain).
+            return {**base, "outcome": "error_submit", "signed": signed,
+                    "reason": f"submit_tx không trả tx hash (keys: {sorted(result)[:10]})"}
         new_bal = _fmt(cur - amt)
         state["balances"][token] = new_bal
         state["entries"].append({

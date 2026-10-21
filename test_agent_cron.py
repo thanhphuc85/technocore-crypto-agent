@@ -2988,3 +2988,38 @@ def test_mempool_adapter_raises_on_error_body(monkeypatch):
     monkeypatch.setattr(ac.requests, "post", lambda *a, **k: _resp_with_body({"error": "bad model"}))
     with pytest.raises(RuntimeError):
         ac._mempool_submit_fn({"url": "http://m", "request": {"id": "r"}})
+
+
+# --- testnet: đủ phiên CHỜ PROOF thì KHÔNG đăng phiên mới (phí có thể đã escrow trên chain) ---
+def test_main_testnet_stops_new_sessions_at_pending_cap(monkeypatch, tmp_path):
+    import flop_session
+    import time as _t
+    monkeypatch.setattr(ac, "SEED_HEX", SEED_HEX)
+    monkeypatch.setattr(ac, "RUNNER_ROLE", "primary")
+    now = int(_t.time())
+    pend = [{"request_id": f"r{i}", "ts": now - 60} for i in range(3)]
+    monkeypatch.setattr(ac, "load_state", lambda: {"flop_pending_sessions": list(pend)})
+    for fn in ("hydrate_durable_from_kv", "hydrate_ledger_from_kv", "write_heartbeat",
+               "persist_durable_to_kv", "persist_ledger_to_kv", "check_price_alert"):
+        monkeypatch.setattr(ac, fn, lambda *a, **k: None)
+    monkeypatch.setattr(ac, "save_state", lambda d: None)
+    monkeypatch.setattr(ac, "kv_get", lambda *a, **k: None)
+    monkeypatch.setattr(ac, "kv_set", lambda *a, **k: True)
+    monkeypatch.setattr(ac, "broadcast_telemetry", lambda *a, **k: True)
+    monkeypatch.setattr(ac, "broadcast_manifest", lambda *a, **k: True)
+    monkeypatch.setattr(ac, "auto_respond", lambda *a, **k: (0, 0))
+    monkeypatch.setattr(ac, "_telegram_send", lambda *a, **k: True)
+    monkeypatch.setattr(ac, "_server_ok_count", 1)
+    out = {}
+    monkeypatch.setattr(ac, "_write_summary", lambda *a, **k: out.update(a=a, k=k))
+    calls = []
+    monkeypatch.setattr(flop_session, "maybe_run_session", lambda *a, **k: calls.append(1) or {})
+    monkeypatch.setenv("TESTNET_ENABLED", "true")
+    monkeypatch.setenv("FLOP_SESSION_ENABLED", "true")
+    monkeypatch.setenv("FLOP_SESSION_MODEL_HASH", "a" * 64)
+    monkeypatch.setenv("FLOP_MEMPOOL_URL", "https://mempool.test")
+    monkeypatch.setenv("FLOP_LEDGER_PATH", str(tmp_path / "ledger.json"))
+    monkeypatch.delenv("FLOP_SESSION_MAX_PENDING", raising=False)
+    ac.main()
+    assert calls == []                                   # không đăng phiên mới
+    assert "pending-cap(3)" in repr(out)

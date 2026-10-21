@@ -80,3 +80,13 @@ def test_garbage_state_does_not_crash():
     st = {wd.KEY: "rác", wd.PENDING_KEY: ["x", {"ts": "nope"}]}
     assert wd.note_pending(st, None, 10) == 1
     assert _miss(st, 10)["alert"] is None
+
+
+def test_pending_block_caps_outstanding_sessions():
+    st, now = {}, 1_800_000_000
+    for i in range(3):
+        wd.note_pending(st, {"stage": "await_poui", "outcome": "pending", "request_id": f"r{i}"}, now)
+    assert wd.pending_block(st, now, 3) == (True, 3)
+    assert wd.pending_block(st, now, 4) == (False, 3)
+    assert wd.pending_block(st, now, 0) == (False, 3)                  # 0 = tắt
+    assert wd.pending_block(st, now + wd.PENDING_TTL_SEC + 1, 3) == (False, 0)   # hết hạn -> mở lại

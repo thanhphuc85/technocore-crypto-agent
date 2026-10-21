@@ -4238,7 +4238,15 @@ def main():
                 _plan, _sess_due = session_budget_plan(_sess_fee, _sess_flops, _sess_max)
                 _settled = 0
                 _last = {}
-                for _i in range(len(_plan) if _plan is not None else _sess_max):
+                # Trần phiên CHỜ PROOF (chỉ testnet): proof bất đồng bộ chưa có đường poll, mỗi
+                # phiên chờ có thể đã khoá phí trên chain mà sổ chưa trừ -> không đăng thêm.
+                _pend_block, _npend = False, 0
+                if _tm0.testnet_enabled():
+                    import flop_watchdog as _wdp
+                    _pend_block, _npend = _wdp.pending_block(
+                        state, now, int(_env_float("FLOP_SESSION_MAX_PENDING", 3)))
+                _n_iter = 0 if _pend_block else (len(_plan) if _plan is not None else _sess_max)
+                for _i in range(_n_iter):
                     # Mỗi phiên: model xoay + flops/latency/fee jitter -> đa dạng hữu cơ.
                     _m, _fl, _lt, _fe = flop_session.vary_request(
                         _sess_models, _sess_flops, _sess_lat, _sess_fee, jitter_pct=_sess_jit)
@@ -4278,6 +4286,10 @@ def main():
                 session_status = f"{_settled}✓ {_last.get('stage', '-')}/{_last.get('outcome', '?')}"
                 if _plan is not None and not _plan:
                     session_status = "0✓ pace-wait"     # chưa tới nhịp / số dư dưới giá sàn
+                if _pend_block:
+                    session_status = f"0✓ pending-cap({_npend})"
+                    _last = {"reason": (f"{_npend} phiên đang chờ proof (≥ FLOP_SESSION_MAX_PENDING) "
+                                        "— dừng đăng phiên mới tới khi chúng được xử lý")}
                 extra = ""
                 if _sess_due is not None:
                     extra += f" due={_sess_due}"

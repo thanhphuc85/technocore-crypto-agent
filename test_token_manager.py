@@ -617,3 +617,13 @@ def test_hour_buckets_are_bounded(ledger, monkeypatch):
         monkeypatch.setattr(tm.time, "time", lambda i=i: t0 + i * 3600)
         tm._accrue_cumulative(st, "FLOP", tm.Decimal("0.001"))
     assert len(st["spend_count_by_hour"]["FLOP"]) == tm.HOUR_KEEP
+
+
+def test_testnet_spend_without_tx_hash_is_not_booked(ledger, monkeypatch):
+    monkeypatch.setenv("TESTNET_ENABLED", "true")
+    monkeypatch.setenv("FLOP_RPC_URL", "https://rpc.test")
+    tm.credit("5", path=ledger)
+    r = tm.spend("1", "inference-session:x", path=ledger, submit_tx=lambda tx: {"status": "ok"})
+    assert r["outcome"] == "error_submit" and "tx hash" in r["reason"]
+    assert tm.check_balance(path=ledger) == "5"
+    assert tm.load_ledger(ledger).get("session_cumulative", {}) == {}
