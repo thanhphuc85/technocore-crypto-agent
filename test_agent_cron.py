@@ -3018,7 +3018,7 @@ def test_main_testnet_stops_new_sessions_at_pending_cap(monkeypatch, tmp_path):
     monkeypatch.setenv("FLOP_SESSION_ENABLED", "true")
     monkeypatch.setenv("FLOP_SESSION_MODEL_HASH", "a" * 64)
     monkeypatch.setenv("FLOP_MEMPOOL_URL", "https://mempool.test")
-    monkeypatch.setenv("FLOP_LEDGER_PATH", str(tmp_path / "ledger.json"))
+    monkeypatch.setenv("TOKEN_LEDGER_FILE", str(tmp_path / "ledger.json"))
     monkeypatch.delenv("FLOP_SESSION_MAX_PENDING", raising=False)
     ac.main()
     assert calls == []                                   # không đăng phiên mới
@@ -3047,3 +3047,39 @@ def test_radar_step_off_and_durable(monkeypatch):
     monkeypatch.setattr(ac, "TESTNET_RADAR", False)
     assert ac.testnet_radar_step({}, 1) == "off"
     assert "last_radar" in ac._TS_DURABLE_KEYS and "testnet_radar" in ac._BLOB_DURABLE_KEYS
+
+
+# --- faucet: trạng thái phải sống qua run (runner mới = file trống) ------------------------
+def test_faucet_state_survives_fresh_runner(monkeypatch, tmp_path):
+    import os as _os
+    fpath = tmp_path / "faucet.json"
+    monkeypatch.setenv("FLOP_FAUCET_ENABLED", "true")
+    monkeypatch.setenv("FLOP_FAUCET_URL", "https://faucet.test")
+    monkeypatch.setenv("FLOP_FAUCET_STATE", str(fpath))
+    monkeypatch.setenv("FLOP_FAUCET_COOLDOWN_HOURS", "24")
+    monkeypatch.setenv("TOKEN_LEDGER_FILE", str(tmp_path / "ledger.json"))
+    monkeypatch.setattr(ac, "save_state", lambda d: None)
+    calls = []
+    monkeypatch.setattr(ac, "_faucet_claim_fn", lambda req: calls.append(1) or {"amount": "50"})
+    state = {}
+    assert ac.faucet_step(state, None, None) == "claimed"
+    _os.remove(fpath)                               # run sau: runner mới, file mất
+    assert ac.faucet_step(state, None, None) == "skipped_cooldown"
+    assert calls == [1]                             # KHÔNG gõ faucet lần 2
+
+
+def test_faucet_adapter_rate_limit_returns_wait(monkeypatch):
+    class R:
+        status_code, content, headers = 429, b"{}", {"Retry-After": "1800"}
+        def json(self): return {}
+    monkeypatch.setattr(ac.requests, "post", lambda *a, **k: R())
+    assert ac._faucet_claim_fn({"faucet_url": "http://f", "signed": {}}) == {"amount": 0, "retry_after_s": 1800}
+
+
+def test_faucet_retry_after_parsing():
+    import time as _t
+    assert ac._faucet_retry_after("90", {}) == 90
+    assert ac._faucet_retry_after(None, {"retry_after": 3600}) == 3600
+    soon = _t.strftime("%Y-%m-%dT%H:%M:%S", _t.gmtime(_t.time() + 7200))
+    assert 7100 <= ac._faucet_retry_after(None, {"next_claim_at": soon + "Z"}) <= 7200
+    assert ac._faucet_retry_after(None, {"x": 1}) is None

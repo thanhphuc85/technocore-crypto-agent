@@ -15,7 +15,10 @@ Env:
   FLOP_FAUCET_ENABLED       bật (mặc định tắt -> skipped_disabled).
   FLOP_FAUCET_URL           endpoint faucet (điền khi FLOP công bố). Rỗng -> unconfigured.
   FLOP_FAUCET_AMOUNT        lượng dự kiến mỗi claim (mặc định 100).
-  FLOP_FAUCET_COOLDOWN_HOURS khoảng tối thiểu giữa 2 claim (mặc định 24).
+  FLOP_FAUCET_COOLDOWN_HOURS khoảng tối thiểu giữa 2 claim (mặc định 24). 'auto' = THĂM DÒ:
+                            thử mỗi AUTO_PROBE_HOURS (1h); faucet trả thời điểm claim kế tiếp
+                            (Retry-After / next_claim / retry_after) thì CHỜ đúng tới đó — tự
+                            khớp chu kỳ thật (giờ hay ngày) mà không gõ faucet dồn dập.
   FLOP_FAUCET_REFILL_BELOW  (tùy chọn) chỉ claim khi số dư testnet < ngưỡng này.
   FLOP_FAUCET_STATE         nơi lưu mốc claim gần nhất (mặc định flop_faucet.json).
   FLOP_FAUCET_DEMAND_ONLY   (chống sybil) chỉ claim khi số dư CẠN vì chi thật — bắt
@@ -53,7 +56,16 @@ def faucet_amount() -> str:
     return os.environ.get("FLOP_FAUCET_AMOUNT", "").strip() or "100"
 
 
+AUTO_PROBE_HOURS = 1.0
+
+
+def cooldown_auto() -> bool:
+    return os.environ.get("FLOP_FAUCET_COOLDOWN_HOURS", "").strip().lower() == "auto"
+
+
 def cooldown_hours() -> float:
+    if cooldown_auto():
+        return AUTO_PROBE_HOURS
     try:
         v = float(os.environ.get("FLOP_FAUCET_COOLDOWN_HOURS", "").strip() or 24)
         return v if v >= 0 else 24.0
@@ -104,10 +116,56 @@ def _cooldown_seconds(last: int) -> float:
     ranh giới cooldown, cũng không nhấp nháy giữa các lần chạy. last=0 (chưa claim) ->
     không jitter để lần claim đầu không bị trì hoãn vô cớ."""
     cd = cooldown_hours() * 3600.0
-    jmin = jitter_minutes()
+    # Jitter tối đa 10% chu kỳ: chu kỳ 1 giờ mà cộng tới 30 phút thì mất ~1/3 số lượt claim.
+    jmin = min(jitter_minutes(), cooldown_hours() * 6.0)
     if jmin > 0 and last > 0:
         cd += random.Random(last).random() * jmin * 60.0
     return cd
+
+
+def merge_state(local, remote) -> dict:
+    """Hợp nhất trạng thái faucet local với bản KV (runner mới có file rỗng): mốc claim và
+    mốc chờ lấy MAX, đếm claim CÙNG ngày lấy MAX. Mất file không được biến thành 'chưa claim
+    bao giờ' — nếu không, mỗi run 5 phút đều gõ faucet và trần ngày vô tác dụng."""
+    out = {}
+    for src in (local, remote):
+        if not isinstance(src, dict):
+            continue
+        for tok, rec in src.items():
+            if not isinstance(rec, dict):
+                continue
+            o = out.setdefault(tok, {})
+            for k in ("last_claim_ts", "next_claim_ts"):
+                try:
+                    o[k] = max(int(o.get(k) or 0), int(rec.get(k) or 0))
+                except (TypeError, ValueError):
+                    pass
+            cl = rec.get("claims")
+            if isinstance(cl, dict):
+                oc = o.setdefault("claims", {})
+                for d, n in cl.items():
+                    try:
+                        oc[d] = max(int(oc.get(d) or 0), int(n))
+                    except (TypeError, ValueError):
+                        pass
+                for d in sorted(oc)[:-2]:            # chỉ giữ 2 ngày gần nhất
+                    oc.pop(d, None)
+    return out
+
+
+def _learned_next(result: dict, now: int):
+    """Mốc claim kế tiếp do faucet báo (giây tuyệt đối) hoặc None."""
+    if not isinstance(result, dict):
+        return None
+    try:
+        if result.get("retry_after_s") is not None:
+            return now + max(0, int(float(result["retry_after_s"])))
+        if result.get("next_claim_ts") is not None:
+            v = int(float(result["next_claim_ts"]))
+            return v // 1000 if v > 10**11 else v          # nhận cả mili-giây
+    except (TypeError, ValueError):
+        return None
+    return None
 
 
 def state_path(path: str = None) -> str:
@@ -160,6 +218,13 @@ def run_faucet_cycle(claim_fn=None, token: str = None, now: int = None,
         last = int(st.get(token, {}).get("last_claim_ts", 0))
     except (TypeError, ValueError):
         last = 0
+    try:
+        nxt = int(st.get(token, {}).get("next_claim_ts", 0))
+    except (TypeError, ValueError):
+        nxt = 0
+    if nxt > now:                                    # faucet đã báo giờ mở lượt kế tiếp
+        return {"outcome": "skipped_cooldown",
+                "reason": f"faucet hẹn lượt kế tiếp sau ~{int((nxt - now) / 60)} phút"}
     cd = _cooldown_seconds(last)                     # cooldown + jitter (chống claim đúng ranh giới)
     if now - last < cd:
         wait_min = int((cd - (now - last)) / 60)
@@ -202,17 +267,27 @@ def run_faucet_cycle(claim_fn=None, token: str = None, now: int = None,
     raw_amt = result.get("amount")
     amt = str(faucet_amount() if raw_amt is None else raw_amt)
     parsed = tm._parse_amount(amt)
+    nxt = _learned_next(result, now)
     if parsed is None or parsed <= 0:
         # Faucet trả 0/rác: KHÔNG ghi sổ, KHÔNG tính là 1 lần claim (không đốt trần ngày).
         # Vẫn đặt mốc thời gian để không gõ lại faucet mỗi 5 phút.
         st.setdefault(token, {})["last_claim_ts"] = now
+        if nxt:
+            st[token]["next_claim_ts"] = nxt
         _save(st, faucet_state)
         return {"outcome": "claimed_zero", "amount": "0",
                 "reason": f"faucet trả số lượng {raw_amt!r} — không ghi sổ"}
     cr = tm.credit(amt, token=token, memo="faucet claim", path=ledger_path)
     rec = st.setdefault(token, {})
     rec["last_claim_ts"] = now
-    # Ghi nhận đếm claim trong ngày (chỉ giữ ngày hiện tại -> state không phình).
+    if nxt:
+        rec["next_claim_ts"] = nxt
+    # Đếm claim trong ngày LUÔN (kể cả khi chưa đặt trần) -> báo cáo/merge có số đúng.
+    if cap is None:
+        try:
+            claims_today = int(rec.get("claims", {}).get(day, 0))
+        except (TypeError, ValueError, AttributeError):
+            claims_today = 0
     rec["claims"] = {day: claims_today + 1}
     _save(st, faucet_state)
     log(f"[faucet] claimed {amt} {token} testnet -> số dư {cr.get('balance_after')}")

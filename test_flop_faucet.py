@@ -123,20 +123,28 @@ def test_cooldown_jitter_extends_window(paths, monkeypatch):
 
     monkeypatch.setenv("FLOP_FAUCET_ENABLED", "true")
     monkeypatch.setenv("FLOP_FAUCET_URL", "https://faucet.test")
-    monkeypatch.setenv("FLOP_FAUCET_COOLDOWN_HOURS", "0")   # base cooldown 0 -> chỉ còn jitter
+    monkeypatch.setenv("FLOP_FAUCET_COOLDOWN_HOURS", "10")  # jitter kẹp <= 10% chu kỳ = 60 phút
     monkeypatch.setenv("FLOP_FAUCET_JITTER_MIN", "60")      # +0..60 phút
 
     last = 1000
     with open(paths["faucet_state"], "w") as f:
         json.dump({"FLOP": {"last_claim_ts": last}}, f)
 
+    base = 10 * 3600
     off = random.Random(last).random() * 60 * 60           # cùng công thức module
     # còn trong offset jitter -> chưa cho claim.
-    r = ff.run_faucet_cycle(claim_fn=CLAIM_OK, now=last + int(off) - 5, **paths)
+    r = ff.run_faucet_cycle(claim_fn=CLAIM_OK, now=last + base + int(off) - 5, **paths)
     assert r["outcome"] == "skipped_cooldown"
     # qua khỏi offset -> claim.
-    r2 = ff.run_faucet_cycle(claim_fn=CLAIM_OK, now=last + int(off) + 5, **paths)
+    r2 = ff.run_faucet_cycle(claim_fn=CLAIM_OK, now=last + base + int(off) + 5, **paths)
     assert r2["outcome"] == "claimed"
+
+
+def test_jitter_is_capped_to_tenth_of_cycle(monkeypatch):
+    monkeypatch.setenv("FLOP_FAUCET_COOLDOWN_HOURS", "1")
+    monkeypatch.setenv("FLOP_FAUCET_JITTER_MIN", "30")
+    for last in range(1, 200):
+        assert ff._cooldown_seconds(last) <= 3600 + 6 * 60   # chu kỳ 1h -> jitter <= 6 phút
 
 
 # --- Envelope: trần claim/ngày (FLOP_FAUCET_MAX_PER_DAY) --------------------------
@@ -192,3 +200,45 @@ def test_missing_amount_still_falls_back_to_requested(paths, monkeypatch):
     _enable(monkeypatch)
     r = ff.run_faucet_cycle(claim_fn=lambda req: {}, now=NOW, log=lambda m: None, **paths)
     assert r["outcome"] == "claimed" and r["amount"] == ff.faucet_amount()
+
+
+# --- chu kỳ 'auto': thử mỗi giờ, faucet báo lượt kế tiếp thì chờ đúng tới đó ---------------
+def test_auto_cycle_probes_hourly_and_learns_next_claim(paths, monkeypatch):
+    _enable(monkeypatch)
+    monkeypatch.setenv("FLOP_FAUCET_COOLDOWN_HOURS", "auto")
+    monkeypatch.setenv("FLOP_FAUCET_JITTER_MIN", "0")
+    q = lambda **k: ff.run_faucet_cycle(log=lambda m: None, **paths, **k)
+    assert q(claim_fn=lambda req: {"amount": "10", "retry_after_s": 86400}, now=NOW)["outcome"] == "claimed"
+    assert q(claim_fn=CLAIM_OK, now=NOW + 3600 + 1)["outcome"] == "skipped_cooldown"   # faucet hẹn 24h
+    assert q(claim_fn=CLAIM_OK, now=NOW + 86400 + 1)["outcome"] == "claimed"
+
+
+def test_auto_cycle_without_hint_claims_every_hour(paths, monkeypatch):
+    _enable(monkeypatch)
+    monkeypatch.setenv("FLOP_FAUCET_COOLDOWN_HOURS", "auto")
+    monkeypatch.setenv("FLOP_FAUCET_JITTER_MIN", "0")
+    q = lambda now: ff.run_faucet_cycle(claim_fn=CLAIM_OK, now=now, log=lambda m: None, **paths)
+    assert q(NOW)["outcome"] == "claimed"
+    assert q(NOW + 1800)["outcome"] == "skipped_cooldown"
+    assert q(NOW + 3600)["outcome"] == "claimed"
+    assert tm.check_balance(path=paths["ledger_path"]) == "200"
+
+
+def test_rate_limited_reply_waits_without_crediting(paths, monkeypatch):
+    _enable(monkeypatch)
+    monkeypatch.setenv("FLOP_FAUCET_COOLDOWN_HOURS", "auto")
+    monkeypatch.setenv("FLOP_FAUCET_JITTER_MIN", "0")
+    r = ff.run_faucet_cycle(claim_fn=lambda req: {"amount": 0, "retry_after_s": 7200},
+                            now=NOW, log=lambda m: None, **paths)
+    assert r["outcome"] == "claimed_zero" and tm.check_balance(path=paths["ledger_path"]) == "0"
+    r2 = ff.run_faucet_cycle(claim_fn=CLAIM_OK, now=NOW + 3600 + 1, log=lambda m: None, **paths)
+    assert r2["outcome"] == "skipped_cooldown"                      # chờ đủ 2h faucet yêu cầu
+
+
+def test_merge_state_never_moves_backwards():
+    a = {"FLOP": {"last_claim_ts": 100, "claims": {"2026-11-03": 2}}}
+    b = {"FLOP": {"last_claim_ts": 50, "next_claim_ts": 900, "claims": {"2026-11-03": 5, "2026-11-02": 9}}}
+    m = ff.merge_state(a, b)
+    assert m["FLOP"]["last_claim_ts"] == 100 and m["FLOP"]["next_claim_ts"] == 900
+    assert m["FLOP"]["claims"] == {"2026-11-02": 9, "2026-11-03": 5}
+    assert ff.merge_state(None, "junk") == {}

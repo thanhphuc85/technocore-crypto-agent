@@ -1514,7 +1514,7 @@ _BLOB_DURABLE_KEYS = ("weekly_samples", "last_alert_price", "testnet_radar")
 # "local có thì local thắng", vì state.json rỗng sau khi cache mất sẽ nuốt số đã tích.
 _COUNTER_DURABLE_KEYS = ("kibble_lifetime", "kibble_lifetime_clean")
 # Đếm tin theo phòng trong NGÀY (flop_governor): mất cache không được biến thành "xoá đếm".
-_DAYCOUNT_DURABLE_KEYS = ("post_counts",)
+_DAYCOUNT_DURABLE_KEYS = ("post_counts", "faucet_state")
 DURABLE_STATE_KEYS = (_TS_DURABLE_KEYS + _BLOB_DURABLE_KEYS + _COUNTER_DURABLE_KEYS
                       + _DAYCOUNT_DURABLE_KEYS)
 STATE_KV_KEY = "state"
@@ -1542,6 +1542,13 @@ def hydrate_durable_from_kv(state: dict) -> None:
     for k in _BLOB_DURABLE_KEYS:
         if k in remote and not state.get(k):
             state[k] = remote[k]
+    if "faucet_state" in remote:                 # mốc claim faucet -> MAX, không bao giờ lùi
+        try:
+            import flop_faucet
+            state["faucet_state"] = flop_faucet.merge_state(state.get("faucet_state"),
+                                                            remote["faucet_state"])
+        except Exception:
+            pass
     if "post_counts" in remote:                  # đếm tin trong ngày -> MAX từng phòng, cùng ngày
         try:
             import flop_governor
@@ -3001,10 +3008,19 @@ def _faucet_claim_fn(req: dict) -> dict:
     url = req.get("faucet_url")
     r = requests.post(url, json=req.get("signed") or {},
                       headers={"User-Agent": UA, "Content-Type": "application/json"}, timeout=20)
+    if r.status_code == 429:
+        # Chưa tới lượt: faucet nói chờ bao lâu -> flop_faucet hẹn đúng giờ, không gõ lại dồn dập.
+        try:
+            body = r.json() if r.content else {}
+        except ValueError:
+            body = {}
+        wait = _faucet_retry_after(r.headers.get("Retry-After"), body if isinstance(body, dict) else {})
+        return {"amount": 0, "retry_after_s": wait if wait is not None else 3600}
     r.raise_for_status()
     data = r.json() if r.content else {}
     if not isinstance(data, dict):
         data = {}
+    _wait = _faucet_retry_after(None, data)
     err = _api_error(data)
     if err:
         raise RuntimeError(f"faucet từ chối: {err}")   # -> error_claim, KHÔNG ghi sổ
@@ -3016,7 +3032,64 @@ def _faucet_claim_fn(req: dict) -> dict:
         print(f"[faucet] ⚠️ phản hồi không có trường số lượng — tạm ghi theo yêu cầu "
               f"(keys: {sorted(data)[:15]})")
         amt = req.get("amount")
-    return {"amount": amt}
+    out = {"amount": amt}
+    if _wait is not None:
+        out["retry_after_s"] = _wait
+    return out
+
+
+def _faucet_retry_after(header, body: dict):
+    """Số giây tới lượt claim kế tiếp từ header Retry-After hoặc thân phản hồi; None nếu không có."""
+    if header is not None:
+        try:
+            return max(0, int(float(str(header).strip())))
+        except ValueError:
+            pass
+    for k in ("retry_after", "retry_after_s", "retryAfter", "cooldown_seconds", "wait_seconds"):
+        try:
+            if body.get(k) is not None:
+                return max(0, int(float(body[k])))
+        except (TypeError, ValueError):
+            continue
+    for k in ("next_claim_at", "next_claim", "nextClaimAt", "next_claim_ts"):
+        v = body.get(k)
+        if v is None:
+            continue
+        try:
+            t = float(v)
+            t = t / 1000 if t > 10**11 else t
+            return max(0, int(t - time.time()))
+        except (TypeError, ValueError):
+            try:
+                import calendar as _cal
+                t = _cal.timegm(time.strptime(str(v)[:19], "%Y-%m-%dT%H:%M:%S"))
+                return max(0, int(t - time.time()))
+            except ValueError:
+                continue
+    return None
+
+
+def faucet_step(state: dict, private_key, did) -> str:
+    """Một nhịp faucet testnet. File trạng thái faucet KHÔNG được cache qua run (chỉ state.json)
+    -> nạp bản bền (state + KV) vào file trước, đọc ngược ra sau. Thiếu bước này mỗi run 5 phút
+    đều tưởng chưa claim lần nào: gõ faucet 288 lần/ngày, trần ngày vô tác dụng."""
+    if os.environ.get("FLOP_FAUCET_ENABLED", "").strip().lower() not in ("1", "true", "on", "yes"):
+        return "off"
+    try:
+        import flop_faucet
+        fpath = flop_faucet.state_path()
+        flop_faucet._save(flop_faucet.merge_state(flop_faucet._load(fpath), state.get("faucet_state")),
+                          fpath)
+        fr = flop_faucet.run_faucet_cycle(claim_fn=_faucet_claim_fn,
+                                          private_key=private_key, did=did)
+        status = fr.get("outcome", "?")
+        print(f"[faucet] {status}" + (f" — {fr['reason']}" if fr.get("reason") else ""))
+        state["faucet_state"] = flop_faucet._load(fpath)
+        save_state({"faucet_state": state["faucet_state"]})
+        return status
+    except Exception as e:
+        print(f"[faucet] bỏ qua ({str(e)[:100]})")
+        return "error"
 
 
 # --- Giao thức AGENT-TO-AGENT (#5): cho agent khác "gọi API" bằng tin nhắn ---
@@ -4211,17 +4284,7 @@ def main():
     except Exception as e:
         print(f"[sim-credit] bỏ qua ({str(e)[:80]})")
 
-    faucet_status = "off"
-    if os.environ.get("FLOP_FAUCET_ENABLED", "").strip().lower() in ("1", "true", "on", "yes"):
-        try:
-            import flop_faucet
-            fr = flop_faucet.run_faucet_cycle(claim_fn=_faucet_claim_fn,
-                                              private_key=private_key, did=did)
-            faucet_status = fr.get("outcome", "?")
-            print(f"[faucet] {faucet_status}" + (f" — {fr['reason']}" if fr.get("reason") else ""))
-        except Exception as e:
-            faucet_status = "error"
-            print(f"[faucet] bỏ qua ({str(e)[:100]})")
+    faucet_status = faucet_step(state, private_key, did)
 
     # 3a9) (Tùy chọn, GATED) MUA PHIÊN INFERENCE từ thợ đào FLOP — đường "spend-to-earn" theo
     #      bản nháp FLOP (post session request -> PoUI -> settle -> tích lũy mở khóa 3:1).
