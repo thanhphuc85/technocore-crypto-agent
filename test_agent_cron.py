@@ -3008,7 +3008,8 @@ def test_main_testnet_stops_new_sessions_at_pending_cap(monkeypatch, tmp_path):
     monkeypatch.setattr(ac, "broadcast_telemetry", lambda *a, **k: True)
     monkeypatch.setattr(ac, "broadcast_manifest", lambda *a, **k: True)
     monkeypatch.setattr(ac, "auto_respond", lambda *a, **k: (0, 0))
-    monkeypatch.setattr(ac, "_telegram_send", lambda *a, **k: True)
+    sent = []
+    monkeypatch.setattr(ac, "_telegram_send", lambda t, *a, **k: sent.append(t) or True)
     monkeypatch.setattr(ac, "_server_ok_count", 1)
     out = {}
     monkeypatch.setattr(ac, "_write_summary", lambda *a, **k: out.update(a=a, k=k))
@@ -3023,6 +3024,7 @@ def test_main_testnet_stops_new_sessions_at_pending_cap(monkeypatch, tmp_path):
     ac.main()
     assert calls == []                                   # không đăng phiên mới
     assert "pending-cap(3)" in repr(out)
+    assert any("CHỜ PROOF" in t for t in sent)          # báo NGAY khi bắt đầu chặn
 
 
 # --- radar testnet: Telegram lỗi thì KHÔNG đánh dấu đã thấy (giờ sau báo lại) ----------------

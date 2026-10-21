@@ -90,3 +90,15 @@ def test_pending_block_caps_outstanding_sessions():
     assert wd.pending_block(st, now, 4) == (False, 3)
     assert wd.pending_block(st, now, 0) == (False, 3)                  # 0 = tắt
     assert wd.pending_block(st, now + wd.PENDING_TTL_SEC + 1, 3) == (False, 0)   # hết hạn -> mở lại
+
+
+
+def test_pending_block_lifts_after_window_not_after_48h():
+    st, now = {}, 1_800_000_000
+    for i in range(3):
+        wd.note_pending(st, {"stage": "await_poui", "outcome": "pending", "request_id": f"r{i}"}, now)
+    assert wd.pending_block(st, now + 5 * 3600, 3)[0] is True             # trong 6h: chặn
+    blocked, n = wd.pending_block(st, now + 6 * 3600 + 1, 3)
+    assert blocked is False and n == 0                                     # hết 6h: đăng tiếp
+    assert len(st[wd.PENDING_KEY]) == 3                                    # danh sách vẫn giữ để đối soát
+    assert wd.pending_block(st, now + 3600, 3, window_sec=1800)[0] is False

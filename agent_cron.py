@@ -4394,7 +4394,21 @@ def main():
                 if _tm0.testnet_enabled():
                     import flop_watchdog as _wdp
                     _pend_block, _npend = _wdp.pending_block(
-                        state, now, int(_env_float("FLOP_SESSION_MAX_PENDING", 3)))
+                        state, now, int(_env_float("FLOP_SESSION_MAX_PENDING", 3)),
+                        int(_env_float("FLOP_SESSION_PENDING_BLOCK_HOURS", 6) * 3600))
+                    # Báo NGAY khi bắt đầu chặn (1 lần mỗi đợt), không đợi watchdog ~30 phút.
+                    if _pend_block and not state.get("pending_block_alerted"):
+                        _hrs = _env_float("FLOP_SESSION_PENDING_BLOCK_HOURS", 6)
+                        if _telegram_send(
+                                f"⏸ TESTNET: {_npend} phiên đang CHỜ PROOF — agent tạm ngừng đăng phiên "
+                                f"mới (tối đa {_hrs:g}h). Phí có thể đã khoá trên chain mà sổ chưa ghi. "
+                                "Faucet vẫn claim, FLOP tích lại và được chi bù khi hết chặn. "
+                                "Kiểm tra API proof/escrow của FLOP."):
+                            state["pending_block_alerted"] = now
+                            save_state({"pending_block_alerted": now})
+                    elif not _pend_block and state.get("pending_block_alerted"):
+                        state.pop("pending_block_alerted", None)
+                        save_state({"pending_block_alerted": 0})
                 _n_iter = 0 if _pend_block else (len(_plan) if _plan is not None else _sess_max)
                 for _i in range(_n_iter):
                     # Mỗi phiên: model xoay + flops/latency/fee jitter -> đa dạng hữu cơ.

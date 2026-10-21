@@ -283,6 +283,8 @@ jobs:
           FLOP_SESSION_MAX_FLOPS: ${{ vars.FLOP_SESSION_MAX_FLOPS }}
           # (testnet) Trần phiên chờ proof: đủ N thì ngừng đăng phiên mới (mặc định 3, 0 = tắt).
           FLOP_SESSION_MAX_PENDING: ${{ vars.FLOP_SESSION_MAX_PENDING }}
+          # Cửa sổ (giờ) đếm phiên chờ proof cho trần trên — chặn tối đa chừng ấy giờ (mặc định 6).
+          FLOP_SESSION_PENDING_BLOCK_HOURS: ${{ vars.FLOP_SESSION_PENDING_BLOCK_HOURS }}
           # Mạng ép phí cố định mỗi phiên -> đặt mức đó (rỗng = theo đơn giá).
           FLOP_SESSION_FIXED_FEE: ${{ vars.FLOP_SESSION_FIXED_FEE }}
           # Radar testnet chỉ đọc (mặc định BẬT, 1 giờ/lần): route/trang/trạng thái mới -> Telegram.

@@ -43,11 +43,19 @@ def note_pending(state: dict, result: dict, now: int) -> int:
     return len(state[PENDING_KEY])
 
 
-def pending_block(state: dict, now: int, cap: int) -> tuple:
-    """(chặn?, số phiên đang chờ proof). Phiên chờ proof có thể ĐÃ khoá phí (escrow) trên
-    chain mà sổ cái chưa ghi -> pacer tưởng chưa chi và cứ đăng phiên mới mỗi run. Đủ `cap`
-    phiên chờ (còn trong TTL) thì dừng đăng tới khi chúng được xử lý/hết hạn. cap<=0 = tắt."""
-    n = note_pending(state, {}, now)          # chỉ dọn mục quá hạn, không thêm gì
+DEFAULT_BLOCK_SEC = 6 * 3600
+
+
+def pending_block(state: dict, now: int, cap: int, window_sec: int = DEFAULT_BLOCK_SEC) -> tuple:
+    """(chặn?, số phiên chờ proof trong cửa sổ). Phiên chờ proof có thể ĐÃ khoá phí (escrow)
+    trên chain mà sổ cái chưa ghi -> pacer tưởng chưa chi và cứ đăng phiên mới mỗi run. Đủ
+    `cap` phiên chờ TRONG `window_sec` gần nhất thì dừng đăng. Cửa sổ ngắn (mặc định 6h, KHÔNG
+    phải TTL 48h của danh sách) để chặn không kéo dài nhiều ngày; danh sách vẫn giữ 48h cho
+    việc đối soát sau. cap<=0 = tắt."""
+    note_pending(state, {}, now)              # chỉ dọn mục quá hạn, không thêm gì
+    recent = [p for p in (state.get(PENDING_KEY) or [])
+              if now - int(_num(p.get("ts"))) <= max(0, int(window_sec))]
+    n = len(recent)
     return (cap > 0 and n >= cap), n
 
 
