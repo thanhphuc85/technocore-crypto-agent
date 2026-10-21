@@ -280,7 +280,13 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "").strip()
-DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+# api-docs.deepseek.com (2026-10): tên model là "deepseek-flash" (đang chạy
+# DeepSeek-V4.1-Flash-1017) và "deepseek-v4-pro". "deepseek-chat" KHÔNG còn trong danh sách.
+DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "").strip() or "deepseek-flash"
+# Thinking mode BẬT mặc định phía DeepSeek: chuỗi suy luận tốn token đầu ra + thời gian,
+# và ở chế độ đó `temperature` bị bỏ qua. Agent gửi câu ngắn (max_tokens nhỏ) nên mặc
+# định TẮT; đặt DEEPSEEK_THINKING=enabled để bật.
+DEEPSEEK_THINKING = "enabled" if os.environ.get("DEEPSEEK_THINKING", "").strip().lower() == "enabled" else "disabled"
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "").strip()  # để trống -> tự dò model hợp lệ
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "").strip()   # để trống -> tự dò model hợp lệ
@@ -2025,7 +2031,8 @@ def _deepseek_reply(user_text: str, system: str, temperature: float,
     """DeepSeek dùng chung schema OpenAI (chat/completions + Bearer)."""
     return _openai_compatible_reply(
         f"{DEEPSEEK_BASE_URL}/chat/completions",
-        DEEPSEEK_API_KEY, DEEPSEEK_MODEL, user_text, system, temperature, max_tokens)
+        DEEPSEEK_API_KEY, DEEPSEEK_MODEL, user_text, system, temperature, max_tokens,
+        extra={"thinking": {"type": DEEPSEEK_THINKING}})
 
 
 def _openrouter_reply(user_text: str, system: str, temperature: float,
@@ -2120,8 +2127,10 @@ def _groq_reply(user_text: str, system: str, temperature: float,
 
 
 def _openai_compatible_reply(url: str, api_key: str, model: str, user_text: str,
-                             system: str, temperature: float, max_tokens: int = 120) -> str:
-    """Gọi endpoint kiểu OpenAI (dùng cho cả OpenAI lẫn DeepSeek)."""
+                             system: str, temperature: float, max_tokens: int = 120,
+                             extra: dict = None) -> str:
+    """Gọi endpoint kiểu OpenAI (dùng cho cả OpenAI lẫn DeepSeek). `extra`: trường riêng
+    của một provider (vd `thinking` của DeepSeek) — KHÔNG gửi cho provider khác."""
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     body = {
         "model": model,
@@ -2132,9 +2141,16 @@ def _openai_compatible_reply(url: str, api_key: str, model: str, user_text: str,
         "max_tokens": max_tokens,
         "temperature": temperature,
     }
+    if extra:
+        body.update(extra)
     r = requests.post(url, headers=headers, json=body, timeout=20)
     r.raise_for_status()
-    return r.json()["choices"][0]["message"]["content"]
+    content = r.json()["choices"][0]["message"].get("content")
+    if not (isinstance(content, str) and content.strip()):
+        # Rỗng (vd chuỗi suy luận ăn hết max_tokens) -> báo LỖI để chuỗi provider thử
+        # provider kế, thay vì trả "" đi tiếp thành bài giao rỗng (bị chấm "not useful").
+        raise ValueError(f"{model}: phản hồi rỗng")
+    return content
 
 
 def pick_tone(text: str):

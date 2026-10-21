@@ -1159,6 +1159,56 @@ def test_deepseek_reply_hits_deepseek_endpoint(monkeypatch):
     assert seen["auth"] == "Bearer dk" and seen["model"] == "deepseek-chat"
 
 
+
+def _capture_post(seen, content="ok"):
+    def fake_post(url, headers=None, json=None, timeout=None):
+        seen["url"], seen["body"] = url, json
+        return _Resp(data={"choices": [{"message": {"content": content}}]})
+    return fake_post
+
+
+def test_deepseek_default_model_is_current_flash_name():
+    # api-docs.deepseek.com: "deepseek-flash" (V4.1-Flash-1017); "deepseek-chat" đã khỏi danh sách.
+    if not ac.os.environ.get("DEEPSEEK_MODEL"):
+        assert ac.DEEPSEEK_MODEL == "deepseek-flash"
+
+
+def test_deepseek_sends_thinking_disabled_by_default(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(ac, "DEEPSEEK_API_KEY", "dk")
+    monkeypatch.setattr(ac, "DEEPSEEK_THINKING", "disabled")
+    monkeypatch.setattr(ac.requests, "post", _capture_post(seen))
+    assert ac._deepseek_reply("hi", "sys", 0.2) == "ok"
+    assert seen["body"]["thinking"] == {"type": "disabled"}
+    assert seen["body"]["temperature"] == 0.2         # chỉ có tác dụng khi thinking tắt
+
+
+def test_deepseek_thinking_can_be_enabled(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(ac, "DEEPSEEK_API_KEY", "dk")
+    monkeypatch.setattr(ac, "DEEPSEEK_THINKING", "enabled")
+    monkeypatch.setattr(ac.requests, "post", _capture_post(seen))
+    ac._deepseek_reply("hi", "sys", 0.2)
+    assert seen["body"]["thinking"] == {"type": "enabled"}
+
+
+def test_thinking_field_never_sent_to_other_providers(monkeypatch):
+    # Trường riêng của DeepSeek gửi sang OpenRouter/OpenAI có thể bị 400.
+    seen = {}
+    monkeypatch.setattr(ac.requests, "post", _capture_post(seen))
+    ac._openrouter_reply("hi", "sys", 0.2)
+    assert "thinking" not in seen["body"]
+    ac._openai_reply("hi", "sys", 0.2)
+    assert "thinking" not in seen["body"]
+
+
+def test_empty_reply_raises_so_chain_falls_back(monkeypatch):
+    # Rỗng không được đi tiếp thành bài giao rỗng ("templated or empty delivery").
+    for empty in ("", "   ", None):
+        monkeypatch.setattr(ac.requests, "post", _capture_post({}, content=empty))
+        with pytest.raises(ValueError):
+            ac._openai_compatible_reply("http://x", "k", "m", "hi", "sys", 0.2)
+
 # --- Runner coordination (tùy chọn 1 chính + 1 phụ) via KV heartbeat ---------------
 def test_primary_alive_fresh_heartbeat(monkeypatch):
     now = 1_000_000
