@@ -1313,13 +1313,14 @@ def test_main_backup_stands_down_when_primary_alive(monkeypatch):
 
 
 def test_main_backup_runs_when_forced_even_if_primary_alive(monkeypatch):
-    # Chạy tay (workflow_dispatch) BỎ QUA standby để còn test được -> auto_respond phải chạy.
+    # Chạy tay CÓ TICK force_broadcast BỎ QUA standby để còn test được -> auto_respond phải chạy.
     monkeypatch.setattr(ac, "SEED_HEX", SEED_HEX)
     monkeypatch.setattr(ac, "RUNNER_ROLE", "backup")
     monkeypatch.setattr(ac, "load_state", lambda: {})
     monkeypatch.setattr(ac, "hydrate_durable_from_kv", lambda s: None)
     monkeypatch.setattr(ac, "primary_alive", lambda now, m: True)
     monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    monkeypatch.setenv("FORCE_BROADCAST", "true")
     monkeypatch.setattr(ac, "save_state", lambda d: None)
     monkeypatch.setattr(ac, "write_heartbeat", lambda *a, **k: None)
     monkeypatch.setattr(ac, "persist_durable_to_kv", lambda *a, **k: None)
@@ -1333,6 +1334,31 @@ def test_main_backup_runs_when_forced_even_if_primary_alive(monkeypatch):
                         lambda *a, **k: hit.update(resp=True) or (0, 0))
     ac.main()
     assert hit.get("resp") is True                   # force -> KHÔNG standby, chạy đầy đủ
+
+
+def test_main_backup_stands_by_on_scheduler_dispatch(monkeypatch):
+    # cron-job.org cũng gọi workflow_dispatch nhưng KHÔNG tick: backup phải đứng chờ, nếu
+    # không nó đăng chồng lên runner chính (lỗi cũ: force = event == dispatch).
+    monkeypatch.setattr(ac, "SEED_HEX", SEED_HEX)
+    monkeypatch.setattr(ac, "RUNNER_ROLE", "backup")
+    monkeypatch.setattr(ac, "load_state", lambda: {})
+    monkeypatch.setattr(ac, "hydrate_durable_from_kv", lambda s: None)
+    monkeypatch.setattr(ac, "primary_alive", lambda now, m: True)
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    monkeypatch.delenv("FORCE_BROADCAST", raising=False)
+    monkeypatch.setattr(ac, "save_state", lambda d: None)
+    monkeypatch.setattr(ac, "write_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(ac, "persist_durable_to_kv", lambda *a, **k: None)
+    monkeypatch.setattr(ac, "_write_summary", lambda *a, **k: None)
+    monkeypatch.setattr(ac, "broadcast_telemetry", lambda *a, **k: True)
+    monkeypatch.setattr(ac, "broadcast_manifest", lambda *a, **k: True)
+    monkeypatch.setattr(ac, "check_price_alert", lambda *a, **k: None)
+    monkeypatch.setattr(ac, "_server_ok_count", 1)
+    hit = {}
+    monkeypatch.setattr(ac, "auto_respond",
+                        lambda *a, **k: hit.update(resp=True) or (0, 0))
+    ac.main()
+    assert hit.get("resp") is None                   # standby: không trả lời, không đăng
 
 
 def test_is_refusal_detects_declines_not_legit_answers():
@@ -2840,3 +2866,27 @@ def test_faucet_adapter_warns_when_amount_field_missing(monkeypatch, capsys):
     out = ac._faucet_claim_fn({"faucet_url": "http://f", "signed": {}, "amount": "100"})
     assert out["amount"] == "100"
     assert "không có trường số lượng" in capsys.readouterr().out
+
+
+# --- workflow_dispatch KHÔNG có nghĩa là "chạy tay": cron-job.org cũng dispatch -------------
+def test_scheduler_dispatch_does_not_force_telemetry(monkeypatch):
+    # Nhịp chính = cron-job.org gọi workflow_dispatch. Trước đây force = (event == dispatch)
+    # nên telemetry đăng mỗi 5 phút bất chấp TELEMETRY_INTERVAL_HOURS=6.
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    monkeypatch.delenv("FORCE_BROADCAST", raising=False)
+    assert ac.force_broadcast_requested() is False
+    monkeypatch.setenv("FORCE_BROADCAST", "")             # input không tick -> chuỗi rỗng
+    assert ac.force_broadcast_requested() is False
+    monkeypatch.setenv("FORCE_BROADCAST", "false")
+    assert ac.force_broadcast_requested() is False
+
+
+def test_manual_tick_still_forces_telemetry(monkeypatch):
+    monkeypatch.setenv("FORCE_BROADCAST", "true")          # người chạy tay tick ô force_broadcast
+    assert ac.force_broadcast_requested() is True
+
+
+def test_telemetry_gate_respects_six_hours():
+    st = {"last_telemetry": 1_000_000}
+    assert not ac._due(st, "last_telemetry", 6, 1_000_000 + 5 * 60)      # 5 phút sau: chưa
+    assert ac._due(st, "last_telemetry", 6, 1_000_000 + 6 * 3600)        # đủ 6 giờ: tới hạn

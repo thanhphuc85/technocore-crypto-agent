@@ -3600,6 +3600,18 @@ def broadcast_manifest(private_key, did):
     return ok            # trả kết quả post -> caller chỉ đóng cổng thời gian khi THÀNH CÔNG
 
 
+def force_broadcast_requested() -> bool:
+    """Ép đăng telemetry ngay CHỈ khi người chạy tay TICK ô `force_broadcast` của workflow.
+
+    Trước đây: force = (GITHUB_EVENT_NAME == "workflow_dispatch"), giả định dispatch = chạy tay
+    để thử. Nhưng nhịp CHÍNH của agent là cron-job.org gọi workflow_dispatch (294/300 run),
+    nên gần như MỌI run bị coi là chạy tay: telemetry đăng mỗi ~5 phút bất chấp
+    TELEMETRY_INTERVAL_HOURS=6 (gấp ~72 lần). Đo 2026-10-21: agent là tài khoản đăng NHIỀU
+    NHẤT phòng `flop` trong 15.136 DID (608 tin/ngày, ~290 là tin giá xoay 4 khuôn câu) —
+    đúng chân dung spam bot, ngay trong phòng của dự án phát airdrop."""
+    return os.environ.get("FORCE_BROADCAST", "").strip().lower() in ("1", "true", "on", "yes")
+
+
 def _due(state: dict, key: str, interval_h: float, now: int, phase_s: int = 0) -> bool:
     """True nếu đã đủ interval_h giờ kể từ lần cuối (hoặc chưa từng chạy).
     phase_s: lệch pha (giây) cộng thêm vào ngưỡng — dùng để so le cadence theo DID giữa
@@ -3716,8 +3728,7 @@ def main():
     _miner_stats.clear()
     _miner_stats.update(state.get(_miner_stats_key()) or {})
     now = int(time.time())
-    # Run thủ công (workflow_dispatch) luôn phát để dễ kiểm chứng.
-    force = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+    force = force_broadcast_requested()
 
     # 0) Phối hợp CHÍNH/PHỤ: runner PHỤ đứng im khi runner CHÍNH còn sống (heartbeat tươi),
     #    để không nhân đôi telemetry/reply. Chạy tay (force) thì BỎ QUA standby để test được.

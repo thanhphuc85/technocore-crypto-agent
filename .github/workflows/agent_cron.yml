@@ -10,6 +10,11 @@ on:
         description: 'Hỏi agent (để trống nếu chỉ chạy telemetry). VD: @gia ETH tuan nay? hoặc !price'
         required: false
         default: ''
+      force_broadcast:
+        description: 'Ép đăng telemetry NGAY (chỉ để thử khi chạy tay). cron-job.org không tick ô này.'
+        required: false
+        type: boolean
+        default: false
 
 # Không cho 2 lần chạy chồng nhau (tránh trả lời trùng)
 concurrency:
@@ -292,6 +297,9 @@ jobs:
           FLOP_FAUCET_JITTER_MIN: ${{ vars.FLOP_FAUCET_JITTER_MIN }}
           # Câu hỏi nhập tay khi Run workflow (bỏ qua khi chạy theo cron)
           ASK: ${{ github.event.inputs.ask }}
+          # Chỉ ép telemetry khi TICK ô force_broadcast lúc chạy tay — KHÔNG suy từ event_name,
+          # vì nhịp chính (cron-job.org) cũng là workflow_dispatch.
+          FORCE_BROADCAST: ${{ github.event.inputs.force_broadcast }}
         run: python agent_cron.py
 
       # Cảnh báo Discord khi run LỖI/outage (NHẸ, gated OFF nếu chưa đặt secret DISCORD_WEBHOOK_URL).
