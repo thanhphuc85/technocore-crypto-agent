@@ -3083,3 +3083,10 @@ def test_faucet_retry_after_parsing():
     soon = _t.strftime("%Y-%m-%dT%H:%M:%S", _t.gmtime(_t.time() + 7200))
     assert 7100 <= ac._faucet_retry_after(None, {"next_claim_at": soon + "Z"}) <= 7200
     assert ac._faucet_retry_after(None, {"x": 1}) is None
+
+
+
+def test_faucet_adapter_error_body_with_wait_is_a_wait(monkeypatch):
+    monkeypatch.setattr(ac.requests, "post", lambda *a, **k: _resp_with_body(
+        {"error": "already claimed", "retry_after": 2400}))
+    assert ac._faucet_claim_fn({"faucet_url": "http://f", "signed": {}}) == {"amount": 0, "retry_after_s": 2400}

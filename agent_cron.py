@@ -3023,6 +3023,8 @@ def _faucet_claim_fn(req: dict) -> dict:
     _wait = _faucet_retry_after(None, data)
     err = _api_error(data)
     if err:
+        if _wait is not None:                          # "chưa tới lượt, quay lại sau N giây"
+            return {"amount": 0, "retry_after_s": _wait}
         raise RuntimeError(f"faucet từ chối: {err}")   # -> error_claim, KHÔNG ghi sổ
     # `is not None` chứ không phải `or`: faucet trả amount=0 (hết hạn mức) là 0, không phải
     # "thiếu trường" -> trước đây rơi về lượng XIN và ghi khống vào sổ.

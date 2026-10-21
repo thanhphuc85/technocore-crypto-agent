@@ -57,6 +57,9 @@ def faucet_amount() -> str:
 
 
 AUTO_PROBE_HOURS = 1.0
+# Claim LỖI (mạng, 4xx/5xx, thân báo lỗi) cũng phải lùi: không thì run 5 phút sau gõ lại ngay,
+# tức ~12 lần/giờ vào đúng lúc faucet đang từ chối.
+ERROR_BACKOFF_SEC = 3600
 
 
 def cooldown_auto() -> bool:
@@ -262,7 +265,12 @@ def run_faucet_cycle(claim_fn=None, token: str = None, now: int = None,
         result = claim_fn({"token": token, "amount": faucet_amount(),
                            "faucet_url": url, "signed": signed}) or {}
     except Exception as e:
-        return {"outcome": "error_claim", "reason": f"claim faucet thất bại: {e}"}
+        rec = st.setdefault(token, {})
+        backoff = int(min(ERROR_BACKOFF_SEC, max(300.0, cooldown_hours() * 3600)))
+        rec["next_claim_ts"] = now + backoff
+        _save(st, faucet_state)
+        return {"outcome": "error_claim",
+                "reason": f"claim faucet thất bại: {e} — thử lại sau ~{backoff // 60} phút"}
 
     raw_amt = result.get("amount")
     amt = str(faucet_amount() if raw_amt is None else raw_amt)

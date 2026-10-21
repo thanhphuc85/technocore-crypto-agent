@@ -242,3 +242,21 @@ def test_merge_state_never_moves_backwards():
     assert m["FLOP"]["last_claim_ts"] == 100 and m["FLOP"]["next_claim_ts"] == 900
     assert m["FLOP"]["claims"] == {"2026-11-02": 9, "2026-11-03": 5}
     assert ff.merge_state(None, "junk") == {}
+
+
+def test_claim_error_backs_off_instead_of_retrying_every_run(paths, monkeypatch):
+    _enable(monkeypatch)
+    monkeypatch.setenv("FLOP_FAUCET_COOLDOWN_HOURS", "auto")
+    monkeypatch.setenv("FLOP_FAUCET_JITTER_MIN", "0")
+    calls = []
+
+    def boom(req):
+        calls.append(1)
+        raise RuntimeError("400 already claimed")
+
+    q = lambda now: ff.run_faucet_cycle(claim_fn=boom, now=now, log=lambda m: None, **paths)
+    assert q(NOW)["outcome"] == "error_claim"
+    for k in range(1, 12):                                   # 11 run 5 phút kế tiếp
+        assert q(NOW + 300 * k)["outcome"] == "skipped_cooldown"
+    assert q(NOW + 3600 + 1)["outcome"] == "error_claim"
+    assert len(calls) == 2                                   # 2 lần gõ trong ~1 giờ, không phải 13
