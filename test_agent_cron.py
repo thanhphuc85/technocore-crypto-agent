@@ -3090,3 +3090,29 @@ def test_faucet_adapter_error_body_with_wait_is_a_wait(monkeypatch):
     monkeypatch.setattr(ac.requests, "post", lambda *a, **k: _resp_with_body(
         {"error": "already claimed", "retry_after": 2400}))
     assert ac._faucet_claim_fn({"faucet_url": "http://f", "signed": {}}) == {"amount": 0, "retry_after_s": 2400}
+
+
+
+def test_faucet_step_waits_in_run_when_next_slot_is_minutes_away(monkeypatch, tmp_path):
+    # Faucet theo giờ: run tới sớm 2 phút -> chờ ngay trong run rồi claim, không đợi run sau.
+    import flop_faucet as ff
+    clock = {"t": 1_800_000_000}
+    monkeypatch.setattr(ff.time, "time", lambda: clock["t"])
+    monkeypatch.setattr(ac.time, "time", lambda: clock["t"])
+    slept = []
+    monkeypatch.setattr(ac.time, "sleep", lambda s: slept.append(s) or clock.update(t=clock["t"] + s))
+    for k, v in {"FLOP_FAUCET_ENABLED": "true", "FLOP_FAUCET_URL": "https://f.test",
+                 "FLOP_FAUCET_COOLDOWN_HOURS": "auto", "FLOP_FAUCET_JITTER_MIN": "0",
+                 "FLOP_FAUCET_STATE": str(tmp_path / "f.json"),
+                 "TOKEN_LEDGER_FILE": str(tmp_path / "l.json")}.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setattr(ac, "save_state", lambda d: None)
+    monkeypatch.setattr(ac, "_faucet_claim_fn", lambda req: {"amount": "10"})
+    state = {}
+    assert ac.faucet_step(state, None, None) == "claimed"
+    clock["t"] += 3600 - 120                                      # run kế tiếp: còn 2 phút
+    assert ac.faucet_step(state, None, None) == "claimed"
+    assert slept == [123]
+    clock["t"] += 3600 - 1200                                     # còn 20 phút: KHÔNG chờ
+    assert ac.faucet_step(state, None, None) == "skipped_cooldown"
+    assert slept == [123]

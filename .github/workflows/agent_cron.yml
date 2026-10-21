@@ -307,6 +307,8 @@ jobs:
           FLOP_FAUCET_REFILL_BELOW: ${{ vars.FLOP_FAUCET_REFILL_BELOW }}
           FLOP_FAUCET_DEMAND_ONLY: ${{ vars.FLOP_FAUCET_DEMAND_ONLY }}
           FLOP_FAUCET_MAX_PER_DAY: ${{ vars.FLOP_FAUCET_MAX_PER_DAY }}
+          # Lượt faucet kế tiếp mở trong <= N giây thì chờ ngay trong run để claim đúng giờ (mặc định 300).
+          FLOP_FAUCET_WAIT_MAX_SEC: ${{ vars.FLOP_FAUCET_WAIT_MAX_SEC }}
           FLOP_FAUCET_JITTER_MIN: ${{ vars.FLOP_FAUCET_JITTER_MIN }}
           # Câu hỏi nhập tay khi Run workflow (bỏ qua khi chạy theo cron)
           ASK: ${{ github.event.inputs.ask }}

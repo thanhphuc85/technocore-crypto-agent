@@ -3084,6 +3084,20 @@ def faucet_step(state: dict, private_key, did) -> str:
                           fpath)
         fr = flop_faucet.run_faucet_cycle(claim_fn=_faucet_claim_fn,
                                           private_key=private_key, did=did)
+        # Lượt kế tiếp mở trong vài phút -> CHỜ NGAY trong run này rồi claim đúng giờ. Không
+        # chờ thì phải đợi run sau (tới 5 phút), trễ cộng dồn mỗi chu kỳ -> faucet theo giờ chỉ
+        # được ~22-23/24 lượt/ngày. Tối đa 2 lần chờ (lệch đồng hồ với faucet vài giây).
+        wait_max = _env_float("FLOP_FAUCET_WAIT_MAX_SEC", 300)
+        for _ in range(2):
+            if fr.get("outcome") not in ("skipped_cooldown", "claimed_zero"):
+                break
+            left = flop_faucet.seconds_until_next(faucet_state=fpath)
+            if left is None or left > wait_max:
+                break
+            print(f"[faucet] lượt kế tiếp mở sau {left}s — chờ trong run này để claim đúng giờ")
+            time.sleep(left + 3)
+            fr = flop_faucet.run_faucet_cycle(claim_fn=_faucet_claim_fn,
+                                              private_key=private_key, did=did)
         status = fr.get("outcome", "?")
         print(f"[faucet] {status}" + (f" — {fr['reason']}" if fr.get("reason") else ""))
         state["faucet_state"] = flop_faucet._load(fpath)

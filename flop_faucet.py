@@ -126,6 +126,23 @@ def _cooldown_seconds(last: int) -> float:
     return cd
 
 
+def seconds_until_next(token: str = None, now: int = None, faucet_state: str = None):
+    """Còn bao nhiêu giây tới lượt claim kế tiếp (theo hẹn của faucet và cooldown+jitter);
+    0 = được claim ngay; None = chưa từng claim."""
+    token = token or tm.default_token()
+    now = int(now if now is not None else time.time())
+    rec = _load(faucet_state).get(token) or {}
+    try:
+        last = int(rec.get("last_claim_ts") or 0)
+        nxt = int(rec.get("next_claim_ts") or 0)
+    except (TypeError, ValueError):
+        return None
+    if not last and not nxt:
+        return None
+    due = max(nxt, last + int(_cooldown_seconds(last)) if last else 0)
+    return max(0, due - now)
+
+
 def merge_state(local, remote) -> dict:
     """Hợp nhất trạng thái faucet local với bản KV (runner mới có file rỗng): mốc claim và
     mốc chờ lấy MAX, đếm claim CÙNG ngày lấy MAX. Mất file không được biến thành 'chưa claim

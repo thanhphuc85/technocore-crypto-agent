@@ -260,3 +260,14 @@ def test_claim_error_backs_off_instead_of_retrying_every_run(paths, monkeypatch)
         assert q(NOW + 300 * k)["outcome"] == "skipped_cooldown"
     assert q(NOW + 3600 + 1)["outcome"] == "error_claim"
     assert len(calls) == 2                                   # 2 lần gõ trong ~1 giờ, không phải 13
+
+
+def test_seconds_until_next(paths, monkeypatch):
+    _enable(monkeypatch)
+    monkeypatch.setenv("FLOP_FAUCET_COOLDOWN_HOURS", "auto")
+    monkeypatch.setenv("FLOP_FAUCET_JITTER_MIN", "0")
+    fs = paths["faucet_state"]
+    assert ff.seconds_until_next(now=NOW, faucet_state=fs) is None          # chưa claim
+    ff.run_faucet_cycle(claim_fn=CLAIM_OK, now=NOW, log=lambda m: None, **paths)
+    assert ff.seconds_until_next(now=NOW + 3500, faucet_state=fs) == 100
+    assert ff.seconds_until_next(now=NOW + 4000, faucet_state=fs) == 0
