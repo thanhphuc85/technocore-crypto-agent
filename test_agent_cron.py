@@ -2943,3 +2943,27 @@ def test_post_counts_survive_cache_loss_via_kv(monkeypatch):
     ac.hydrate_durable_from_kv(state)
     assert state["post_counts"]["rooms"]["flop"] == 33
     assert "post_counts" in ac.DURABLE_STATE_KEYS
+
+
+# --- Lớp 2: tính năng không ra kết quả thì tự tạm dừng ---------------------------------------
+def test_outcome_check_pauses_and_alerts_once(monkeypatch):
+    import flop_outcomes as o
+    sent = []
+    monkeypatch.setattr(ac, "_telegram_send", lambda t: sent.append(t) or True)
+    monkeypatch.setattr(ac, "save_state", lambda d: None)
+    st = {}
+    o.record(st, "tclk", actions=200, wins=0)
+    ac._outcome_check(st, "tclk", 1_800_000_000)
+    assert len(sent) == 1 and "tclk" in sent[0]
+    assert ac._outcome_paused(st, "tclk", 1_800_000_000 + 60) > 0
+    ac._outcome_check(st, "tclk", 1_800_000_100)          # cửa sổ mới chưa đủ lượt -> im
+    assert len(sent) == 1
+
+
+def test_outcome_guard_can_be_switched_off(monkeypatch):
+    import flop_outcomes as o
+    st = {}
+    o.record(st, "engage", actions=100, wins=0)
+    o.evaluate(st, "engage", 1_800_000_000)
+    monkeypatch.setattr(ac, "OUTCOME_GUARD", False)
+    assert ac._outcome_paused(st, "engage", 1_800_000_060) == 0

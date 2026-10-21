@@ -286,6 +286,8 @@ jobs:
           # Phanh cứng số tin chat/phòng/ngày (mặc định BẬT). FLOP_POST_CAPS đè trần, vd 'flop=40,*=30'.
           FLOP_POST_GOVERNOR: ${{ vars.FLOP_POST_GOVERNOR }}
           FLOP_POST_CAPS: ${{ vars.FLOP_POST_CAPS }}
+          # Tính năng đăng tin phải có kết quả: tclk/engage quá thấp -> tự tạm dừng 7 ngày (mặc định BẬT).
+          FLOP_OUTCOME_GUARD: ${{ vars.FLOP_OUTCOME_GUARD }}
           # Đa dạng hóa request (chống bot/sybil): jitter ±% flops/latency/fee + xoay model list.
           # Mặc định 20 (code), kẹp 0..50. MODEL_HASH nhận NHIỀU hash (CSV/'|') để xoay vòng.
           FLOP_SESSION_JITTER_PCT: ${{ vars.FLOP_SESSION_JITTER_PCT }}

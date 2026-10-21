@@ -1153,6 +1153,32 @@ def _retry_after_seconds(res, default: float = 2.0) -> float:
 # PHANH CỨNG số tin chat/phòng/ngày UTC (flop_governor). Mặc định BẬT; FLOP_POST_CAPS
 # ('flop=40,kibble=1300,*=30') đè trần. Lưới an toàn cho bug kiểu #154 (telemetry 5 phút/lần).
 POST_GOVERNOR = os.environ.get("FLOP_POST_GOVERNOR", "").strip().lower() not in ("0", "false", "off", "no")
+# Tính năng ĐĂNG TIN phải có KẾT QUẢ (flop_outcomes): tclk/engage tỉ lệ kết quả quá thấp ->
+# tự tạm dừng 7 ngày + Telegram. Mặc định BẬT; FLOP_OUTCOME_GUARD=off để tắt.
+OUTCOME_GUARD = os.environ.get("FLOP_OUTCOME_GUARD", "").strip().lower() not in ("0", "false", "off", "no")
+
+
+def _outcome_check(state: dict, name: str, now: int) -> None:
+    """Chấm tính năng `name` (đủ lượt mới chấm); quá thấp -> tạm dừng + báo. Không ném lỗi."""
+    try:
+        import flop_outcomes
+        alert = flop_outcomes.evaluate(state, name, now)
+        save_state({flop_outcomes.KEY: state.get(flop_outcomes.KEY)})
+        if alert:
+            print(f"[outcome] {alert}")
+            _telegram_send(alert)
+    except Exception as e:
+        print(f"[outcome] bỏ qua ({str(e)[:80]})")
+
+
+def _outcome_paused(state: dict, name: str, now: int) -> int:
+    if not OUTCOME_GUARD:
+        return 0
+    try:
+        import flop_outcomes
+        return flop_outcomes.paused_until(state, name, now)
+    except Exception:
+        return 0
 _post_gov_state = {}                 # {flop_governor.KEY: ...} — nạp từ state đầu run, lưu cuối run
 
 
@@ -3504,7 +3530,22 @@ def auto_respond(private_key, did):
     # (Engage, GATED) Sau khi xử lý tin đến: chủ động ĐẶT 1 câu hỏi thật cho MỘT peer độc lập
     # vừa nói điều có chất -> gợi họ trả lời -> sinh cạnh reply-distance (census). Dùng tin GỘP
     # mọi room (nhiều ứng viên hơn = bề rộng tốt hơn). Loại fleet + cooldown dài = không ring.
-    if ENGAGE_ENABLED:
+    if OUTCOME_GUARD:
+        try:
+            import flop_outcomes
+            _counted = state.setdefault("engage_reply_counted", {})
+            _rep = flop_outcomes.new_engage_replies(
+                all_msgs, state.get("engaged") or {},
+                [HANDLE.lstrip("@"), AGENT_NAME, short_nick(did)], now, _counted)
+            if _rep:
+                flop_outcomes.record(state, "engage", wins=len(_rep))
+                print(f"[engage] {len(_rep)} peer đã trả lời câu hỏi engage")
+            save_state({"engage_reply_counted": _counted})
+        except Exception as e:
+            print(f"[outcome] đếm trả lời engage bỏ qua ({str(e)[:80]})")
+    if ENGAGE_ENABLED and _outcome_paused(state, "engage", now):
+        print("[engage] TẠM DỪNG tự động — câu hỏi gần như không ai trả lời")
+    elif ENGAGE_ENABLED:
         try:
             import flop_engage
             n = flop_engage.run_engage_pass(
@@ -3517,6 +3558,10 @@ def auto_respond(private_key, did):
                 is_dup=lambda t, who: is_dup_out(state, t, now, who))
             if n:
                 print(f"[engage] {'DRY-RUN ' if ENGAGE_DRY_RUN else ''}{n} câu hỏi tới peer")
+            if n and OUTCOME_GUARD and not ENGAGE_DRY_RUN:
+                import flop_outcomes
+                flop_outcomes.record(state, "engage", actions=n)
+                _outcome_check(state, "engage", now)
         except Exception as e:
             print(f"[engage] bỏ qua ({str(e)[:100]})")
 
@@ -3991,6 +4036,9 @@ def main():
     if TCLK_ENABLED and not TCLK_DRY_RUN and posts_degraded():
         tclk_status = "skip-outage"
         print(f"[tclk] bỏ qua — đường ghi lỗi (post ok={_post_ok_count} fail={_post_fail_count}).")
+    elif TCLK_ENABLED and _outcome_paused(state, "tclk", now):
+        tclk_status = "paused"
+        print(f"[tclk] TẠM DỪNG tự động tới {time.strftime('%Y-%m-%d %H:%M', time.gmtime(_outcome_paused(state, 'tclk', now)))} UTC — ACCEPT không ra kết quả")
     elif TCLK_ENABLED:
         try:
             import flop_tclk
@@ -4013,6 +4061,9 @@ def main():
                         "tclk_secrets": state.get("tclk_secrets", {})})
             mode = "dry" if TCLK_DRY_RUN else "live"
             tclk_status = f"{mode} {len(ts['accepted'])}acc/{ts['skipped']}skip/{ts['scanned']}scan"
+            if OUTCOME_GUARD and not TCLK_DRY_RUN and ts.get("accepted"):
+                import flop_outcomes
+                flop_outcomes.record(state, "tclk", actions=len(ts["accepted"]))
         except Exception as e:
             tclk_status = "error"
             print(f"[tclk] bỏ qua ({str(e)[:100]})")
@@ -4042,6 +4093,10 @@ def main():
             )
             save_state({"tclk_secrets": state.get("tclk_secrets", {}),
                         "tclk_completed": state.get("tclk_completed", [])})
+            if OUTCOME_GUARD and not TCLK_COMPLETE_DRY_RUN:
+                import flop_outcomes
+                flop_outcomes.record(state, "tclk", wins=len(cs.get("revealed") or []))
+                _outcome_check(state, "tclk", now)
             mode = "dry" if TCLK_COMPLETE_DRY_RUN else "live"
             tclk_done_status = (f"{mode} {len(cs['revealed'])}rev/{cs['waiting']}wait/"
                                 f"{cs['expired']}exp/{cs.get('stale', 0)}stale")
@@ -4321,6 +4376,25 @@ def main():
     persist_ledger_to_kv(private_key, did)   # đẩy sổ cái token (metering) lên KV -> bền, đo được
     # Báo cáo chi tiêu định kỳ (GATED) — đặt SAU persist để số liệu đã chốt của run này.
     _mx = {"kibble": kibble_status, "faucet": faucet_status, "session": session_status}
+    # Dấu chân công khai (chỉ khi SẮP gửi báo cáo -> không tốn request mỗi run): tin/phòng hôm
+    # nay so với trần + thị phần của ta trong lô tin gần nhất mỗi phòng. Phòng `flop` từng là
+    # 7,4% (đứng đầu 15.136 DID) mà không ai thấy — dòng này để thấy ngay.
+    if DAILY_REPORT_ENABLED and _due(state, "last_daily_report", DAILY_REPORT_HOURS, now):
+        try:
+            import flop_governor
+            import flop_outcomes
+            _rooms = dict(((_post_gov_state.get(flop_governor.KEY) or {}).get("rooms")) or {})
+            _shares = {}
+            for _room in _rooms:
+                _d = fetch_messages(None, room=_room) or {}
+                _shares[_room] = flop_outcomes.room_share(_d.get("messages", []), did)
+            _line, _warn = flop_outcomes.footprint_line(_rooms, _post_caps(), _shares)
+            if _line:
+                _mx["dấu chân"] = _line
+            if _warn:
+                _mx["⚠️ spam"] = _warn
+        except Exception as e:
+            print(f"[footprint] bỏ qua ({str(e)[:80]})")
     try:
         import flop_miners as _fm
         _ms = _fm.summarize(_miner_stats)
