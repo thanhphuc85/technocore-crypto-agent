@@ -209,6 +209,7 @@ def credit(amount, token: str = None, memo: str = "faucet credit", path: str = N
         "mode": mode, "balance_after": new_bal,
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     })
+    _accrue_credit_hour(state, token, amt)
     _save_ledger(state, path)
     return {"ok": True, "token": token, "amount": _fmt(amt), "mode": mode,
             "balance_after": new_bal, "reason": "credited"}
@@ -317,6 +318,23 @@ def _accrue_cumulative(state: dict, token: str, amount: Decimal) -> None:
         tok[hour] = int(tok.get(hour, 0)) + 1
     except (TypeError, ValueError):
         tok[hour] = 1
+    for h in sorted(tok)[:-HOUR_KEEP]:
+        tok.pop(h, None)
+    by[token] = tok
+
+
+def _accrue_credit_hour(state: dict, token: str, amount: Decimal) -> None:
+    """Nạp theo GIỜ UTC: {token: {'YYYY-MM-DDTHH': [tổng, số lần]}} (giữ HOUR_KEEP giờ). Báo
+    cáo "nạp 24h" đếm từ entries thì hụt: bản KV chỉ giữ 20 entries, lần nạp vài giờ trước đã
+    bị đẩy ra (báo 0 dù vừa nạp)."""
+    by = state.setdefault("credit_by_hour", {})
+    tok = by.get(token) if isinstance(by.get(token), dict) else {}
+    hour = time.strftime("%Y-%m-%dT%H", time.gmtime(int(time.time())))
+    cur = tok.get(hour) if isinstance(tok.get(hour), list) and len(tok.get(hour)) == 2 else ["0", 0]
+    try:
+        tok[hour] = [_fmt((_parse_amount(cur[0]) or Decimal(0)) + amount), int(cur[1]) + 1]
+    except (TypeError, ValueError):
+        tok[hour] = [_fmt(amount), 1]
     for h in sorted(tok)[:-HOUR_KEEP]:
         tok.pop(h, None)
     by[token] = tok

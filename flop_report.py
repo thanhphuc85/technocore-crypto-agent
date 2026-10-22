@@ -121,6 +121,24 @@ def summarize(ledger, now: int, token: str = "FLOP", window_s: int = WINDOW_S,
         n = 0
     if n > 0:
         out["spend_count_total"] = n
+    # Nạp trong cửa sổ: tổng chạy theo GIỜ (bền qua cắt log) thắng entries khi có.
+    cbh = led.get("credit_by_hour")
+    cbh = cbh.get(token) if isinstance(cbh, dict) else None
+    if isinstance(cbh, dict):
+        start = cutoff - cutoff % 3600
+        amt, n = Decimal(0), 0
+        for h, v in cbh.items():
+            try:
+                if calendar.timegm(time.strptime(h, "%Y-%m-%dT%H")) >= start:
+                    amt += _dec(v[0])
+                    n += int(v[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+        if amt > out["credited"]:
+            out["credited"], out["credit_count"] = amt, max(n, out["credit_count"])
+    # Ghi sổ LLM = TỔNG chi trừ phần MUA COMPUTE (trước đây in tổng gộp dưới nhãn "KHÔNG tính").
+    out["meter_total"] = _fmt(max(Decimal(0), _dec(out["spent_total"]) - _dec(out["session_total"])))
+    out["meter_count"] = max(0, out["spend_count_total"] - out["session_count"])
     for k in ("spent", "credited", "spent_total"):
         out[k] = _fmt(out[k])
     return out
@@ -284,8 +302,8 @@ def format_report(s: dict, *, date_label: str = None, extras: dict = None,
         head,
         f"◆ MUA COMPUTE (được tính): {_grp(s.get('session_total', '0'))} {tok} "
         f"· {s.get('session_count', 0)} phiên · hôm nay +{_grp(s.get('session_today', '0'))}",
-        f"ghi sổ LLM (KHÔNG tính): {_grp(s.get('spent_total', '0'))} {tok} "
-        f"({s.get('spend_count_total', 0)} lần)",
+        f"ghi sổ LLM (KHÔNG tính): {_grp(s.get('meter_total', s.get('spent_total', '0')))} {tok} "
+        f"({s.get('meter_count', s.get('spend_count_total', 0))} lần)",
         f"nạp 24h: {s.get('credited', '0')} {tok} ({s.get('credit_count', 0)} lần) "
         f"· số dư {s.get('balance', '0')}",
     ]

@@ -634,3 +634,11 @@ def test_next_nonce_strictly_increases_within_one_millisecond(monkeypatch):
     monkeypatch.setattr(tm.time, "time", lambda: 1_800_000_000.0)
     seq = [int(tm.next_nonce()) for _ in range(5)]
     assert seq == sorted(seq) and len(set(seq)) == 5
+
+
+
+def test_credit_hour_buckets_are_recorded(ledger):
+    tm.credit("100", path=ledger)
+    tm.credit("5", path=ledger)
+    buckets = tm.load_ledger(ledger)["credit_by_hour"]["FLOP"]
+    assert len(buckets) == 1 and list(buckets.values())[0] == ["105", 2]

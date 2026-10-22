@@ -361,7 +361,7 @@ def test_report_leads_with_the_metric_that_counts():
                                         NOW, mode="testnet"))
     first = txt.split("\n")[1]
     assert "MUA COMPUTE (được tính)" in first and "287,000" in first
-    assert "KHÔNG tính" in txt and "320,000" in txt     # metering vẫn hiện, nhưng gán nhãn
+    assert "ghi sổ LLM (KHÔNG tính): 33,000" in txt     # metering = tổng 320k trừ 287k compute
 
 
 def test_projection_uses_session_spend_not_total():
@@ -394,3 +394,17 @@ def test_compact_kibble_shows_clean_score_when_present():
     full = _FULL + " clean=82%/n=40"
     assert "sạch 82% (n=40)" in fr.compact_kibble(full)
     assert "sạch" not in fr.compact_kibble(_FULL)          # chưa có bộ sạch -> không bịa
+
+
+
+def test_meter_line_excludes_compute_and_credits_survive_trim():
+    led = _led([], bal="66")
+    led.update({"spent_cumulative": {"FLOP": "225.5"}, "spend_count_cumulative": {"FLOP": 4704},
+                "session_cumulative": {"FLOP": "127.5"}, "session_count_cumulative": {"FLOP": 1985},
+                "credit_by_hour": {"FLOP": {time.strftime("%Y-%m-%dT%H", time.gmtime(NOW - 7 * 3600)): ["100", 1],
+                                             time.strftime("%Y-%m-%dT%H", time.gmtime(NOW - 30 * 3600)): ["5", 1]}}})
+    s = fr.summarize(led, NOW)
+    assert s["meter_total"] == "98" and s["meter_count"] == 2719
+    assert s["credited"] == "100" and s["credit_count"] == 1            # nạp 7h trước, entries đã bị cắt
+    txt = fr.format_report(s)
+    assert "ghi sổ LLM (KHÔNG tính): 98 FLOP (2719 lần)" in txt and "nạp 24h: 100 FLOP (1 lần)" in txt
