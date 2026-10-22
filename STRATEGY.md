@@ -104,11 +104,17 @@ Source: docs.flop.network FAQ "Testnet & Launch Timeline" (updated 2026-10-20).
   "Unavailable — no verified public value" until the network is ready.
 
 ### Day-one checklist (Variables only — no code change)
-1. `TESTNET_ENABLED=true`; `FLOP_TESTNET_START=2026-11-03` (or the confirmed date).
+1. `TESTNET_ENABLED=true` **first**; `FLOP_TESTNET_START=2026-11-03` (or the confirmed
+   date). The faucet refuses to claim while the ledger is in simulation mode
+   (`faucet=skipped_simulation`) so a real claim is never booked into the mock ledger.
 2. `FLOP_SESSION_MODEL_HASH` from the published model catalog; delete
    `FLOP_SESSION_SIM_MODEL_HASH`.
 3. `FLOP_MEMPOOL_URL`, `FLOP_RPC_URL`/`FLOP_SUBMIT_URL` (+ `FLOP_TX_MODE`).
-4. `FLOP_FAUCET_ENABLED=on`, `FLOP_FAUCET_URL`, faucet period/cap per item 2 above.
+4. `FLOP_FAUCET_ENABLED=on`, `FLOP_FAUCET_URL`. Already set and inert until then:
+   `FLOP_FAUCET_COOLDOWN_HOURS=auto` (probe hourly, then follow the faucet's
+   `Retry-After` / `next_claim_at`), `FLOP_FAUCET_MAX_PER_DAY=24`, `FLOP_FAUCET_JITTER_MIN=0`.
+   If FLOP publishes a fixed period/cap, set those numbers instead. Only use URLs FLOP
+   publishes - `*.invalid` hosts and `REPLACE_WITH_...` values in the docs are placeholders.
 5. `FLOP_SESSION_BUDGET=auto`, `FLOP_MAX_PER_RUN=2%`, `FLOP_SESSION_MAX_PER_RUN=3`,
    `FLOP_INFERENCE_COST` + `FLOP_SESSION_FLOPS` = observed market price.
 6. Watch the first runs: `session=N✓ settle/spent_onchain … due=…`. `pace-wait` all day
@@ -139,3 +145,13 @@ Source: docs.flop.network FAQ "Testnet & Launch Timeline" (updated 2026-10-20).
    The `[real-spend]` watchdog sends a Telegram alert after `FLOP_REAL_SPEND_ALERT_RUNS`
    (default 6 ≈ 30 min) runs without a `spent_onchain` session, with the stage it is stuck
    at and the real field names returned — that log is the fitting guide.
+9. **On-chain spend limit (account setting, before the first real session).** The chain
+   offers *"pre-set spend limits, delegation, and escrow"* on the account itself
+   (flop.finance/intro/agent). Set the agent account's daily limit to about one day of
+   faucet allowance. It is a second safety layer that does not depend on our code: even
+   if the pacer, the precheck or an adapter misbehaves, the chain refuses to spend more.
+   Done by the operator from the published tooling, never by the agent itself.
+10. **Never wire automatic on-chain challenges.** A discretionary challenge posts a
+    **100 FLOP bond**, forfeited if frivolous (protocol-parameters). `verify_poui` only
+    checks that the proof fields are present, so `dispute()` must stay a local ledger
+    note; challenge by hand, if ever, after reading the real proof format.
