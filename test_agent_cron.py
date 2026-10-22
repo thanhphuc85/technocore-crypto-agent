@@ -3256,3 +3256,12 @@ def test_forged_heartbeat_and_cursors_are_ignored(monkeypatch):
     assert ac.primary_alive(now + 60, 15, key) is True         # heartbeat tự ký -> nhận
     kv["cursors"] = ac._kv_seal(key, {"lobby": 123})
     assert ac._load_room_cursors({}, True, key) == {"lobby": 123}
+
+
+
+def test_guard_blocks_every_secret_format_the_agent_holds():
+    for secret in ("gsk_" + "A1b2C3d4" * 5, "8123456789:AAH" + "x" * 32, "ghp_" + "a" * 36,
+                   "github_pat_" + "A" * 22 + "_" + "b" * 59, "sk-or-v1-" + "ab12" * 10,
+                   "sk-" + "a1" * 16, "AIza" + "B" * 35, "ab" * 32):
+        assert ac.guard_output(f"here: {secret} ok") != f"here: {secret} ok", secret
+    assert ac.guard_output("BTC at 84,000 (+2.1%) since 12:30") == "BTC at 84,000 (+2.1%) since 12:30"

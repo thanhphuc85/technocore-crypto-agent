@@ -188,6 +188,13 @@ def gather(quiet=False) -> dict:
         _log("status: fallback (offline)", quiet)
 
     cursor = _kv("cursor")
+    if cursor and not cursor.isdigit():
+        # Từ #173 agent ghi cursor dạng niêm phong {"body": {"seq": N}, "sig", "did"}.
+        try:
+            seq = (json.loads(cursor).get("body") or {}).get("seq")
+            cursor = str(int(seq)) if seq is not None else None
+        except (ValueError, TypeError, AttributeError):
+            cursor = None
     if cursor and cursor.isdigit():
         d["cursor"] = cursor
         _log(f"cursor: live ({cursor})", quiet)

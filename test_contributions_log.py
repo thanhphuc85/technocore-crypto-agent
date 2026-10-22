@@ -125,3 +125,12 @@ def test_fork_never_inherits_owner_identity(monkeypatch):
     finally:
         monkeypatch.undo()
         importlib.reload(cl)                            # tra module ve mac dinh cho test khac
+
+
+def test_gather_reads_sealed_cursor(monkeypatch):
+    sealed = '{"body": {"seq": 408651}, "sig": "x", "did": "did:key:z"}'
+    monkeypatch.setattr(cl, "_kv", lambda key: sealed if key == "cursor" else None)
+    monkeypatch.setattr(cl, "_version", lambda: None)
+    monkeypatch.setattr(cl, "_tags", lambda: [])
+    monkeypatch.setattr(cl, "_merged_prs", lambda: None)
+    assert cl.gather(quiet=True)["cursor"] == "408651"

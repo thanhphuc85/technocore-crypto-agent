@@ -1859,6 +1859,11 @@ _SECRET_PATTERNS = [
     re.compile(r"sk-[A-Za-z0-9]{20,}"),             # OpenAI / DeepSeek key (sk-...)
     re.compile(r"\b[0-9a-fA-F]{64}\b"),             # seed/private key hex
     re.compile(r"-----BEGIN"),                       # PEM
+    re.compile(r"sk-or-[A-Za-z0-9\-]{20,}"),          # OpenRouter
+    re.compile(r"gsk_[A-Za-z0-9]{20,}"),             # Groq
+    re.compile(r"\b\d{8,10}:[A-Za-z0-9_\-]{30,}"),     # Telegram bot token
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}"),      # GitHub token cổ điển
+    re.compile(r"github_pat_[A-Za-z0-9_]{40,}"),     # GitHub fine-grained token
 ]
 
 
