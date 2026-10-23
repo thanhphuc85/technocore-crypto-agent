@@ -3355,3 +3355,9 @@ def test_gemini_key_goes_in_header_never_in_url(monkeypatch):
     for url, params, headers in seen:
         assert secret not in url and secret not in repr(params)
         assert headers.get("x-goog-api-key") == secret
+
+
+def test_tests_cannot_write_the_real_kv():
+    # conftest chặn mạng thật: trước đây main() trong test ghi sổ rỗng (khoá test) lên KV thật.
+    assert ac.kv_set(_real_key(), "did:key:test", "token_ledger", "{}") is False
+    assert ac.kv_get("token_ledger") is None
