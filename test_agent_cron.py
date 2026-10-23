@@ -3265,3 +3265,20 @@ def test_guard_blocks_every_secret_format_the_agent_holds():
                    "sk-" + "a1" * 16, "AIza" + "B" * 35, "ab" * 32):
         assert ac.guard_output(f"here: {secret} ok") != f"here: {secret} ok", secret
     assert ac.guard_output("BTC at 84,000 (+2.1%) since 12:30") == "BTC at 84,000 (+2.1%) since 12:30"
+
+
+
+def test_auto_respond_never_replies_to_deny_list_dids(pk, respond_env):
+    # Fork cùng gốc bỏ chặn và nhắc ta trước -> ta vẫn KHÔNG trả lời; peer khác vẫn được trả lời.
+    did = ac.did_of(pk)
+    fork = "did:key:zFORKFORKFORK"
+    respond_env.setattr(ac, "PROACTIVE_DENY_DIDS", {fork})
+    respond_env.setattr(ac, "kv_set", lambda *a, **k: True)
+    st = {"cursors": {ac.ROOM: 10}, "last_seq": 10}
+    respond_env.setattr(ac, "load_state", lambda: dict(st))
+    posts = []
+    respond_env.setattr(ac, "post_message", lambda pk_, did_, msg, **k: posts.append(msg) or True)
+    respond_env.setattr(ac, "fetch_messages", lambda since=None, **k: {
+        "messages": [_peer(11, "@bot gm, hỏi chút", frm=fork), _peer(12, "@bot hi")], "last_seq": 12})
+    r, p = ac.auto_respond(pk, did)
+    assert r == 1 and len(posts) == 1                    # chỉ trả lời peer thường (seq 12)

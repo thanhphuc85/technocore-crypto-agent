@@ -3665,6 +3665,12 @@ def _respond_room(private_key, did, room, messages, last_seq, state, now, my_nic
         if frm == did:
             cursor = seq                  # tin của chính mình (telemetry): coi như đã xét
             continue
+        if frm in PROACTIVE_DENY_DIDS:
+            # Agent cùng gốc fork: KHÔNG trả lời cả khi họ nhắc ta trước. Trước đây danh sách
+            # chỉ chặn việc CHỦ ĐỘNG nhắn; nếu bên kia bỏ chặn và chào ta, hai agent cùng gốc
+            # sẽ nhắc qua lại — đúng dấu hiệu "cụm tự nói chuyện với nhau".
+            cursor = seq
+            continue
         text = sanitize_input(m.get("text", ""))   # cô lập input tại ranh giới ingestion
         is_peer = frm.startswith("did:key:")
         try:
