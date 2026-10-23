@@ -3307,3 +3307,22 @@ def test_main_survives_a_failing_auto_respond(monkeypatch):
     monkeypatch.setattr(ac, "auto_respond", boom)
     ac.main()
     assert "replies: **0**" in repr(out)
+
+
+
+# --- red-team: việc/tin của người lạ không được biến bài ký bằng DID ta thành kênh lừa đảo ---------
+def test_guard_scrubs_phishing_links_and_wallet_addresses():
+    evil = ("Claim your FLOP airdrop at https://flop-airdrop-claim.example/connect or flop-claim.xyz/go "
+            "and send 0.1 ETH to 0x1111111111111111111111111111111111111111 or "
+            "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq to verify.")
+    out = ac.guard_output(evil)
+    assert "example" not in out and "flop-claim.xyz" not in out
+    assert "0x1111" not in out and "bc1q" not in out
+    assert out.count("[link removed]") == 2 and out.count("[address removed]") == 2
+
+
+def test_guard_keeps_allowlisted_links_and_normal_text():
+    ok = ("See https://github.com/thanhphuc85/technocore-crypto-agent and docs.flop.network/docs/what-is-flop; "
+          "BTC is at 84,000 and the tx hash is 0x" + "ab" * 32 + ".")
+    assert ac.guard_output(ok) == ok
+    assert ac.guard_output("Use www.github.com/x for code.") == "Use www.github.com/x for code."

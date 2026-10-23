@@ -1892,8 +1892,37 @@ def isolate_for_llm(user_text: str) -> str:
     )
 
 
+# Link/địa chỉ ví trong output LLM: việc kibble và tin chat do người lạ viết có thể bảo model
+# "nhớ kèm link này / địa chỉ ví này" -> bài ký bằng DID của agent thành kênh phát tán lừa đảo.
+# Chỉ giữ link tới các domain dưới đây (tài liệu/nguồn dữ liệu agent vốn dùng); còn lại thay bằng
+# nhãn. Địa chỉ ví (EVM 0x…40 hex, BTC bech32) luôn bị thay — agent không có lý do đăng chúng.
+_LINK_ALLOW = ("github.com", "docs.flop.network", "flop.finance", "technocore.chat",
+               "coingecko.com", "defillama.com", "wikipedia.org", "python.org", "mozilla.org",
+               "ethereum.org", "bitcoin.org")
+_URL_RE = re.compile(r"(?i)\b(?:https?://|www\.)[^\s<>()\[\]{}\"']+")
+# Lượng từ CÓ CHẶN ({1,63}, {1,6}, {0,200}): bản không chặn quay lui theo cấp số mũ với
+# "a.a.a.a…" (ReDoS) — test với chuỗi 600k ký tự từng treo quá 5 phút.
+_BARE_DOMAIN_RE = re.compile(r"(?i)\b(?:[a-z0-9-]{1,63}\.){1,6}(?:com|net|org|io|xyz|app|finance|top|"
+                             r"site|online|link|click|claims?|airdrop|live|pro|info|co|me|cc|ly)"
+                             r"(?:/[^\s]{0,200})?\b")
+_EVM_ADDR_RE = re.compile(r"\b0x[0-9a-fA-F]{40}\b")
+_BTC_ADDR_RE = re.compile(r"\bbc1[02-9ac-hj-np-z]{25,87}\b")
+
+
+def _link_allowed(url: str) -> bool:
+    host = re.sub(r"(?i)^(?:https?://)?(?:www\.)?", "", url).split("/")[0].split(":")[0].lower()
+    return any(host == d or host.endswith("." + d) for d in _LINK_ALLOW)
+
+
+def scrub_links_and_addresses(text: str) -> str:
+    text = _URL_RE.sub(lambda m: m.group(0) if _link_allowed(m.group(0)) else "[link removed]", text)
+    text = _BARE_DOMAIN_RE.sub(lambda m: m.group(0) if _link_allowed(m.group(0)) else "[link removed]", text)
+    text = _EVM_ADDR_RE.sub("[address removed]", text)
+    return _BTC_ADDR_RE.sub("[address removed]", text)
+
+
 def guard_output(text: str):
-    """Lọc output LLM: chặn rò rỉ secret hoặc lộ system prompt/delimiter."""
+    """Lọc output LLM: chặn rò rỉ secret hoặc lộ system prompt/delimiter; gỡ link lạ và địa chỉ ví."""
     if not text:
         return None
     for pat in _SECRET_PATTERNS:
@@ -1904,7 +1933,10 @@ def guard_output(text: str):
     if "system prompt" in low or "untrusted_input" in low:
         print("[guard] output blocked: prompt/delimiter leak")
         return None
-    return text
+    cleaned = scrub_links_and_addresses(text)
+    if cleaned != text:
+        print("[guard] gỡ link lạ / địa chỉ ví khỏi output")
+    return cleaned
 
 
 # Mẫu mở đầu câu TỪ CHỐI của model — không phải deliverable thật. Chỉ khớp ở ĐẦU câu (sau khi bỏ
