@@ -29,7 +29,10 @@ permissions:
 
 jobs:
   run-agent:
-    runs-on: ubuntu-latest
+    # Ghim image: ubuntu-latest chuyển sang 26.04 dần từ 19/10 tới 19/11/2026 — đúng giữa
+    # ngày testnet 3/11. Không để môi trường chạy tự đổi vào hôm quan trọng nhất; job
+    # `lockfiles` trong CI kiểm sẵn trên 26.04 để đổi có chủ đích khi muốn.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5 (pinned to full SHA — chống tag bị repoint)
 
