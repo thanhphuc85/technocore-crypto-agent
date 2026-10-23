@@ -667,29 +667,29 @@ _GOAL_VARIANTS = (
     "relay signed, current market facts and help other agents get going on Technocore",
 )
 _DESC_VARIANTS = (
-    "Open-source Ed25519 crypto agent SDK: signed oracle telemetry, context-aware Gemini AI "
+    "Open-source Ed25519 crypto agent SDK: signed oracle telemetry, context-aware LLM "
     "replies, injection-guarded, KV store. Runnable & importable by anyone.",
     "Open-source Ed25519 agent toolkit: signed market telemetry, context-aware AI replies, "
     "prompt-injection guards, KV notes. Anyone can run or import it.",
-    "An open Ed25519 crypto-agent SDK with signed telemetry, Gemini-backed contextual replies, "
+    "An open Ed25519 crypto-agent SDK with signed telemetry, multi-provider LLM contextual replies, "
     "injection defenses, and a KV store — free to run or import.",
     "Open-source Ed25519 agent framework: signed oracle feeds, context-aware LLM replies, "
     "injection-guarded input, KV persistence. Fork-friendly and importable.",
-    "A reusable Ed25519 crypto agent: signed telemetry, contextual Gemini replies, hardened "
+    "A reusable Ed25519 crypto agent: signed telemetry, contextual LLM replies, hardened "
     "against prompt injection, KV-backed. Open source, run it yourself.",
     "Open Ed25519 agent SDK for crypto: signed market oracle, context-aware AI answers, "
     "injection guards, KV store — runnable and importable by anyone.",
-    "Signed-telemetry Ed25519 crypto agent, open source: Gemini contextual replies, "
+    "Signed-telemetry Ed25519 crypto agent, open source: contextual LLM replies, "
     "injection-guarded ingestion, KV notes; easy to fork, run, or import.",
     "Open-source crypto agent on Ed25519: verifiable signed telemetry, context-aware AI "
     "replies, injection protection, KV store — importable and self-hostable.",
-    "Ed25519-signed crypto agent, open source: oracle telemetry, context-aware Gemini "
+    "Ed25519-signed crypto agent, open source: oracle telemetry, context-aware LLM "
     "replies, prompt-injection guards, KV store. Run it, fork it, or import it.",
     "Open, importable Ed25519 crypto agent: signed market telemetry, contextual AI replies, "
     "injection-hardened input, KV-backed notes. Self-host or embed as an SDK.",
     "A self-hostable Ed25519 crypto agent SDK: signed oracle feeds, context-aware replies, "
     "injection guards, and KV storage — open source and importable.",
-    "Open-source Ed25519 market agent: signed telemetry oracle, Gemini context replies, "
+    "Open-source Ed25519 market agent: signed telemetry oracle, LLM context replies, "
     "input injection defenses, KV persistence. Anyone can run or import it.",
 )
 
@@ -3394,7 +3394,7 @@ def build_reply(sender_nick: str, text: str, state=None, sender_id=None) -> str:
                    f"Agents: '{HANDLE} price eth' returns a machine-readable line (verbs: {_A2A_VERB_LIST}).")
     if has("!about"):
         return tag(f"I'm {AGENT_NAME}, an autonomous Ed25519 agent: signed oracle telemetry, "
-                   "Gemini AI replies, KV store, injection-guarded. Open-source SDK on GitHub.")
+                   "LLM replies (DeepSeek/Gemini/OpenRouter/Groq), KV store, injection-guarded. Open-source SDK on GitHub.")
     if has("!fear"):
         val, cls = get_fear_greed()
         if val is None:

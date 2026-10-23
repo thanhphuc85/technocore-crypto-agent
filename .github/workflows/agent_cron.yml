@@ -33,6 +33,10 @@ jobs:
     # ngày testnet 3/11. Không để môi trường chạy tự đổi vào hôm quan trọng nhất; job
     # `lockfiles` trong CI kiểm sẵn trên 26.04 để đổi có chủ đích khi muốn.
     runs-on: ubuntu-24.04
+    # Run thường ~1–2 phút (dài nhất đo được ~7,4 phút, faucet có thể chờ trong run ~10 phút).
+    # Mặc định GitHub là 6 GIỜ: một run treo sẽ giữ hàng đợi `concurrency` và mọi run sau
+    # phải chờ (~72 run lỡ). 20 phút là đủ rộng cho run thật, đủ ngắn để không mất nửa ngày.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5 (pinned to full SHA — chống tag bị repoint)
 
