@@ -10,12 +10,16 @@ có cái MỚI thì báo Telegram.
                                          mới phải xuất hiện trong spec trước.
   · docs.flop.network/llms.txt        — trang tài liệu mới (faucet/API/SDK/onboarding).
   · docs.flop.network/docs/network-testnet — trạng thái mạng ("planned" -> khác).
+  · api.flop.network/health           — gateway CHÍNH THỨC báo network ("devnet" -> khác).
+  · flop.finance/official/            — mục "Current testnet and airdrop status" (FLOP Labs
+                                         sửa trang này mỗi lần công bố về testnet/airdrop).
 
 CHỈ ĐỌC: không đăng tin, không chi, không ghi KV ngoài state của chính agent.
 Thuần & test được: caller tiêm fetch_fn(url) -> str|None.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 
@@ -23,6 +27,8 @@ KEY = "testnet_radar"
 OPENAPI_URL = "https://technocore.chat/openapi.json"
 LLMS_URL = "https://docs.flop.network/llms.txt"
 STATUS_URL = "https://docs.flop.network/docs/network-testnet"
+GATEWAY_HEALTH_URL = "https://api.flop.network/health"
+OFFICIAL_URL = "https://flop.finance/official/"
 
 # Mốc đã biết (2026-10-22). Cái gì NGOÀI mốc này + ngoài những gì radar đã báo = mới.
 BASE_PATHS = frozenset((
@@ -45,6 +51,7 @@ BASE_DOCS = frozenset((
     "testnet-and-timeline", "tokenomics-and-supply", "tokenomics-basics", "validator-faq",
     "verification-and-security", "verification-stack", "what-is-flop"))
 BASE_STATUS = "planned"
+BASE_NETWORK = "devnet"
 HOT = re.compile(r"faucet|session|infer|mempool|wallet|claim|testnet|model|settle|escrow|agent", re.I)
 
 
@@ -75,6 +82,32 @@ def parse_status(text):
     return m.group(1).strip().lower() if m else None
 
 
+def parse_network(text):
+    """network.network từ /health của gateway ("devnet"/"testnet"/...); None nếu hỏng."""
+    try:
+        d = json.loads(text) if text else None
+    except ValueError:
+        return None
+    net = d.get("network") if isinstance(d, dict) else None
+    if isinstance(net, dict):
+        net = net.get("network")
+    return net.strip().lower()[:40] if isinstance(net, str) and net.strip() else None
+
+
+def parse_official(text):
+    """Dấu vân tay (sha256 12 ký tự) của mục trạng thái testnet/airdrop trên trang chính thức.
+    Bỏ thẻ HTML và ngày "updated" để chỉ đổi khi NỘI DUNG đổi. None nếu không thấy mục."""
+    if not text:
+        return None
+    t = re.sub(r"<[^>]+>", " ", text)
+    m = re.search(r"(?is)Current testnet and airdrop status(.{0,4000}?)(?:Owner:|$)", t)
+    if not m:
+        return None
+    body = re.sub(r"(?i)updated\s+\d{4}-\d{2}-\d{2}", "", m.group(1))
+    body = re.sub(r"\s+", " ", body).strip().lower()
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()[:12] if body else None
+
+
 def check(state: dict, fetch_fn) -> str:
     """Đọc 3 nguồn, so với mốc + những gì đã báo. Trả chuỗi báo động (đã ghi nhận vào state
     để không báo lại) hoặc None. Nguồn nào lỗi thì bỏ qua nguồn đó, không báo động giả."""
@@ -83,6 +116,8 @@ def check(state: dict, fetch_fn) -> str:
     seen_paths = set(r.get("paths") or [])
     seen_docs = set(r.get("docs") or [])
     status_known = r.get("status") or BASE_STATUS
+    network_known = r.get("network") or BASE_NETWORK
+    official_known = r.get("official")
     lines = []
 
     paths = parse_paths(fetch_fn(OPENAPI_URL))
@@ -107,8 +142,19 @@ def check(state: dict, fetch_fn) -> str:
         lines.append(f"• Trạng thái testnet đổi: '{status_known}' → '{status}'")
         status_known = status
 
+    network = parse_network(fetch_fn(GATEWAY_HEALTH_URL))
+    if network and network != network_known:
+        lines.append(f"• api.flop.network báo mạng đổi: '{network_known}' → '{network}'")
+        network_known = network
+
+    official = parse_official(fetch_fn(OFFICIAL_URL))
+    if official and official_known and official != official_known:
+        lines.append("• flop.finance/official/ SỬA mục trạng thái testnet/airdrop — đọc ngay")
+    if official:
+        official_known = official          # lần đầu chỉ ghi mốc, không báo
+
     state[KEY] = {"paths": sorted(seen_paths)[:60], "docs": sorted(seen_docs)[:60],
-                  "status": status_known}
+                  "status": status_known, "network": network_known, "official": official_known}
     if not lines:
         return None
     return ("🚨 FLOP TESTNET RADAR — có thay đổi:\n" + "\n".join(lines)

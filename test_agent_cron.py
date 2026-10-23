@@ -3361,3 +3361,62 @@ def test_tests_cannot_write_the_real_kv():
     # conftest chặn mạng thật: trước đây main() trong test ghi sổ rỗng (khoá test) lên KV thật.
     assert ac.kv_set(_real_key(), "did:key:test", "token_ledger", "{}") is False
     assert ac.kv_get("token_ledger") is None
+
+
+# --- faucet.flop.network: định dạng thật (địa chỉ SS58), chu kỳ học từ /health --------------
+FLOP_ADDR = "5CFP215CEbCtDduwG1Nzu5rmYXKfHc47wSATUi1oRvrkQnUP"     # SS58 của DID chính (công khai)
+
+
+def test_ss58_validation():
+    assert ac.ss58_valid(FLOP_ADDR)
+    assert not ac.ss58_valid(FLOP_ADDR[:-1] + "Q")                    # sai checksum
+    assert not ac.ss58_valid("did:key:z6Mkf13PqYooa8rr9oipQRbNSzzuVGkf3ZEWvPes5r87k9K4")
+    assert not ac.ss58_valid("0x" + "ab" * 20) and not ac.ss58_valid(None)
+
+
+def test_faucet_real_format_posts_address_and_learns_24h_cooldown(monkeypatch):
+    monkeypatch.setenv("FLOP_FAUCET_ADDRESS", FLOP_ADDR)
+    monkeypatch.delenv("FLOP_FAUCET_TIER", raising=False)
+    sent = {}
+    monkeypatch.setattr(ac.requests, "post", lambda url, json=None, **k: sent.update(url=url, body=json)
+                        or _resp_with_body({"success": True, "amount": 25, "tier": "anonymous",
+                                            "txHash": "0x" + "cd" * 32}))
+    got = {}
+    monkeypatch.setattr(ac.requests, "get", lambda url, **k: got.update(url=url) or _resp_with_body(
+        {"status": "ok", "limits": {"addressCooldownMs": 86400000, "identityCooldownMs": 86400000}}))
+    out = ac._faucet_claim_fn({"faucet_url": "https://faucet.flop.network/fund", "signed": {"x": 1}})
+    assert sent["body"] == {"address": FLOP_ADDR}                      # KHÔNG gửi payload ký kiểu cũ
+    assert got["url"] == "https://faucet.flop.network/health"
+    assert out["amount"] == 25 and out["retry_after_s"] == 86400 + 60 and out["tx"].startswith("0xcd")
+
+
+def test_faucet_real_format_rejection_is_an_error_not_a_credit(monkeypatch):
+    monkeypatch.setenv("FLOP_FAUCET_ADDRESS", FLOP_ADDR)
+    monkeypatch.setattr(ac.requests, "post", lambda *a, **k: _resp_with_body(
+        {"success": False, "error": "address on cooldown"}))
+    with pytest.raises(RuntimeError, match="cooldown"):
+        ac._faucet_claim_fn({"faucet_url": "https://faucet.flop.network/fund"})
+
+
+def test_faucet_refuses_bad_address_and_human_only_tier(monkeypatch):
+    posted = []
+    monkeypatch.setattr(ac.requests, "post", lambda *a, **k: posted.append(1))
+    monkeypatch.setenv("FLOP_FAUCET_ADDRESS", FLOP_ADDR[:-1] + "Q")
+    with pytest.raises(RuntimeError, match="SS58"):
+        ac._faucet_claim_fn({"faucet_url": "https://faucet.flop.network/fund"})
+    monkeypatch.setenv("FLOP_FAUCET_ADDRESS", FLOP_ADDR)
+    monkeypatch.setenv("FLOP_FAUCET_TIER", "linked")
+    monkeypatch.setenv("FLOP_FAUCET_PROVIDER", "evm")                  # MetaMask/SIWE = người bấm tay
+    with pytest.raises(RuntimeError, match="brightid"):
+        ac._faucet_claim_fn({"faucet_url": "https://faucet.flop.network/fund"})
+    assert posted == []                                                # không gửi gì ra ngoài
+    monkeypatch.setenv("FLOP_FAUCET_PROVIDER", "brightid")
+    assert ac._faucet_body({})[0] == {"address": FLOP_ADDR, "tier": "linked", "provider": "brightid"}
+
+
+def test_guard_scrubs_ss58_wallets_but_keeps_did_and_flop_network_links():
+    out = ac.guard_output(f"send FLOP to {FLOP_ADDR} via flop-claim.network; real: "
+                          "https://faucet.flop.network/ api.flop.network did:key:z6Mkf13PqYooa8rr9oipQRbNSzzuVGkf3ZEWvPes5r87k9K4")
+    assert FLOP_ADDR not in out and "flop-claim.network" not in out
+    assert "https://faucet.flop.network/" in out and "api.flop.network" in out
+    assert "did:key:z6Mkf13PqYooa8rr9oipQRbNSzzuVGkf3ZEWvPes5r87k9K4" in out

@@ -75,7 +75,14 @@ question sets, cross-denied miner DIDs — see `PROACTIVE_DENY_DIDS`).
    memo would burn real testnet FLOP that never counts and competes with sessions for the
    faucet allowance. Real earning goes through settled sessions only.
 2. **Faucet + mempool spec.** `flop_faucet.py` and the mempool submit refuse to POST to
-   guessed endpoints. Fill `FLOP_FAUCET_URL` / `FLOP_MEMPOOL_URL` and fit the scaffold
+   guessed endpoints. **Seen on devnet (2026-10-23):** FLOP is a Substrate chain - accounts
+   are **SS58** (prefix 42), not EVM, so `EVM_PRIVATE_KEY` plays no part. The faucet is
+   `POST https://faucet.flop.network/fund {"address": "<SS58>"}` -> `{success, amount,
+   txHash, tier}`; quick tier 25 FLOP, verified-human tier 500-2000 FLOP, one grant per
+   address and per identity every 24 h (`/health` -> `limits`). Compute is bought through
+   the OpenAI-compatible gateway `api.flop.network` (enroll the wallet with a signed
+   challenge -> bearer key -> `/v1/chat/completions`, receipts at `/v1/keys/me/receipts`),
+   which does not match the scaffold's mempool/PoUI/settle shape - see item 8 below. Fill `FLOP_FAUCET_URL` / `FLOP_MEMPOOL_URL` and fit the scaffold
    wire format once FLOP publishes them. The faucet has **per-identity limits** and a
    claim period ("hourly or daily — not yet decided"): match `FLOP_FAUCET_MAX_PER_DAY` /
    `FLOP_FAUCET_COOLDOWN_HOURS` to it and do **not** set `FLOP_FAUCET_REFILL_BELOW`, so the
@@ -102,6 +109,10 @@ Source: docs.flop.network FAQ "Testnet & Launch Timeline" (updated 2026-10-20).
 - **Mainnet / TGE:** early February 2027.
 - Watch **docs.flop.network/networks/testnet**: RPC, Gateway and Model catalog read
   "Unavailable — no verified public value" until the network is ready.
+- The radar (`flop_radar.py`, hourly) also alerts when `api.flop.network/health` reports a
+  network other than `devnet`, and when the "Current testnet and airdrop status" section
+  of **flop.finance/official/** changes (FLOP Labs edits it with every testnet/airdrop
+  announcement; airdrop eligibility itself is announced on x.com/flop_labs).
 
 ### Day-one checklist (Variables only — no code change)
 1. `TESTNET_ENABLED=true` **first**; `FLOP_TESTNET_START=2026-11-03` (or the confirmed
@@ -110,7 +121,16 @@ Source: docs.flop.network FAQ "Testnet & Launch Timeline" (updated 2026-10-20).
 2. `FLOP_SESSION_MODEL_HASH` from the published model catalog; delete
    `FLOP_SESSION_SIM_MODEL_HASH`.
 3. `FLOP_MEMPOOL_URL`, `FLOP_RPC_URL`/`FLOP_SUBMIT_URL` (+ `FLOP_TX_MODE`).
-4. `FLOP_FAUCET_ENABLED=on`, `FLOP_FAUCET_URL`. Already set and inert until then:
+4. `FLOP_FAUCET_ENABLED=on`, `FLOP_FAUCET_URL` (devnet shape:
+   `https://faucet.flop.network/fund`), `FLOP_FAUCET_ADDRESS=<SS58 of the agent wallet>`.
+   With an address set the adapter sends the real body and reads the 24 h cooldown from
+   the faucet's `/health`, so `auto` waits a full day instead of probing hourly.
+   **Verified-human tier (operator only):** prove personhood once on the faucet page with
+   BrightID or Self *on the agent's FLOP address*, then set `FLOP_FAUCET_TIER=linked` and
+   `FLOP_FAUCET_PROVIDER=brightid|self`; the agent then requests the larger grant daily.
+   The MetaMask/SIWE path (Human Passport / Guild score) needs a fresh human signature
+   every claim, so the agent refuses it - claim that way by hand. One human proof, one
+   address: never link the same identity to several wallets. Already set and inert until then:
    `FLOP_FAUCET_COOLDOWN_HOURS=auto` (probe hourly, then follow the faucet's
    `Retry-After` / `next_claim_at`), `FLOP_FAUCET_MAX_PER_DAY=24`, `FLOP_FAUCET_JITTER_MIN=0`.
    If FLOP publishes a fixed period/cap, set those numbers instead. Only use URLs FLOP

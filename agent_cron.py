@@ -16,6 +16,33 @@ MULTICODEC_ED25519 = b"\xed\x01"
 B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
 
+def b58decode(s: str):
+    """Base58 (bảng chữ Bitcoin) -> bytes; ký tự lạ -> None."""
+    n = 0
+    for c in s:
+        i = B58.find(c)
+        if i < 0:
+            return None
+        n = n * 58 + i
+    raw = n.to_bytes((n.bit_length() + 7) // 8, "big") if n else b""
+    return b"\0" * (len(s) - len(s.lstrip("1"))) + raw
+
+
+def ss58_valid(addr: str) -> bool:
+    """Địa chỉ SS58 (Substrate — tài khoản FLOP) của 1 tài khoản 32 byte, checksum đúng.
+    Prefix 1 byte (0..63) hoặc 2 byte; checksum = blake2b-512("SS58PRE"+payload)[:2]."""
+    if not isinstance(addr, str) or not 40 <= len(addr) <= 50:
+        return False
+    raw = b58decode(addr)
+    if raw is None or len(raw) not in (35, 36):
+        return False
+    plen = 1 if raw[0] < 64 else 2
+    if len(raw) != plen + 32 + 2:
+        return False
+    body = raw[:-2]
+    return hashlib.blake2b(b"SS58PRE" + body, digest_size=64).digest()[:2] == raw[-2:]
+
+
 def multibase_b58(raw: bytes) -> str:
     n = int.from_bytes(raw, "big")
     out = ""
@@ -1896,17 +1923,20 @@ def isolate_for_llm(user_text: str) -> str:
 # "nhớ kèm link này / địa chỉ ví này" -> bài ký bằng DID của agent thành kênh phát tán lừa đảo.
 # Chỉ giữ link tới các domain dưới đây (tài liệu/nguồn dữ liệu agent vốn dùng); còn lại thay bằng
 # nhãn. Địa chỉ ví (EVM 0x…40 hex, BTC bech32) luôn bị thay — agent không có lý do đăng chúng.
-_LINK_ALLOW = ("github.com", "docs.flop.network", "flop.finance", "technocore.chat",
+_LINK_ALLOW = ("github.com", "flop.network", "flop.finance", "technocore.chat",
                "coingecko.com", "defillama.com", "wikipedia.org", "python.org", "mozilla.org",
                "ethereum.org", "bitcoin.org")
 _URL_RE = re.compile(r"(?i)\b(?:https?://|www\.)[^\s<>()\[\]{}\"']+")
 # Lượng từ CÓ CHẶN ({1,63}, {1,6}, {0,200}): bản không chặn quay lui theo cấp số mũ với
 # "a.a.a.a…" (ReDoS) — test với chuỗi 600k ký tự từng treo quá 5 phút.
 _BARE_DOMAIN_RE = re.compile(r"(?i)\b(?:[a-z0-9-]{1,63}\.){1,6}(?:com|net|org|io|xyz|app|finance|top|"
-                             r"site|online|link|click|claims?|airdrop|live|pro|info|co|me|cc|ly)"
+                             r"site|online|link|click|claims?|airdrop|live|pro|info|co|me|cc|ly|"
+                             r"network|chat|ai|dev)"
                              r"(?:/[^\s]{0,200})?\b")
 _EVM_ADDR_RE = re.compile(r"\b0x[0-9a-fA-F]{40}\b")
 _BTC_ADDR_RE = re.compile(r"\bbc1[02-9ac-hj-np-z]{25,87}\b")
+# Địa chỉ SS58 (ví FLOP/Substrate, "5…"): chỉ thay chuỗi CÓ checksum hợp lệ -> không ăn nhầm chữ.
+_SS58_CAND_RE = re.compile(r"\b[1-9A-HJ-NP-Za-km-z]{46,48}\b")
 
 
 def _link_allowed(url: str) -> bool:
@@ -1918,6 +1948,7 @@ def scrub_links_and_addresses(text: str) -> str:
     text = _URL_RE.sub(lambda m: m.group(0) if _link_allowed(m.group(0)) else "[link removed]", text)
     text = _BARE_DOMAIN_RE.sub(lambda m: m.group(0) if _link_allowed(m.group(0)) else "[link removed]", text)
     text = _EVM_ADDR_RE.sub("[address removed]", text)
+    text = _SS58_CAND_RE.sub(lambda m: "[address removed]" if ss58_valid(m.group(0)) else m.group(0), text)
     return _BTC_ADDR_RE.sub("[address removed]", text)
 
 
@@ -3123,11 +3154,56 @@ def _mempool_submit_fn(req: dict) -> dict:
     }
 
 
+def _faucet_body(req: dict):
+    """Thân yêu cầu faucet. Có FLOP_FAUCET_ADDRESS -> định dạng THẬT của faucet.flop.network
+    (`POST /fund {"address": <SS58>}`; mức verified: + tier=linked, provider=brightid|self).
+    Không có -> payload ký kiểu cũ của scaffold. Trả (body, flop_format)."""
+    addr = os.environ.get("FLOP_FAUCET_ADDRESS", "").strip()
+    if not addr:
+        return (req.get("signed") or {}), False
+    if not ss58_valid(addr):
+        # Sai 1 ký tự = FLOP rơi vào ví không ai giữ khoá. Từ chối thay vì gửi.
+        raise RuntimeError("FLOP_FAUCET_ADDRESS không phải địa chỉ SS58 hợp lệ — kiểm tra lại")
+    body = {"address": addr}
+    tier = os.environ.get("FLOP_FAUCET_TIER", "quick").strip().lower()
+    if tier == "linked":
+        provider = os.environ.get("FLOP_FAUCET_PROVIDER", "").strip().lower()
+        if provider not in ("brightid", "self"):
+            # Đường EVM/SIWE cần NGƯỜI ký lại mỗi lần (chữ ký hết hạn sau 10 phút) — agent
+            # không giữ ví người và không tự làm chứng minh người thật.
+            raise RuntimeError("FLOP_FAUCET_TIER=linked cần FLOP_FAUCET_PROVIDER=brightid|self "
+                               "(đã gắn chứng minh vào địa chỉ này); đường MetaMask/SIWE phải bấm tay")
+        body.update({"tier": "linked", "provider": provider})
+    elif tier not in ("quick", ""):
+        raise RuntimeError(f"FLOP_FAUCET_TIER={tier!r} không hỗ trợ (quick|linked)")
+    return body, True
+
+
+def _faucet_cooldown_s(faucet_url: str, linked: bool):
+    """Chu kỳ claim faucet CÔNG BỐ ở <origin>/health (limits.addressCooldownMs, mức verified
+    lấy max với identityCooldownMs) -> giây, hoặc None. Để 'auto' hẹn đúng 24h thay vì thăm dò
+    mỗi giờ và bị từ chối ~23 lần/ngày."""
+    m = re.match(r"(?i)^(https?://[^/]+)", faucet_url or "")
+    if not m:
+        return None
+    try:
+        r = requests.get(m.group(1) + "/health", headers={"User-Agent": UA}, timeout=10)
+        lim = (r.json() or {}).get("limits") if r.status_code == 200 else None
+        if not isinstance(lim, dict):
+            return None
+        ms = [lim.get("addressCooldownMs")] + ([lim.get("identityCooldownMs")] if linked else [])
+        ms = [int(float(v)) for v in ms if v is not None]
+        return (max(ms) // 1000 + 60) if ms and max(ms) > 0 else None     # +60s biên an toàn
+    except (requests.RequestException, ValueError, TypeError, AttributeError):
+        return None
+
+
 def _faucet_claim_fn(req: dict) -> dict:
-    """Claim token testnet: POST payload đã ký tới faucet_url, đọc {amount}. Ném lỗi nếu
-    HTTP fail (flop_faucet.run_faucet_cycle bắt -> error_claim)."""
+    """Claim token testnet: POST tới faucet_url, đọc {amount}. Ném lỗi nếu HTTP fail
+    (flop_faucet.run_faucet_cycle bắt -> error_claim)."""
     url = req.get("faucet_url")
-    r = requests.post(url, json=req.get("signed") or {},
+    body, flop_format = _faucet_body(req)
+    r = requests.post(url, json=body,
                       headers={"User-Agent": UA, "Content-Type": "application/json"}, timeout=20)
     if r.status_code == 429:
         # Chưa tới lượt: faucet nói chờ bao lâu -> flop_faucet hẹn đúng giờ, không gõ lại dồn dập.
@@ -3156,6 +3232,11 @@ def _faucet_claim_fn(req: dict) -> dict:
               f"(keys: {sorted(data)[:15]})")
         amt = req.get("amount")
     out = {"amount": amt}
+    if flop_format and data.get("txHash"):
+        out["tx"] = str(data["txHash"])[:80]
+        print(f"[faucet] +{amt} FLOP ({data.get('tier') or 'quick'}) tx={out['tx']}")
+    if _wait is None and flop_format:
+        _wait = _faucet_cooldown_s(url, body.get("tier") == "linked")
     if _wait is not None:
         out["retry_after_s"] = _wait
     return out
