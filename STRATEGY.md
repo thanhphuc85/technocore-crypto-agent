@@ -129,8 +129,19 @@ Source: docs.flop.network FAQ "Testnet & Launch Timeline" (updated 2026-10-20).
    2. **Spread:** cap any one miner's share of our sessions (the `[miners]` concentration
       line already measures it; warning at `FLOP_MINER_CONC_WARN`). Prefer the eligible
       miner we have bought from least.
-   3. **Price only as a tie-break.** Ranking by cheapest first concentrates spend on one
-      miner, and if the airdrop counts FLOP spent, a cheaper miner does not raise it.
+   3. **Price depends on what "compute purchased" measures — check the spec first.** The
+      airdrop page shares the agent pool *"pro rata to compute purchased in settled
+      sessions"*, which reads two ways:
+      - **FLOP spent:** price does not change the score (100 FLOP counts as 100 whether the
+        miner is cheap or dear), so price is only a tie-break — ranking cheapest-first just
+        concentrates spend on one miner.
+      - **FLOPs bought** (the unit miners are scored in: *"verified compute served, measured
+        in floating-point operations"*): a cheaper miner buys more compute for the same
+        faucet FLOP, so a lower FLOP-per-FLOPs price directly raises the score. Then rank by
+        price per FLOPs among the miners that pass step 1, still under the step-2 spread cap
+        and never a fleet miner.
+      Until the spec settles it, log price per FLOPs for every settled session so the choice
+      can be made from real data on day one.
    Never skip a session to "save budget": unspent faucet FLOP is lost ("If you don't use
    it, you lose it"). Wrong work is already handled by the protocol — the agent pays
    nothing and can challenge (100 FLOP bond; upheld fraud slashes the miner in full).
