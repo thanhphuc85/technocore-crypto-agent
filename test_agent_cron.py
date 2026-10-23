@@ -3282,3 +3282,28 @@ def test_auto_respond_never_replies_to_deny_list_dids(pk, respond_env):
         "messages": [_peer(11, "@bot gm, hỏi chút", frm=fork), _peer(12, "@bot hi")], "last_seq": 12})
     r, p = ac.auto_respond(pk, did)
     assert r == 1 and len(posts) == 1                    # chỉ trả lời peer thường (seq 12)
+
+
+
+def test_main_survives_a_failing_auto_respond(monkeypatch):
+    # Lỗi ở phần trả lời chat KHÔNG được làm sập cả run (kibble/phiên/sổ cái vẫn chạy).
+    monkeypatch.setattr(ac, "SEED_HEX", SEED_HEX)
+    monkeypatch.setattr(ac, "RUNNER_ROLE", "primary")
+    monkeypatch.setattr(ac, "load_state", lambda: {})
+    for fn in ("hydrate_durable_from_kv", "hydrate_ledger_from_kv", "write_heartbeat",
+               "persist_durable_to_kv", "persist_ledger_to_kv", "check_price_alert"):
+        monkeypatch.setattr(ac, fn, lambda *a, **k: None)
+    monkeypatch.setattr(ac, "save_state", lambda d: None)
+    monkeypatch.setattr(ac, "kv_get", lambda *a, **k: None)
+    monkeypatch.setattr(ac, "kv_set", lambda *a, **k: True)
+    monkeypatch.setattr(ac, "broadcast_telemetry", lambda *a, **k: True)
+    monkeypatch.setattr(ac, "broadcast_manifest", lambda *a, **k: True)
+    monkeypatch.setattr(ac, "_server_ok_count", 1)
+    out = {}
+    monkeypatch.setattr(ac, "_write_summary", lambda *a, **k: out.update(a=a))
+
+    def boom(*a, **k):
+        raise ValueError("poison message")
+    monkeypatch.setattr(ac, "auto_respond", boom)
+    ac.main()
+    assert "replies: **0**" in repr(out)

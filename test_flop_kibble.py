@@ -435,3 +435,19 @@ def test_trim_without_sentence_end_cuts_on_word_and_marks_it():
     s = "word " * 400
     out = k.trim_to_sentence(s, 1200)
     assert len(out) <= 1201 and out.endswith("…") and out[:-1].endswith("word")
+
+
+
+def test_one_failing_job_does_not_abort_the_batch():
+    msgs = [{"seq": 10 + i, "from": "did:key:zR", "text": f"JOB v1 | k000000000{i} | explain | t{i} | body {i} different words here"}
+            for i in range(3)]
+    st, posts = {}, []
+
+    def answer(job):
+        if job["jobid"].endswith("2"):
+            raise RuntimeError("boom")
+        return "a real answer."
+    out = k.run_kibble_worker(fetch_fn=lambda since: {"messages": msgs, "last_seq": 12}, answer_fn=answer,
+                               post_fn=lambda t: posts.append(t) or True, state=st,
+                               allow_types=["explain"], max_per_run=3, do_claim=True, dry_run=False)
+    assert len(out["delivered"]) == 2 and out["skipped"] == 1

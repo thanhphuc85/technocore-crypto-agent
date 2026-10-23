@@ -333,7 +333,13 @@ def run_kibble_worker(fetch_fn, answer_fn, post_fn, state, *,
     delivered_items = []          # {jobid, answer} cho các DELIVER THẬT (dùng cho tracker ATTEST)
     for job in jobs:
         jobid = job["jobid"]
-        answer = answer_fn(job)
+        try:
+            answer = answer_fn(job)
+        except Exception as e:
+            # Một JOB (nội dung do người lạ viết) làm hàm trả lời lỗi -> bỏ RIÊNG job đó, không
+            # bỏ cả lượt. answer_kibble_job vốn tự bắt lỗi LLM; đây là lưới cuối cùng.
+            log(f"[kibble] skip {jobid} — lỗi khi trả lời ({type(e).__name__})")
+            answer = None
         if not answer:
             skipped += 1
             log(f"[kibble] skip {jobid} ({job.get('type')}) — no answer")

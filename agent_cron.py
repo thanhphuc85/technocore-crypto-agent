@@ -4195,8 +4195,13 @@ def main():
         print(f"[ask] {ask}")
         post_message(private_key, did, build_reply("you", ask, state=state))
 
-    # 3) Tương tác 2 chiều: đọc room & trả lời tin gọi đích danh (LUÔN chạy)
-    replies, proactive = auto_respond(private_key, did)
+    # 3) Tương tác 2 chiều: đọc room & trả lời tin gọi đích danh (LUÔN chạy). Bọc riêng: tin
+    #    trong phòng là dữ liệu của người lạ; lỗi ở đây KHÔNG được kéo sập kibble/phiên/sổ cái.
+    try:
+        replies, proactive = auto_respond(private_key, did)
+    except Exception as e:
+        replies, proactive = 0, 0
+        print(f"[respond] bỏ qua vòng này ({type(e).__name__}: {str(e)[:80]})")
 
     # 3a2) (Tùy chọn, GATED) Kibble worker — nhận JOB trên /r/kibble (board FLOP Labs),
     #      làm bằng inference THẬT rồi CLAIM+DELIVER. Mặc định TẮT; khi bật thì DRY-RUN cho
