@@ -3326,3 +3326,32 @@ def test_guard_keeps_allowlisted_links_and_normal_text():
           "BTC is at 84,000 and the tx hash is 0x" + "ab" * 32 + ".")
     assert ac.guard_output(ok) == ok
     assert ac.guard_output("Use www.github.com/x for code.") == "Use www.github.com/x for code."
+
+
+
+# --- khoá Gemini KHÔNG bao giờ nằm trong URL (log công khai in nguyên URL khi có lỗi) ------
+def test_gemini_key_goes_in_header_never_in_url(monkeypatch):
+    secret = "AIzaTEST" + "x" * 31
+    monkeypatch.setattr(ac, "GEMINI_API_KEY", secret)
+    seen = []
+
+    class R:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"models": [], "candidates": [{"content": {"parts": [{"text": "ok"}]}}]}
+
+    def rec(url, *a, **k):
+        seen.append((url, k.get("params"), k.get("headers") or {}))
+        return R()
+    monkeypatch.setattr(ac.requests, "get", rec)
+    monkeypatch.setattr(ac.requests, "post", rec)
+    list(ac._gemini_list_models())
+    assert ac._gemini_call("gemini-x", "hi", "sys", 0.3) == "ok"
+    assert len(seen) == 2
+    for url, params, headers in seen:
+        assert secret not in url and secret not in repr(params)
+        assert headers.get("x-goog-api-key") == secret

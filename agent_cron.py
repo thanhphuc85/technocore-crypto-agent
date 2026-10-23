@@ -2137,8 +2137,11 @@ def _gemini_note_404(model, e) -> None:
 def _gemini_list_models():
     """Model hỗ trợ generateContent trên key hiện tại (đã strip 'models/'), ĐÃ LỌC model
     không-chat (tts/ảnh/embed/...) — gọi chat với chúng chỉ tốn call vô ích (400/429)."""
+    # Khoá đi qua HEADER, không nằm trong URL: lỗi của requests in nguyên URL, mà log Actions
+    # của repo công khai — không để việc giấu khoá phụ thuộc vào cơ chế che secret của GitHub.
     r = requests.get(
-        f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}&pageSize=1000",
+        "https://generativelanguage.googleapis.com/v1beta/models",
+        params={"pageSize": 1000}, headers={"x-goog-api-key": GEMINI_API_KEY},
         timeout=15,
     )
     r.raise_for_status()
@@ -2194,16 +2197,13 @@ def _gemini_candidates():
 
 def _gemini_call(model: str, user_text: str, system: str, temperature: float,
                  max_tokens: int = 120) -> str:
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{model}:generateContent?key={GEMINI_API_KEY}"
-    )
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     body = {
         "systemInstruction": {"parts": [{"text": system}]},
         "contents": [{"role": "user", "parts": [{"text": user_text}]}],
         "generationConfig": {"maxOutputTokens": max_tokens, "temperature": temperature},
     }
-    r = requests.post(url, json=body, timeout=20)
+    r = requests.post(url, json=body, headers={"x-goog-api-key": GEMINI_API_KEY}, timeout=20)
     r.raise_for_status()
     return r.json()["candidates"][0]["content"]["parts"][0]["text"]
 
