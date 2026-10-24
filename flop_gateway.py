@@ -179,8 +179,12 @@ def _call(http, method: str, url: str, *, bearer: str = None, body: dict = None,
     if not isinstance(data, dict):
         data = {"data": data}
     if r.status_code not in ok:
-        raise GatewayError(r.status_code, str(data.get("error") or ""),
-                           str(data.get("message") or "")[:200],
+        err = data.get("error")
+        if isinstance(err, dict):          # dạng OpenAI: {"error": {"code", "message", "type"}}
+            code, msg = err.get("code") or err.get("type") or "", err.get("message") or ""
+        else:
+            code, msg = err or "", data.get("message") or ""
+        raise GatewayError(r.status_code, str(code)[:80], str(msg)[:200],
                            _retry_after(getattr(r, "headers", {})), data)
     return data
 
@@ -419,11 +423,14 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
             if i:
                 est = estimate(http, base, model_id, prompt, cap)
                 ptok = int(est.get("estimated_input_tokens") or len(prompt) // 4)
-            mt = size_call(per_call, ptok, pp, pc, cap, min_tok)
+            # Cỡ được miner nhận học dần: devnet 2026-10-24 từ chối 8192 token ("no admitted miner
+            # for model and budget" — ước tính 82 block, quá max_wait), nhận 1024.
+            mt = size_call(per_call, ptok, pp, pc, min(cap, int(g.get("tok_cap") or cap)), min_tok)
             if mt is None:
                 break
             if calls:
                 sleep(gap)
+            g["last_mt"] = mt
             r = chat(http, base, bearer, model_id, prompt, mt, max_cost=per_call * 1.1,
                      max_wait_ms=max_wait)
             u = r.get("usage") or {}
@@ -449,6 +456,11 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
                 log(f"[gateway] ⚠️ không xác định được số đã chi (usage keys: {last['usage_keys']})")
             if book_fn and cost > 0:
                 book_fn(cost, str(r.get("id") or "")[:80], model_id)
+            if g.get("tok_cap"):                       # ổn định 12 lần liền -> thử cỡ lớn hơn 25%
+                g["tok_ok"] = int(g.get("tok_ok") or 0) + 1
+                if g["tok_ok"] >= 12:
+                    g["tok_cap"] = min(cap, int(g["tok_cap"] * 1.25)) if g["tok_cap"] * 1.25 < cap else None
+                    g["tok_ok"] = 0
             # Ghi tiến độ NGAY sau mỗi lần chi: lỗi ở lần gọi sau không làm mất số đã chi.
             g["remaining"] = max(0.0, min(quota_now, remaining - spent))
             g["window"] = {**g["window"], "spent": float(g["window"].get("spent") or 0) + cost}
@@ -495,6 +507,12 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
             backoff(3600, f"403 {e.code}")
             return done("unfunded" if "unfunded" in e.code else "forbidden",
                         reason=f"403 {e.code} {e.message}".strip())
+        if e.status == 503 and "no admitted miner" in e.message.lower() and g.get("last_mt"):
+            # Không miner nào nhận yêu cầu CỠ này -> lần sau gửi nửa cỡ (không phải mạng quá tải).
+            g["tok_cap"] = max(int(_env_num("FLOP_GATEWAY_MIN_TOKENS", 64)) * 2, int(g["last_mt"]) // 2)
+            g["tok_ok"] = 0
+            backoff(60, "no_admitted_miner")
+            return done("no_miner", reason=f"503 {e.code}: {e.message[:120]} — lần sau tối đa {g['tok_cap']} token")
         if e.status in (429, 503):
             backoff(e.retry_after or 600, f"{e.status} {e.code}")
             return done("rate_limited", reason=f"{e.status} {e.code} — chờ {e.retry_after or 600}s")

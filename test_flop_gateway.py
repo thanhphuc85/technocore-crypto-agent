@@ -299,3 +299,26 @@ def test_default_token_cap_is_the_model_limit(monkeypatch):
     _run({}, fake)
     sent = [c[3]["max_tokens"] for c in fake.calls if c[1] == "/v1/chat/completions"]
     assert sent and max(sent) == 8192                                     # không còn kẹt ở 1024
+
+
+def test_oversized_request_halves_the_learned_cap_and_errors_parse_openai_shape():
+    # Devnet thật 2026-10-24: 8192 token -> 503 {"error": {"code": "provider_error", "message":
+    # "Error: no admitted miner for model ... and budget"}}; 1024 token thì được nhận.
+    fake, state = FakeGateway(quota=20000.0, expires_ms=SOON), {}
+    real = fake.__call__
+
+    def picky(method, url, headers=None, json=None, timeout=None):
+        if url.endswith("/chat/completions") and json["max_tokens"] > 1024:
+            fake.calls.append((method, "/v1/chat/completions", headers or {}, json, url))
+            return Resp(503, {"error": {"code": "provider_error", "type": "invalid_request_error",
+                                        "message": "Error: no admitted miner for model 'm1' and budget"}},
+                        {"Retry-After": "1"})
+        return real(method, url, headers=headers, json=json, timeout=timeout)
+
+    sizes = []
+    for i in range(5):
+        r = gw.run_step(state, agent_key=_key("22"), http=picky, now=NOW + i * 300, prompts=["q"],
+                        expect_network="devnet", sleep=lambda s: None, log=lambda *a: None)
+        sizes.append((r["outcome"], state[gw.KEY].get("tok_cap")))
+    assert sizes[0] == ("no_miner", 4096) and "provider_error" in gw.GatewayError(503, "provider_error").code
+    assert ("spent", 1024) in sizes                                      # hạ dần 8192 -> 4096 -> 2048 -> 1024
