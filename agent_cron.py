@@ -2760,6 +2760,22 @@ def _kibble_remember(fp) -> None:
         ttl_ms=_kibble_dup_ttl_ms())
 
 
+_gateway_jobs_new = []               # job kibble đã trả lời trong run này -> hàng đề gateway
+GATEWAY_JOBS_KEEP = 30
+
+
+def queue_gateway_jobs(state: dict) -> None:
+    """Đẩy job vừa làm vào hàng đề bền state['gateway_jobs'] (chống trùng theo id, giữ N mới nhất)."""
+    q = [j for j in (state.get("gateway_jobs") or []) if isinstance(j, dict) and j.get("task")]
+    have = {j.get("id") for j in q}
+    for j in _gateway_jobs_new:
+        if j.get("id") not in have:
+            q.append(j)
+            have.add(j.get("id"))
+    _gateway_jobs_new.clear()
+    state["gateway_jobs"] = q[-GATEWAY_JOBS_KEEP:]
+
+
 def answer_kibble_job(job: dict):
     """Sinh nội dung bàn giao cho MỘT job kibble. Nội dung job là UNTRUSTED (do agent lạ
     đăng) -> BẮT BUỘC đi qua isolate_for_llm + guard_output như reply cho người lạ. Trả None
@@ -2818,6 +2834,9 @@ def answer_kibble_job(job: dict):
     _meter_flop(f"{provider} kibble:{jtype}", event_id=job.get("jobid"))
     print(f"[kibble:{provider}] answered {job.get('jobid')} ({jtype})")
     _kibble_remember(fp)
+    # Job agent ĐÃ LÀM THẬT -> đề cho lần mua compute qua gateway (việc thật, không phải đề
+    # lặp lại: tài khoản bị gắn cờ "manufactured activity" mất toàn bộ phần airdrop).
+    _gateway_jobs_new.append({"id": str(job.get("jobid") or "")[:40], "task": task[:1500]})
     return text
 
 
@@ -4147,10 +4166,20 @@ def gateway_session_step(state: dict, private_key, now: int):
     testnet = _tm.testnet_enabled()
     expect = (os.environ.get("FLOP_GATEWAY_NETWORK", "").strip().lower()
               or ("testnet" if testnet else "devnet"))
-    prompts = _gateway_prompts(now)
+    # Đề ưu tiên = job kibble THẬT agent vừa làm (mỗi đề một việc khác nhau, có người đặt);
+    # hết job mới dùng đề của operator. Nội dung job là UNTRUSTED -> isolate như mọi chỗ khác.
+    jobs = [j for j in (state.get("gateway_jobs") or []) if isinstance(j, dict) and j.get("task")]
+    if jobs:
+        prompts = [isolate_for_llm(j["task"]) + "\n\nComplete the task above concretely and accurately."
+                   for j in jobs]
+        g0 = state.get(flop_gateway.KEY)
+        if isinstance(g0, dict):
+            g0["prompt_idx"] = 0                      # dùng job theo thứ tự hàng đợi
+    else:
+        prompts = _gateway_prompts(now)
     if not prompts:
-        print("[gateway] chưa có đề bài (FLOP_GATEWAY_PROMPTS / FLOP_KIBBLE_REQUEST_QUESTIONS) "
-              "— không dùng đề mặc định chung với fork")
+        print("[gateway] chưa có đề bài (job kibble / FLOP_GATEWAY_PROMPTS / "
+              "FLOP_KIBBLE_REQUEST_QUESTIONS) — không dùng đề mặc định chung với fork")
         return "skip-unconfigured", 0, {"reason": "no prompts"}
 
     def book(cost, ref, model):
@@ -4160,7 +4189,10 @@ def gateway_session_step(state: dict, private_key, now: int):
         state, agent_key=private_key, now=now, prompts=prompts, expect_network=expect,
         http=_gateway_http,
         book_fn=book if testnet else None)
-    save_state({flop_gateway.KEY: state.get(flop_gateway.KEY)})
+    if jobs and r.get("calls"):
+        state["gateway_jobs"] = jobs[int(r["calls"]):]   # job đã dùng làm đề -> ra khỏi hàng
+    save_state({flop_gateway.KEY: state.get(flop_gateway.KEY),
+                "gateway_jobs": state.get("gateway_jobs", [])})
     oc = r.get("outcome")
     tag = "" if testnet else " (devnet tập, không ghi sổ)"
     status = f"{r.get('calls', 0)}✓ gateway/{oc}"
@@ -4170,7 +4202,8 @@ def gateway_session_step(state: dict, private_key, now: int):
               + (f" settled={r.get('settled_total')}/{r.get('receipts_total')}rc"
                  if r.get("receipts_total") is not None else "")
               if oc in ("spent", "pace_wait") else "")
-    print(f"[session] {status}{detail}{tag}")
+    src = f" đề=job×{min(len(jobs), int(r.get('calls') or 0))}" if jobs else " đề=operator"
+    print(f"[session] {status}{detail}{src}{tag}")
     if r.get("reason"):
         print(f"[gateway] lý do: {str(r['reason'])[:200]}")
     if r.get("payment"):
@@ -4424,9 +4457,11 @@ def main():
                 recent_fps=_kibble_recent_fps, dup_sim=KIBBLE_DUP_SIM,
                 now_ms=int(time.time() * 1000), ttl_ms=_kibble_dup_ttl_ms(),
             )
+            queue_gateway_jobs(state)
             save_state({"kibble_cursor": state.get("kibble_cursor"),
                         "kibble_done": state.get("kibble_done", []),
-                        "kibble_recent_fps": _kibble_recent_fps})
+                        "kibble_recent_fps": _kibble_recent_fps,
+                        "gateway_jobs": state.get("gateway_jobs", [])})
             mode = "dry" if KIBBLE_DRY_RUN else "live"
             kibble_status = f"{mode} {len(ks['delivered'])}✓/{ks['skipped']}skip/{ks['scanned']}scan"
             # Tracker ATTEST (GATED): ghi DELIVER thật của mình + đối chiếu rh của ATTEST trong
