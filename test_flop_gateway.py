@@ -379,3 +379,10 @@ def test_settled_amount_rules():
     assert gw.settled_amount({"state": "failed", "settled_spend": 3}) is None
     assert gw.settled_amount({"state": "weird", "settled_spend": 2}) == 2       # có settle > 0, trạng thái lạ
     assert gw.settled_amount({"block_number": 7}) == 0.0                         # dạng OpenAPI cũ
+
+
+def test_real_devnet_states_estimated_and_released_are_not_settled():
+    # Devnet 2026-10-24: estimated/200 (đang chạy), released/503 (lỗi, quota trả lại), settled/200.
+    assert gw.settled_amount({"state": "estimated", "settled_spend": 6.4}) is None
+    assert gw.settled_amount({"state": "released", "response_status": 503, "settled_spend": 0}) is None
+    assert gw.settled_amount({"state": "settled", "response_status": 200, "settled_spend": "6.462"}) == 6.462

@@ -345,7 +345,7 @@ def _receipt_key(r: dict) -> str:
 # response_status, terminal_event. "Đã settle" = state thuộc nhóm dưới / có block_number / có
 # settled_spend > 0 mà state không thuộc nhóm chưa-xong.
 _SETTLED_STATES = {"settled", "finalized", "final", "complete", "completed", "success", "succeeded", "paid"}
-_OPEN_STATES = {"pending", "reserved", "open", "opened", "in_flight", "inflight", "running", "submitted",
+_OPEN_STATES = {"pending", "estimated", "reserved", "open", "opened", "in_flight", "inflight", "running", "submitted",
                 "failed", "error", "refunded", "released", "cancelled", "canceled", "expired", "rejected"}
 
 
