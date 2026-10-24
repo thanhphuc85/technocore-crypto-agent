@@ -50,6 +50,7 @@ py-modules = [
     "token_manager",
     "flop_engage",
     "flop_faucet",
+    "flop_gateway",
     "flop_governor",
     "flop_kibble",
     "flop_kibble_track",

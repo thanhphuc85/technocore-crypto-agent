@@ -576,6 +576,37 @@ def spend(amount, memo, token: str = None, *, path: str = None,
             "signed": signed, "reason": "chi tiêu mô phỏng (không đụng chain)"}
 
 
+def record_gateway_spend(amount, memo, ref: str, token: str = None, *, path: str = None,
+                         log=print) -> dict:
+    """Ghi sổ một lần chi ĐÃ XẢY RA ở gateway FLOP (api.flop.network trừ quota; `ref` = id
+    phản hồi làm bằng chứng). Khác spend(): agent không tự gửi giao dịch — gateway đã chi —
+    nên chỉ ghi nhận. CHỈ ở chế độ testnet: devnet/mô phỏng không bao giờ vào sổ thật.
+    Số dư kẹp ở 0 (quota gateway có thể không trùng số dư faucet trong sổ)."""
+    token = (token or default_token())
+    amt = _parse_amount(amount)
+    if ledger_mode() != "testnet":
+        return {"outcome": "skipped_simulation", "reason": "chỉ ghi sổ chi gateway khi TESTNET_ENABLED"}
+    if amt is None or amt <= 0 or not ref:
+        return {"outcome": "skipped_insufficient", "reason": f"thiếu số lượng/bằng chứng ({amount!r}, {ref!r})"}
+    state = load_ledger(path)
+    cur = _parse_amount(state["balances"].get(token, "0")) or Decimal(0)
+    new_bal = _fmt(max(Decimal(0), cur - amt))
+    state["balances"][token] = new_bal
+    state["entries"].append({
+        "kind": "spend", "token": token, "amount": _fmt(amt), "memo": memo, "mode": "testnet",
+        "balance_after": new_bal, "tx_hash": str(ref)[:80], "via": "gateway",
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    })
+    _accrue_unlock(state, token, amt)
+    _accrue_cumulative(state, token, amt)
+    _accrue_day(state, token, amt)
+    if is_session_spend(memo):
+        _accrue_session(state, token, amt)
+    _save_ledger(state, path)
+    log(f"[ledger] gateway spent {_fmt(amt)} {token} for {memo} (ref {str(ref)[:12]}…)")
+    return {"outcome": "spent_onchain", "amount": _fmt(amt), "balance_after": new_bal, "tx_hash": ref}
+
+
 # --- Envelope chống sybil + thống kê hoạt động (đọc từ chính sổ cái) ---------------
 
 def _parse_ts(s) -> int:

@@ -4116,6 +4116,79 @@ def start_jitter_seconds(raw, rng=None):
     return (rng or random).uniform(0, n)
 
 
+def _gateway_prompts(now: int) -> list:
+    """Đề bài cho các lần mua compute qua gateway. KHÔNG có pool mặc định dùng chung: biên
+    nhận on-chain mang prompt_hash, nên các fork gửi cùng đề = trùng hash công khai (tín hiệu
+    sybil). Nguồn: FLOP_GATEWAY_PROMPTS ('a|b|c') của operator, không có thì phần thân các câu
+    FLOP_KIBBLE_REQUEST_QUESTIONS (cũng do operator đặt). Mỗi đề kèm mốc giờ UTC + DID ngắn
+    -> mỗi lần gọi một prompt khác nhau."""
+    raw = [p.strip() for p in os.environ.get("FLOP_GATEWAY_PROMPTS", "").split("|") if p.strip()]
+    if not raw:
+        raw = [q["body"] for q in KIBBLE_REQ_QUESTIONS if q.get("body")]
+    stamp = time.strftime("%Y-%m-%dT%H:%MZ", time.gmtime(now))
+    return [f"{p}\n\n(Answer concretely; as of {stamp}.)" for p in raw[:200]]
+
+
+def _gateway_http(method, url, headers=None, json=None, timeout=20):
+    return requests.request(method, url, headers={"User-Agent": UA, **(headers or {})},
+                            json=json, timeout=timeout)
+
+
+def gateway_session_step(state: dict, private_key, now: int):
+    """Mua compute qua api.flop.network (FLOP_SESSION_BACKEND=gateway). Trả
+    (session_status, settled_count, last) cho dòng [session] và bộ canh chi thật.
+
+    TESTNET_ENABLED bật -> chỉ chi khi gateway báo mạng FLOP_GATEWAY_NETWORK (mặc định
+    'testnet'), và ghi sổ testnet từng lần (memo phiên -> tính vào thước đo airdrop).
+    Tắt -> CHẠY TẬP trên mạng FLOP_GATEWAY_NETWORK (mặc định 'devnet'): gọi thật nhưng KHÔNG
+    ghi sổ (devnet không tính gì). Không ném lỗi."""
+    import flop_gateway
+    import token_manager as _tm
+    testnet = _tm.testnet_enabled()
+    expect = (os.environ.get("FLOP_GATEWAY_NETWORK", "").strip().lower()
+              or ("testnet" if testnet else "devnet"))
+    prompts = _gateway_prompts(now)
+    if not prompts:
+        print("[gateway] chưa có đề bài (FLOP_GATEWAY_PROMPTS / FLOP_KIBBLE_REQUEST_QUESTIONS) "
+              "— không dùng đề mặc định chung với fork")
+        return "skip-unconfigured", 0, {"reason": "no prompts"}
+
+    def book(cost, ref, model):
+        return _tm.record_gateway_spend(cost, f"{flop_gateway.SESSION_MEMO} {model}", ref)
+
+    r = flop_gateway.run_step(
+        state, agent_key=private_key, now=now, prompts=prompts, expect_network=expect,
+        http=_gateway_http,
+        book_fn=book if testnet else None)
+    save_state({flop_gateway.KEY: state.get(flop_gateway.KEY)})
+    oc = r.get("outcome")
+    tag = "" if testnet else " (devnet tập, không ghi sổ)"
+    status = f"{r.get('calls', 0)}✓ gateway/{oc}"
+    detail = (f" spent={r.get('spent')} due={r.get('due')} quota={r.get('remaining')}"
+              if oc in ("spent", "pace_wait") else "")
+    print(f"[session] {status}{detail}{tag}")
+    if r.get("reason"):
+        print(f"[gateway] lý do: {str(r['reason'])[:200]}")
+    if r.get("payment"):
+        print(f"[gateway] 402 hình dạng thanh toán (KHÔNG tự trả): {r['payment']}")
+    if r.get("receipts_new"):
+        print(f"[gateway] biên nhận on-chain mới: {r['receipts_new']}")
+        try:
+            import flop_miners as _fm
+            st = dict(_miner_stats)
+            for m in r.get("miners") or []:
+                st = _fm.record_settled(st, m)
+            _miner_stats.clear()
+            _miner_stats.update(st)
+            save_state({_miner_stats_key(): _miner_stats})
+        except Exception as e:
+            print(f"[miners] bỏ qua ({str(e)[:80]})")
+    settled = int(r.get("calls") or 0) if (testnet and oc == "spent") else 0
+    last = {"stage": "gateway", "outcome": "spent_onchain" if settled else oc,
+            "reason": r.get("reason", "")}
+    return status, settled, last
+
+
 def session_budget_plan(sess_fee, sess_flops, sess_max, now: int = None):
     """Kế hoạch chi phiên cho FLOP_SESSION_BUDGET=auto -> (plan, due).
 
@@ -4541,7 +4614,15 @@ def main():
     #      Bọc kín: lỗi bị nuốt, không làm sập run.
     session_status = "off"
     _wd_settled, _wd_last = 0, {}              # cho bộ canh chi thật (testnet) bên dưới
-    if os.environ.get("FLOP_SESSION_ENABLED", "").strip().lower() in ("1", "true", "on", "yes"):
+    _sess_on = os.environ.get("FLOP_SESSION_ENABLED", "").strip().lower() in ("1", "true", "on", "yes")
+    if _sess_on and os.environ.get("FLOP_SESSION_BACKEND", "").strip().lower() == "gateway":
+        # Đường THẬT FLOP công bố: mua compute qua gateway api.flop.network (flop_gateway).
+        try:
+            session_status, _wd_settled, _wd_last = gateway_session_step(state, private_key, now)
+        except Exception as e:
+            session_status = "error"
+            print(f"[session] gateway bỏ qua ({str(e)[:100]})")
+    elif _sess_on:
         # Danh sách model_hash (CSV hoặc '|') -> mỗi phiên xoay 1 cái. Thiếu -> skip, KHÔNG bịa.
         # PHẢI import ở ĐẦU nhánh: resolve_model_hashes được gọi NGAY dưới đây, còn import
         # cũ nằm mãi trong nhánh else -> NameError làm sập cả run.

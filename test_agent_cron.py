@@ -3420,3 +3420,82 @@ def test_guard_scrubs_ss58_wallets_but_keeps_did_and_flop_network_links():
     assert FLOP_ADDR not in out and "flop-claim.network" not in out
     assert "https://faucet.flop.network/" in out and "api.flop.network" in out
     assert "did:key:z6Mkf13PqYooa8rr9oipQRbNSzzuVGkf3ZEWvPes5r87k9K4" in out
+
+
+# --- mua compute qua gateway api.flop.network (FLOP_SESSION_BACKEND=gateway) ----------------
+def test_workflow_maps_every_faucet_gateway_and_wallet_variable():
+    # PR #185 đọc FLOP_FAUCET_ADDRESS/TIER/PROVIDER nhưng workflow không truyền -> đặt Variable
+    # vô tác dụng. Mọi biến của các nhóm này mà code đọc PHẢI có trong env của workflow.
+    import glob
+    import re as _re
+    read = set()
+    for f in glob.glob("*.py"):
+        if not f.startswith("test_"):
+            read |= set(_re.findall(r"""["'](FLOP_(?:FAUCET|GATEWAY|WALLET|SESSION_BACKEND)[A-Z0-9_]*)["']""",
+                                    open(f, encoding="utf-8").read()))
+    wf = open(".github/workflows/agent_cron.yml", encoding="utf-8").read()
+    mapped = set(_re.findall(r"^\s+([A-Z][A-Z0-9_]+):\s*\$\{\{", wf, _re.M))
+    internal = {"FLOP_FAUCET_STATE"}                                    # đường dẫn file, không phải cấu hình
+    assert read - mapped - internal == set()
+
+
+def test_gateway_prompts_have_no_shared_default(monkeypatch):
+    monkeypatch.delenv("FLOP_GATEWAY_PROMPTS", raising=False)
+    monkeypatch.setattr(ac, "KIBBLE_REQ_QUESTIONS", [])
+    assert ac._gateway_prompts(1_800_000_000) == []
+    monkeypatch.setenv("FLOP_GATEWAY_PROMPTS", "Explain HTLC refunds|Compare TWAP vs spot")
+    p = ac._gateway_prompts(1_800_000_000)
+    assert len(p) == 2 and p[0].startswith("Explain HTLC refunds") and "as of 2027-01-15T08:00Z" in p[0]
+
+
+def test_gateway_step_without_prompts_does_not_call_out(monkeypatch):
+    monkeypatch.delenv("FLOP_GATEWAY_PROMPTS", raising=False)
+    monkeypatch.setattr(ac, "KIBBLE_REQ_QUESTIONS", [])
+    called = []
+    import flop_gateway
+    monkeypatch.setattr(flop_gateway, "run_step", lambda *a, **k: called.append(1) or {})
+    assert ac.gateway_session_step({}, _real_key(), 1_800_000_000)[0] == "skip-unconfigured"
+    assert called == []
+
+
+def test_gateway_step_books_only_on_testnet(monkeypatch):
+    import flop_gateway
+    seen = {}
+    monkeypatch.setattr(flop_gateway, "run_step", lambda state, **k: seen.update(k) or
+                        {"outcome": "spent", "calls": 2, "spent": 1.8, "due": 1.8, "remaining": 20})
+    monkeypatch.setattr(ac, "save_state", lambda d: None)
+    monkeypatch.setenv("FLOP_GATEWAY_PROMPTS", "q")
+    monkeypatch.delenv("TESTNET_ENABLED", raising=False)
+    monkeypatch.delenv("FLOP_GATEWAY_NETWORK", raising=False)
+    st, settled, last = ac.gateway_session_step({}, _real_key(), 1_800_000_000)
+    assert seen["expect_network"] == "devnet" and seen["book_fn"] is None and settled == 0
+    monkeypatch.setenv("TESTNET_ENABLED", "true")
+    st, settled, last = ac.gateway_session_step({}, _real_key(), 1_800_000_000)
+    assert seen["expect_network"] == "testnet" and seen["book_fn"] is not None
+    assert settled == 2 and last["outcome"] == "spent_onchain" and st == "2✓ gateway/spent"
+
+
+def test_main_routes_sessions_to_the_gateway_backend(monkeypatch):
+    monkeypatch.setattr(ac, "SEED_HEX", SEED_HEX)
+    monkeypatch.setattr(ac, "RUNNER_ROLE", "primary")
+    monkeypatch.setattr(ac, "load_state", lambda: {})
+    monkeypatch.setattr(ac, "hydrate_durable_from_kv", lambda *a, **k: None)
+    monkeypatch.setattr(ac, "hydrate_ledger_from_kv", lambda *a, **k: None)
+    monkeypatch.setattr(ac, "save_state", lambda d: None)
+    monkeypatch.setattr(ac, "write_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(ac, "persist_durable_to_kv", lambda *a, **k: None)
+    monkeypatch.setattr(ac, "persist_ledger_to_kv", lambda *a, **k: None)
+    monkeypatch.setattr(ac, "_write_summary", lambda *a, **k: None)
+    monkeypatch.setattr(ac, "broadcast_telemetry", lambda *a, **k: True)
+    monkeypatch.setattr(ac, "broadcast_manifest", lambda *a, **k: True)
+    monkeypatch.setattr(ac, "check_price_alert", lambda *a, **k: None)
+    monkeypatch.setattr(ac, "auto_respond", lambda *a, **k: (0, 0))
+    monkeypatch.setattr(ac, "_server_ok_count", 1)
+    monkeypatch.setenv("FLOP_SESSION_ENABLED", "on")
+    monkeypatch.setenv("FLOP_SESSION_BACKEND", "gateway")
+    hit = []
+    monkeypatch.setattr(ac, "gateway_session_step", lambda *a, **k: hit.append(1) or ("1✓ gateway/spent", 0, {}))
+    import flop_session
+    monkeypatch.setattr(flop_session, "maybe_run_session", lambda *a, **k: pytest.fail("đi nhầm đường mempool"))
+    ac.main()
+    assert hit == [1]

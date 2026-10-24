@@ -286,6 +286,23 @@ jobs:
           # Ngân sách phiên: 'auto' = chi HẾT số khả dụng trong ngày, rải đều qua các run (pacer,
           # kẹp FLOP_MAX_PER_RUN). Rỗng = cố định FLOP_SESSION_MAX_PER_RUN phiên/run như cũ.
           FLOP_SESSION_BUDGET: ${{ vars.FLOP_SESSION_BUDGET }}
+          # Đường mua compute: 'gateway' = api.flop.network (đường FLOP công bố, flop_gateway.py);
+          # rỗng = scaffold mempool cũ. Testnet tắt -> chạy TẬP trên devnet, KHÔNG ghi sổ.
+          FLOP_SESSION_BACKEND: ${{ vars.FLOP_SESSION_BACKEND }}
+          # Ví FLOP (SS58, ed25519). Khuyên dùng secret riêng; hoặc FLOP_WALLET_USE_DID=on để
+          # dùng chính khoá DID của agent.
+          FLOP_WALLET_SEED_HEX: ${{ secrets.FLOP_WALLET_SEED_HEX }}
+          FLOP_WALLET_USE_DID: ${{ vars.FLOP_WALLET_USE_DID }}
+          FLOP_GATEWAY_URL: ${{ vars.FLOP_GATEWAY_URL }}
+          FLOP_GATEWAY_NETWORK: ${{ vars.FLOP_GATEWAY_NETWORK }}
+          FLOP_GATEWAY_PROMPTS: ${{ vars.FLOP_GATEWAY_PROMPTS }}
+          FLOP_GATEWAY_PURPOSE: ${{ vars.FLOP_GATEWAY_PURPOSE }}
+          FLOP_GATEWAY_MAX_CALLS_PER_RUN: ${{ vars.FLOP_GATEWAY_MAX_CALLS_PER_RUN }}
+          FLOP_GATEWAY_MAX_TOKENS: ${{ vars.FLOP_GATEWAY_MAX_TOKENS }}
+          FLOP_GATEWAY_MIN_TOKENS: ${{ vars.FLOP_GATEWAY_MIN_TOKENS }}
+          FLOP_GATEWAY_CALL_GAP_SEC: ${{ vars.FLOP_GATEWAY_CALL_GAP_SEC }}
+          FLOP_GATEWAY_RUN_INTERVAL_SEC: ${{ vars.FLOP_GATEWAY_RUN_INTERVAL_SEC }}
+          FLOP_GATEWAY_MARGIN_SEC: ${{ vars.FLOP_GATEWAY_MARGIN_SEC }}
           # Trần FLOPs MỘT phiên (tùy chọn) — phiên to hơn tách thành nhiều phiên.
           FLOP_SESSION_MAX_FLOPS: ${{ vars.FLOP_SESSION_MAX_FLOPS }}
           # (testnet) Trần phiên chờ proof: đủ N thì ngừng đăng phiên mới (mặc định 3, 0 = tắt).
@@ -311,6 +328,10 @@ jobs:
           # Faucet (xin test token để CÓ số dư mà chi). FLOP_FAUCET_ENABLED=on + URL khi mở.
           FLOP_FAUCET_ENABLED: ${{ vars.FLOP_FAUCET_ENABLED }}
           FLOP_FAUCET_URL: ${{ vars.FLOP_FAUCET_URL }}
+          # Định dạng thật faucet.flop.network: địa chỉ SS58 nhận + mức (quick|linked) + provider.
+          FLOP_FAUCET_ADDRESS: ${{ vars.FLOP_FAUCET_ADDRESS }}
+          FLOP_FAUCET_TIER: ${{ vars.FLOP_FAUCET_TIER }}
+          FLOP_FAUCET_PROVIDER: ${{ vars.FLOP_FAUCET_PROVIDER }}
           FLOP_FAUCET_AMOUNT: ${{ vars.FLOP_FAUCET_AMOUNT }}
           FLOP_FAUCET_COOLDOWN_HOURS: ${{ vars.FLOP_FAUCET_COOLDOWN_HOURS }}
           FLOP_FAUCET_REFILL_BELOW: ${{ vars.FLOP_FAUCET_REFILL_BELOW }}

@@ -82,7 +82,9 @@ question sets, cross-denied miner DIDs — see `PROACTIVE_DENY_DIDS`).
    address and per identity every 24 h (`/health` -> `limits`). Compute is bought through
    the OpenAI-compatible gateway `api.flop.network` (enroll the wallet with a signed
    challenge -> bearer key -> `/v1/chat/completions`, receipts at `/v1/keys/me/receipts`),
-   which does not match the scaffold's mempool/PoUI/settle shape - see item 8 below. Fill `FLOP_FAUCET_URL` / `FLOP_MEMPOOL_URL` and fit the scaffold
+   which does not match the scaffold's mempool/PoUI/settle shape. **`flop_gateway.py` now
+   implements that path** (`FLOP_SESSION_BACKEND=gateway`, see "Gateway backend" below).
+   Fill `FLOP_FAUCET_URL` / `FLOP_MEMPOOL_URL` and fit the scaffold
    wire format once FLOP publishes them. The faucet has **per-identity limits** and a
    claim period ("hourly or daily — not yet decided"): match `FLOP_FAUCET_MAX_PER_DAY` /
    `FLOP_FAUCET_COOLDOWN_HOURS` to it and do **not** set `FLOP_FAUCET_REFILL_BELOW`, so the
@@ -114,13 +116,44 @@ Source: docs.flop.network FAQ "Testnet & Launch Timeline" (updated 2026-10-20).
   of **flop.finance/official/** changes (FLOP Labs edits it with every testnet/airdrop
   announcement; airdrop eligibility itself is announced on x.com/flop_labs).
 
+### Gateway backend (`flop_gateway.py`)
+
+Measured against the live devnet gateway on 2026-10-24 (read-only: health, catalog,
+estimate, challenge): one model `qwen/qwen2.5-0.5b-instruct`, 0.006 FLOP per prompt and
+per completion token (512 tokens ~ 3.15 FLOP, our local sizing matches `/models/estimate`
+exactly), 5 miners, an 8-line `flop-devnet-enroll/v1` challenge naming our SS58 address.
+
+- **Enroll:** sign the challenge with the wallet key (only if it names *this* gateway and
+  *our* address), get a model-scoped bearer. The bearer is kept in `state.json` **encrypted
+  (AES-GCM, key derived from the agent seed)** - a workflow that can read the Actions cache
+  but not the secrets sees ciphertext only. Re-enrolled when it is about to expire or on 401.
+- **Pace:** spend the remaining quota linearly until it expires (or the UTC day ends),
+  accumulating small amounts until one call is worth it; at most
+  `FLOP_GATEWAY_MAX_CALLS_PER_RUN` (2, the allowance allows 2 requests/min) per run, each
+  sized so it costs about its share and sent with `max_cost_flop` so the **gateway** caps
+  the spend. Simulated: 25 FLOP over 20 h is spread evenly and gone before expiry.
+- **Errors:** 401 -> re-enroll next run; 403 unfunded / 429 / 503 -> back off
+  (`Retry-After`); 402 -> log the payment shape, never pay; missing `cost_flop` -> nothing is
+  booked from a guess.
+- **Rehearsal before testnet:** with `TESTNET_ENABLED` off the same code runs on devnet and
+  books nothing. It needs a funded devnet wallet (>= 1 FLOP from faucet.flop.network) and
+  each account gets one 24 h allowance only, so it is a one-day dry run.
+
 ### Day-one checklist (Variables only — no code change)
 1. `TESTNET_ENABLED=true` **first**; `FLOP_TESTNET_START=2026-11-03` (or the confirmed
    date). The faucet refuses to claim while the ledger is in simulation mode
    (`faucet=skipped_simulation`) so a real claim is never booked into the mock ledger.
 2. `FLOP_SESSION_MODEL_HASH` from the published model catalog; delete
    `FLOP_SESSION_SIM_MODEL_HASH`.
-3. `FLOP_MEMPOOL_URL`, `FLOP_RPC_URL`/`FLOP_SUBMIT_URL` (+ `FLOP_TX_MODE`).
+3. **Gateway backend (the path FLOP published):** `FLOP_SESSION_BACKEND=gateway` and the
+   wallet: secret `FLOP_WALLET_SEED_HEX` (own ed25519 seed, recommended) or
+   `FLOP_WALLET_USE_DID=on` (reuse the DID key). Prompts: `FLOP_GATEWAY_PROMPTS`
+   (`a|b|c`, your own - no shared default, receipts carry `prompt_hash`) or the bodies of
+   `FLOP_KIBBLE_REQUEST_QUESTIONS`. If testnet gets its own host, `FLOP_GATEWAY_URL`.
+   The agent spends only when `/health` reports `FLOP_GATEWAY_NETWORK` (default `testnet`
+   with `TESTNET_ENABLED`, `devnet` without it - devnet runs are a rehearsal and are never
+   booked). The scaffold mempool path stays for reference: `FLOP_MEMPOOL_URL`,
+   `FLOP_RPC_URL`/`FLOP_SUBMIT_URL` (+ `FLOP_TX_MODE`).
 4. `FLOP_FAUCET_ENABLED=on`, `FLOP_FAUCET_URL` (devnet shape:
    `https://faucet.flop.network/fund`), `FLOP_FAUCET_ADDRESS=<SS58 of the agent wallet>`.
    With an address set the adapter sends the real body and reads the 24 h cooldown from
@@ -165,7 +198,13 @@ Source: docs.flop.network FAQ "Testnet & Launch Timeline" (updated 2026-10-20).
    Never skip a session to "save budget": unspent faucet FLOP is lost ("If you don't use
    it, you lose it"). Wrong work is already handled by the protocol — the agent pays
    nothing and can challenge (100 FLOP bond; upheld fraud slashes the miner in full).
-8. **Settlement / payment model (code, from the real API).** The scaffold assumes the proof
+8. **Settlement / payment model (code, from the real API).** *Gateway backend:* the gateway
+   charges the enrolled allowance per request (`usage.cost_flop`, booked per call with the
+   response id) and lists on-chain receipts (`block_number`, `tx_hash`, `miner`) at
+   `/v1/keys/me/receipts`; the agent counts new receipts and feeds their miners to the
+   `[miners]` concentration line. A `402` with x402 fields (`price`, `asset`, `hash_lock`,
+   `destination`, `timeout_blocks`) is **logged and never paid automatically** - fit that
+   by hand if testnet uses pay-per-request. *Scaffold mempool backend:* the scaffold assumes the proof
    comes back in the mempool response and then pays with a separate signed transfer that
    has **no recipient**. The docs describe something else: the miner opens a compute
    channel that pins the **escrowed payment**, proves later, and validators settle in a
