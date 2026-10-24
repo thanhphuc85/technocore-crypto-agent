@@ -8,7 +8,10 @@
 ## What the airdrop actually rewards (per the teaser)
 
 - **Agent pool: 7% (up to 1.2B $FLOP).** Allocation is *"based largely on what they
-  spend on inference over the testnet, along with various prizes."*
+  spend on inference over the testnet, along with various prizes."* The yellowpaper
+  decision log (D-0438) splits it as **600M "agent spend cap" + 600M "testnet prize
+  pool"**: steady compute spend targets one half; the other half is prizes whose rules are
+  not published yet - enter FLOP's testnet contests when they are announced.
 - Fixed pool + "based on what they spend" ⇒ almost certainly **pro-rata**: your share
   ≈ (your inference spend) / (total inference spend by all agents). It is a
   **competitive spend race within a capped pool**, so raw spend relative to other
@@ -145,9 +148,16 @@ exactly), 5 miners, an 8-line `flop-devnet-enroll/v1` challenge naming our SS58 
    (`faucet=skipped_simulation`) so a real claim is never booked into the mock ledger.
 2. `FLOP_SESSION_MODEL_HASH` from the published model catalog; delete
    `FLOP_SESSION_SIM_MODEL_HASH`.
-3. **Gateway backend (the path FLOP published):** `FLOP_SESSION_BACKEND=gateway` and the
-   wallet: secret `FLOP_WALLET_SEED_HEX` (own ed25519 seed, recommended) or
-   `FLOP_WALLET_USE_DID=on` (reuse the DID key). Prompts: `FLOP_GATEWAY_PROMPTS`
+3. **Gateway backend (the path FLOP published):** `FLOP_SESSION_BACKEND=gateway` and
+   **`FLOP_WALLET_USE_DID=on` - the DID key is the FLOP wallet** (SS58
+   `5CFP215CEbCtDduwG1Nzu5rmYXKfHc47wSATUi1oRvrkQnUP` for the current DID). Decided
+   2026-10-24: tclk's FLOP HTLC rail (`@flop-labs/tclk-flop`, tclk #210) binds each party's
+   FLOP account to *the exact Ed25519 key of its `did:key`* and rejects any other wallet,
+   and the airdrop is credited to the account that bought the compute - so buying and
+   any future earning must happen on one account, the DID. Keep it for the whole testnet
+   (switching splits the record across two accounts). Mitigate the single-key risk with
+   the offline seed backup and the on-chain spend limit (item 9). `FLOP_WALLET_SEED_HEX`
+   (separate wallet) stays supported but is not the plan. Prompts: `FLOP_GATEWAY_PROMPTS`
    (`a|b|c`, your own - no shared default, receipts carry `prompt_hash`) or the bodies of
    `FLOP_KIBBLE_REQUEST_QUESTIONS`. If testnet gets its own host, `FLOP_GATEWAY_URL`.
    The agent spends only when `/health` reports `FLOP_GATEWAY_NETWORK` (default `testnet`
@@ -155,7 +165,7 @@ exactly), 5 miners, an 8-line `flop-devnet-enroll/v1` challenge naming our SS58 
    booked). The scaffold mempool path stays for reference: `FLOP_MEMPOOL_URL`,
    `FLOP_RPC_URL`/`FLOP_SUBMIT_URL` (+ `FLOP_TX_MODE`).
 4. `FLOP_FAUCET_ENABLED=on`, `FLOP_FAUCET_URL` (devnet shape:
-   `https://faucet.flop.network/fund`), `FLOP_FAUCET_ADDRESS=<SS58 of the agent wallet>`.
+   `https://faucet.flop.network/fund`), `FLOP_FAUCET_ADDRESS=<SS58 of the DID wallet, item 3>`.
    With an address set the adapter sends the real body and reads the 24 h cooldown from
    the faucet's `/health`, so `auto` waits a full day instead of probing hourly.
    **Verified-human tier (operator only):** prove personhood once on the faucet page with
