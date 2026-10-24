@@ -285,16 +285,24 @@ def horizon(now: int, expires_at_ms) -> int:
 
 
 def window_due(win, remaining: float, now: int, horizon_ts: int, interval: float,
-               margin: float):
+               margin: float, topup_min: float = 10.0):
     """-> (due, win). Rải quota ĐỀU tới hạn theo MỤC TIÊU TUYẾN TÍNH có cộng dồn (như
     flop_pacer): cửa sổ [start, hạn - biên], total = quota lúc mở cửa sổ; mục tiêu tới run
     này = total * (now + interval - start) / (end - start); due = mục tiêu - đã chi.
     Phần nhỏ chưa đủ 1 lần gọi được TÍCH LẠI sang run sau (không bị bỏ).
-    Mở cửa sổ mới khi hạn đổi (allowance/ngày mới) hoặc quota TĂNG (faucet nạp)."""
+    Mở cửa sổ mới khi hạn đổi (allowance/ngày mới) hoặc quota TĂNG ít nhất `topup_min`
+    (faucet nạp). Quota tăng ÍT hơn thế = gateway HOÀN phần giữ chỗ thừa của lần gọi trước
+    (devnet 2026-10-24: giữ chỗ ~6,5, settle khác) -> trừ vào "đã chi", KHÔNG mở cửa sổ mới.
+    Trước đây mỗi lần hoàn tiền đều mở cửa sổ mới: mốc kế hoạch về 0, mất phần chi bù đã tích
+    và cảnh báo tụt lại không bao giờ bắn."""
     win = dict(win) if isinstance(win, dict) else {}
     spent = float(win.get("spent") or 0)
-    if win.get("horizon") != horizon_ts or remaining > float(win.get("total") or 0) - spent + 1e-9:
+    expect = float(win.get("total") or 0) - spent          # quota còn lại nếu không có biến động
+    if win.get("horizon") != horizon_ts or remaining - expect >= topup_min:
         win, spent = {"start": now, "horizon": horizon_ts, "total": float(remaining), "spent": 0.0}, 0.0
+    elif remaining > expect + 1e-9:                         # hoàn tiền nhỏ -> giảm "đã chi"
+        spent = max(0.0, spent - (remaining - expect))
+        win["spent"] = spent
     if remaining <= 0:
         return 0.0, win
     start, end, total = int(win["start"]), horizon_ts - margin, float(win["total"])
@@ -535,9 +543,11 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
             return done("exhausted", reason="quota gateway đã hết", **rs)
 
         hz = horizon(now, g.get("expires_at"))
+        # Ngưỡng coi là faucet NẠP (không phải hoàn tiền): >= 10 FLOP và >= 2 lần cỡ lần gọi gần nhất.
+        topup = max(_env_num("FLOP_GATEWAY_TOPUP_MIN", 10), 2 * float((g.get("last") or {}).get("cost") or 0))
         due, win = window_due(g.get("window"), remaining, now, hz,
                               _env_num("FLOP_GATEWAY_RUN_INTERVAL_SEC", 300),
-                              _env_num("FLOP_GATEWAY_MARGIN_SEC", 1800))
+                              _env_num("FLOP_GATEWAY_MARGIN_SEC", 1800), topup)
         g["window"] = win
         max_calls = max(1, int(_env_num("FLOP_GATEWAY_MAX_CALLS_PER_RUN", 2)))
         pp, pc = _price(model)

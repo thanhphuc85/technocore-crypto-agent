@@ -427,3 +427,28 @@ def test_lag_alert_fires_after_hours_with_the_main_reason_then_recovers(monkeypa
 
 def test_lag_check_is_quiet_without_a_window():
     assert gw.lag_status({}, NOW, "error", pct=10, alert_hours=3, realert_hours=6) == (None, None, None)
+
+
+def test_small_quota_refund_keeps_the_window_and_a_topup_opens_a_new_one():
+    day = 86400
+    due, win = gw.window_due(None, 20000.0, NOW, NOW + day + 1800, 300, 1800, topup_min=13)
+    win["spent"] = 13.0                                          # 2 lần gọi, quota giảm 13
+    # gateway hoàn 1,7 phần giữ chỗ thừa -> quota 19988,7 thay vì 19987: CÙNG cửa sổ
+    due2, w2 = gw.window_due(win, 19988.7, NOW + 3600, NOW + day + 1800, 300, 1800, topup_min=13)
+    assert w2["start"] == NOW and w2["total"] == 20000.0 and w2["spent"] == pytest.approx(11.3)
+    # faucet nạp +500 -> cửa sổ mới
+    due3, w3 = gw.window_due(w2, 20488.7, NOW + 7200, NOW + day + 1800, 300, 1800, topup_min=13)
+    assert w3["start"] == NOW + 7200 and w3["total"] == pytest.approx(20488.7)
+
+
+def test_lag_is_detected_across_refunds(monkeypatch):
+    # Hồi quy: hoàn tiền nhỏ mỗi lượt từng mở cửa sổ mới -> không bao giờ thấy tụt lại.
+    monkeypatch.setenv("FLOP_GATEWAY_MARGIN_SEC", "0")
+    g, rem = {}, 20000.0
+    for h in range(0, 5):
+        now = NOW + h * 3600
+        _, g["window"] = gw.window_due(g.get("window"), rem, now, NOW + 86400, 300, 0, topup_min=13)
+        g["window"]["spent"] = float(g["window"]["spent"]) + 13.0     # chi 13/giờ
+        rem -= 13.0 - 1.5                                              # hoàn 1,5 mỗi lượt
+    line, alert, ok = gw.lag_status(g, NOW + 4 * 3600, "rate_limited", pct=10, alert_hours=3, realert_hours=6)
+    assert line and "tụt lại" in line

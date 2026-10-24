@@ -302,6 +302,8 @@ jobs:
           FLOP_GATEWAY_MAX_WAIT_MS: ${{ vars.FLOP_GATEWAY_MAX_WAIT_MS }}
           # Cảnh báo chi tụt lại: >PCT% cửa sổ trong >=ALERT_HOURS giờ -> Telegram (testnet).
           FLOP_GATEWAY_LAG_PCT: ${{ vars.FLOP_GATEWAY_LAG_PCT }}
+          # Quota tăng từ mức này trở lên = faucet nạp (mở cửa sổ chi mới); ít hơn = hoàn tiền.
+          FLOP_GATEWAY_TOPUP_MIN: ${{ vars.FLOP_GATEWAY_TOPUP_MIN }}
           FLOP_GATEWAY_LAG_ALERT_HOURS: ${{ vars.FLOP_GATEWAY_LAG_ALERT_HOURS }}
           FLOP_GATEWAY_LAG_REALERT_HOURS: ${{ vars.FLOP_GATEWAY_LAG_REALERT_HOURS }}
           FLOP_GATEWAY_MIN_TOKENS: ${{ vars.FLOP_GATEWAY_MIN_TOKENS }}
