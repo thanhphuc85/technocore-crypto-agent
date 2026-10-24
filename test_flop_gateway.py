@@ -34,6 +34,7 @@ class FakeGateway:
         self.expires_ms = expires_ms if expires_ms is not None else (NOW + 20 * 3600) * 1000
         self.calls, self.override, self.challenge_addr, self.host = [], {}, None, "api.flop.network"
         self.report_cost = True                 # devnet thật (2026-10-24) KHÔNG trả usage.cost_flop
+        self.receipt_state = "settled"
         self.receipts = [{"model": "m1", "prompt_hash": "p1", "tee_quote_hash": "t", "block_number": 7,
                           "tx_hash": "0xaa", "miner": "5MinerA"}]
 
@@ -62,6 +63,12 @@ class FakeGateway:
             return Resp(data={"estimated_input_tokens": 20, "estimated_cost_flop": 1.0})
         if path == "/v1/chat/completions":
             self.quota -= self.cost
+            # Biên nhận dạng THẬT của devnet (2026-10-24), trạng thái theo receipt_state.
+            self.receipts.append({"channel_id": f"ch{len(self.calls)}", "created_at": NOW, "model": "m1",
+                                  "request_id": f"req-{len(self.calls)}", "reserved_spend": self.cost,
+                                  "response_status": 200, "settled_spend": self.cost,
+                                  "settled_spend_raw": str(int(self.cost * 10**18)),
+                                  "state": self.receipt_state, "terminal_event": "completed"})
             return Resp(data={"id": f"chatcmpl-{len(self.calls)}", "object": "chat.completion", "created": NOW,
                               "model": "m1", "choices": [{"index": 0, "finish_reason": "stop",
                                                           "message": {"role": "assistant", "content": "ok"}}],
@@ -149,9 +156,10 @@ def test_happy_path_enrolls_signs_spends_and_never_stores_the_bearer(monkeypatch
     chats = [c for c in fake.calls if c[1] == "/v1/chat/completions"]
     assert all(c[2]["Authorization"] == f"Bearer {BEARER}" for c in chats)
     assert all(0 < c[3]["max_cost_flop"] <= r["due"] / 2 * 1.1 + 1e-9 for c in chats)   # trần do gateway giữ
-    assert [b[0] for b in booked] == [0.9, 0.9] and booked[0][1].startswith("chatcmpl-")
+    assert booked == []                                                  # chưa ghi khi chỉ mới gọi
     assert BEARER not in json.dumps(state)                               # chỉ bản mã
-    assert state[gw.KEY]["stats"]["receipts"] == 1
+    _run(state, fake, booked)                                            # run sau: biên nhận đã settle -> ghi
+    assert [b[0] for b in booked] == [0.9, 0.9] and booked[0][1].startswith("req-")
 
 
 def test_second_run_reuses_the_sealed_bearer_and_receipts_count_once(monkeypatch):
@@ -159,7 +167,10 @@ def test_second_run_reuses_the_sealed_bearer_and_receipts_count_once(monkeypatch
     _run(state, fake)
     fake.calls.clear()
     r = _run(state, fake)
-    assert "/v1/enroll/wallet" not in fake.paths() and r["receipts_new"] == 0
+    assert "/v1/enroll/wallet" not in fake.paths()
+    assert r["receipts_new"] == 2 and r["receipts_total"] == 3        # 2 biên nhận của run trước, đếm 1 lần
+    fake.calls.clear()
+    assert _run(state, fake)["receipts_new"] == 2                      # chỉ phần mới, không lặp
 
 
 def test_expiring_bearer_is_re_enrolled():
@@ -288,7 +299,12 @@ def test_spend_is_taken_from_the_gateway_quota_when_usage_has_no_cost(monkeypatc
     fake, booked, state = FakeGateway(expires_ms=SOON, cost=6.513), [], {}
     fake.report_cost = False
     r = _run(state, fake, booked)
-    assert r["calls"] == 2 and [round(b[0], 3) for b in booked] == [6.513, 6.513]
+    assert r["calls"] == 2 and booked == []                              # ghi khi biên nhận settle (run sau)
+    fake.override[("POST", "/v1/chat/completions")] = Resp(429, {"error": "busy"}, {"Retry-After": "1"})
+    st2 = {gw.KEY: {**state[gw.KEY], "wait_until": 0}}
+    gw.run_step(st2, agent_key=_key("22"), http=fake, now=NOW + 300, prompts=["q"], expect_network="devnet",
+                book_fn=lambda c, ref, m: booked.append((c, ref, m)), sleep=lambda s: None, log=lambda *a: None)
+    assert [round(b[0], 3) for b in booked] == [6.513, 6.513]
     assert r["last"]["src"] == "quota" and r["spent"] == pytest.approx(13.026)
     assert state[gw.KEY]["window"]["spent"] == pytest.approx(13.026)      # nhịp chi tiến lên, không kẹt 0
 
@@ -336,3 +352,30 @@ def test_missing_receipts_log_the_endpoint_shape_without_content():
     gw.run_step({}, agent_key=_key("22"), http=fake2, now=NOW, prompts=["q"], expect_network="devnet",
                 sleep=lambda s: None, log=logs2.append)
     assert any("HTTP 403 owner_credential" in x for x in logs2)
+
+
+def test_only_settled_receipts_are_booked_once_even_when_they_settle_later():
+    fake, booked, state = FakeGateway(expires_ms=SOON), [], {}
+    fake.receipts = []
+    fake.receipt_state = "pending"
+    r1 = _run(state, fake, booked)
+    assert r1["calls"] == 2 and booked == [] and r1["receipts_new"] == 0      # chưa settle -> chưa ghi
+    for rc in fake.receipts:
+        rc["state"] = "settled"
+    fake.override[("POST", "/v1/chat/completions")] = Resp(429, {"error": "busy"}, {"Retry-After": "1"})
+    st2 = dict(state)
+    st2[gw.KEY] = {**state[gw.KEY], "wait_until": 0}
+    gw.run_step(st2, agent_key=_key("22"), http=fake, now=NOW + 300, prompts=["q"], expect_network="devnet",
+                book_fn=lambda c, ref, m: booked.append((c, ref)), sleep=lambda s: None, log=lambda *a: None)
+    gw.run_step(st2, agent_key=_key("22"), http=fake, now=NOW + 900, prompts=["q"], expect_network="devnet",
+                book_fn=lambda c, ref, m: booked.append((c, ref)), sleep=lambda s: None, log=lambda *a: None)
+    assert len(booked) == 2 and len({ref for _, ref in booked}) == 2   # settle muộn: ghi, mỗi cái 1 lần
+    assert all(ref.startswith("req-") for _, ref in booked)
+
+
+def test_settled_amount_rules():
+    assert gw.settled_amount({"state": "settled", "settled_spend": "6.5"}) == 6.5
+    assert gw.settled_amount({"state": "pending", "settled_spend": 0}) is None
+    assert gw.settled_amount({"state": "failed", "settled_spend": 3}) is None
+    assert gw.settled_amount({"state": "weird", "settled_spend": 2}) == 2       # có settle > 0, trạng thái lạ
+    assert gw.settled_amount({"block_number": 7}) == 0.0                         # dạng OpenAPI cũ

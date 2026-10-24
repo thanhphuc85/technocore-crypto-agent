@@ -3462,7 +3462,8 @@ def test_gateway_step_books_only_on_testnet(monkeypatch):
     import flop_gateway
     seen = {}
     monkeypatch.setattr(flop_gateway, "run_step", lambda state, **k: seen.update(k) or
-                        {"outcome": "spent", "calls": 2, "spent": 1.8, "due": 1.8, "remaining": 20})
+                        {"outcome": "spent", "calls": 2, "spent": 1.8, "due": 1.8, "remaining": 20,
+                         "receipts_new": 2, "settled_new": 1.8, "receipts_total": 2, "settled_total": 1.8})
     monkeypatch.setattr(ac, "save_state", lambda d: None)
     monkeypatch.setenv("FLOP_GATEWAY_PROMPTS", "q")
     monkeypatch.delenv("TESTNET_ENABLED", raising=False)

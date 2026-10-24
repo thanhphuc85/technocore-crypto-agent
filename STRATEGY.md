@@ -199,10 +199,14 @@ exactly), 5 miners, an 8-line `flop-devnet-enroll/v1` challenge naming our SS58 
    it, you lose it"). Wrong work is already handled by the protocol — the agent pays
    nothing and can challenge (100 FLOP bond; upheld fraud slashes the miner in full).
 8. **Settlement / payment model (code, from the real API).** *Gateway backend:* the gateway
-   charges the enrolled allowance per request (`usage.cost_flop`, booked per call with the
-   response id) and lists on-chain receipts (`block_number`, `tx_hash`, `miner`) at
-   `/v1/keys/me/receipts`; the agent counts new receipts and feeds their miners to the
-   `[miners]` concentration line. A `402` with x402 fields (`price`, `asset`, `hash_lock`,
+   charges the enrolled allowance per request. Measured on devnet (2026-10-24): `usage` has
+   only token counts (no `cost_flop`), so pacing reads the spend from the `/keys/me` quota;
+   `/v1/keys/me/receipts` does **not** follow the OpenAPI `InferenceReceipt` schema - each
+   receipt has `channel_id`, `request_id`, `reserved_spend`, `settled_spend(_raw)`, `state`,
+   `response_status`, `terminal_event`. The testnet ledger is booked **from settled
+   receipts** (`settled_spend`, deduped by `request_id`), i.e. exactly "compute purchased
+   in settled sessions"; receipts are read at the start of every run, so late settlements
+   are booked even when that run's calls fail. A `402` with x402 fields (`price`, `asset`, `hash_lock`,
    `destination`, `timeout_blocks`) is **logged and never paid automatically** - fit that
    by hand if testnet uses pay-per-request. *Scaffold mempool backend:* the scaffold assumes the proof
    comes back in the mempool response and then pays with a separate signed transfer that

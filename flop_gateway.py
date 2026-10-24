@@ -336,7 +336,35 @@ def _completion_cap(model: dict, default: int) -> int:
 
 
 def _receipt_key(r: dict) -> str:
-    return str(r.get("tx_hash") or f"{r.get('block_number')}:{r.get('prompt_hash')}")[:96]
+    return str(r.get("request_id") or r.get("tx_hash") or r.get("channel_id")
+               or f"{r.get('block_number')}:{r.get('prompt_hash')}")[:96]
+
+
+# Biên nhận THẬT của devnet (2026-10-24) KHÔNG theo schema InferenceReceipt của OpenAPI: không có
+# block_number/tx_hash mà có channel_id, request_id, reserved_spend, settled_spend(_raw), state,
+# response_status, terminal_event. "Đã settle" = state thuộc nhóm dưới / có block_number / có
+# settled_spend > 0 mà state không thuộc nhóm chưa-xong.
+_SETTLED_STATES = {"settled", "finalized", "final", "complete", "completed", "success", "succeeded", "paid"}
+_OPEN_STATES = {"pending", "reserved", "open", "opened", "in_flight", "inflight", "running", "submitted",
+                "failed", "error", "refunded", "released", "cancelled", "canceled", "expired", "rejected"}
+
+
+def _num(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def settled_amount(rc: dict):
+    """FLOP đã settle của 1 biên nhận, hoặc None nếu chưa settle."""
+    st = str(rc.get("state") or "").strip().lower()
+    amt = _num(rc.get("settled_spend"))
+    if rc.get("block_number") is not None or st in _SETTLED_STATES:
+        return amt or 0.0
+    if amt and amt > 0 and st not in _OPEN_STATES:
+        return amt
+    return None
 
 
 # --- một nhịp ---------------------------------------------------------------------------
@@ -399,9 +427,47 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
             backoff(1800, "model_not_advertised")
             return done("model_unavailable", reason=f"model {model_id} không còn trong catalog")
         model = models[model_id]
+
+        def collect(prev_calls: int) -> dict:
+            """Đọc biên nhận; ghi sổ (book_fn) MỖI biên nhận mới ĐÃ SETTLE theo settled_spend —
+            đúng thước đo "compute purchased in settled sessions". Dedupe theo request_id."""
+            seen = list(g.get("receipts_seen") or [])
+            new, amt, hist = [], 0.0, {}
+            try:
+                items, shape = receipts_detail(http, base, bearer)
+            except GatewayError as e:
+                items, shape = [], f"HTTP {e.status} {e.code}".strip()
+            for rc in items:
+                key = f"{rc.get('state')}/{rc.get('response_status')}"
+                hist[key] = hist.get(key, 0) + 1
+                k = _receipt_key(rc)
+                a = settled_amount(rc)
+                if a is None or k in seen:
+                    continue
+                seen.append(k)
+                new.append(rc)
+                amt += a
+                if book_fn and a > 0:
+                    book_fn(a, k[:80], str(rc.get("model") or model_id))
+            g["receipts_seen"] = seen[-200:]
+            st = dict(g.get("stats") or {})
+            st["receipts"] = int(st.get("receipts") or 0) + len(new)
+            st["settled"] = round(float(st.get("settled") or 0) + amt, 6)
+            g["stats"] = st
+            if prev_calls or new or not st["receipts"]:      # chưa từng thấy biên nhận -> luôn in hình dạng
+                log(f"[gateway] biên nhận: settled +{len(new)} ({round(amt, 6)} FLOP) | "
+                    f"{', '.join(f'{k}={v}' for k, v in sorted(hist.items())) or shape}")
+            return {"receipts_new": len(new), "settled_new": round(amt, 6),
+                    "receipts_total": st["receipts"], "settled_total": st["settled"],
+                    "miners": [str(x.get("miner") or "") for x in new if x.get("miner")]}
+
+        # Đọc biên nhận TRƯỚC khi gọi: biên nhận settle muộn (của các run trước) luôn được ghi,
+        # kể cả khi lần gọi run này lỗi (429/503) hay chưa tới nhịp.
+        rs = collect(int(g.get("last_calls") or 0))
+        g["last_calls"] = 0
         if remaining <= 0:
             backoff(1800, "quota_exhausted")
-            return done("exhausted", reason="quota gateway đã hết")
+            return done("exhausted", reason="quota gateway đã hết", **rs)
 
         hz = horizon(now, g.get("expires_at"))
         due, win = window_due(g.get("window"), remaining, now, hz,
@@ -422,7 +488,7 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
         ptok = int(est.get("estimated_input_tokens") or len(pick[0]) // 4)
         min_cost = ptok * pp + min_tok * pc
         if due < min_cost or min_cost <= 0:
-            return done("pace_wait", due=round(due, 6), remaining=remaining,
+            return done("pace_wait", due=round(due, 6), remaining=remaining, **rs,
                         reason=f"đến hạn {due:.4f} < giá tối thiểu 1 lần gọi {min_cost:.4f} — tích sang run sau")
         n = min(max_calls, max(1, int(due // min_cost)))      # gọi ít mà to, không nhiều mà vụn
         per_call = min(due / n, remaining)
@@ -462,8 +528,6 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
                 # Không có cost_flop lẫn quota giảm -> KHÔNG ghi sổ theo ước tính; in khoá thật.
                 last["usage_keys"] = sorted(u)[:10]
                 log(f"[gateway] ⚠️ không xác định được số đã chi (usage keys: {last['usage_keys']})")
-            if book_fn and cost > 0:
-                book_fn(cost, str(r.get("id") or "")[:80], model_id)
             if g.get("tok_cap"):                       # ổn định 12 lần liền -> thử cỡ lớn hơn 25%
                 g["tok_ok"] = int(g.get("tok_ok") or 0) + 1
                 if g["tok_ok"] >= 12:
@@ -476,31 +540,15 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
                 break
         g["prompt_idx"] = (idx + calls) % max(1, len(prompts) or 1)
 
-        seen = list(g.get("receipts_seen") or [])
-        new = []
-        try:
-            items, shape = receipts_detail(http, base, bearer)
-            for rc in items:
-                k = _receipt_key(rc)
-                if rc.get("block_number") is not None and k not in seen:
-                    new.append(rc)
-                    seen.append(k)
-        except GatewayError as e:
-            shape = f"HTTP {e.status} {e.code}".strip()
-        if calls and not new and int((g.get("stats") or {}).get("receipts") or 0) == 0:
-            log(f"[gateway] chưa có biên nhận on-chain — /keys/me/receipts: {shape}")
-        g["receipts_seen"] = seen[-200:]
+        g["last_calls"] = calls
         st = dict(g.get("stats") or {})
         st["calls"] = int(st.get("calls") or 0) + calls
         st["spent"] = round(float(st.get("spent") or 0) + spent, 6)
-        st["receipts"] = int(st.get("receipts") or 0) + len(new)
         g["stats"] = st
         g["last"] = last
         g["remaining"] = max(0.0, min(quota_now, remaining - spent))
         return done("spent" if calls else "pace_wait", calls=calls, spent=round(spent, 6),
-                    due=round(due, 6), remaining=g["remaining"], receipts_new=len(new),
-                    miners=[str(x.get("miner") or "") for x in new if x.get("miner")],
-                    model=model_id, last=last, receipts_total=st["receipts"])
+                    due=round(due, 6), remaining=g["remaining"], model=model_id, last=last, **rs)
     except GatewayError as e:
         if e.status == 401:
             g.pop("vault", None)                              # bearer chết -> enroll lại run sau

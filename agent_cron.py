@@ -4167,7 +4167,8 @@ def gateway_session_step(state: dict, private_key, now: int):
     _l = r.get("last") or {}
     detail = (f" spent={r.get('spent')} due={r.get('due')} quota={r.get('remaining')}"
               + (f" tokens={_l.get('tokens')} src={_l.get('src')}" if _l else "")
-              + (f" receipts={r.get('receipts_total')}" if r.get("receipts_total") is not None else "")
+              + (f" settled={r.get('settled_total')}/{r.get('receipts_total')}rc"
+                 if r.get("receipts_total") is not None else "")
               if oc in ("spent", "pace_wait") else "")
     print(f"[session] {status}{detail}{tag}")
     if r.get("reason"):
@@ -4186,7 +4187,8 @@ def gateway_session_step(state: dict, private_key, now: int):
             save_state({_miner_stats_key(): _miner_stats})
         except Exception as e:
             print(f"[miners] bỏ qua ({str(e)[:80]})")
-    settled = int(r.get("calls") or 0) if (testnet and oc == "spent") else 0
+    # "Đã settle" = biên nhận settle mới run này (ghi sổ theo settled_spend), không phải số lần gọi.
+    settled = int(r.get("receipts_new") or 0) if testnet else 0
     last = {"stage": "gateway", "outcome": "spent_onchain" if settled else oc,
             "reason": r.get("reason", "")}
     return status, settled, last
