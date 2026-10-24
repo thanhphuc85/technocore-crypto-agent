@@ -379,6 +379,7 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
     g = state.get(KEY) if isinstance(state.get(KEY), dict) else {}
     g = dict(g)
     out = {"outcome": "?", "calls": 0, "spent": 0.0}
+    calls, spent = 0, 0.0                    # giữ được cả khi lần gọi sau lỗi (báo đúng số đã gọi)
 
     def done(outcome, **kw):
         out.update(outcome=outcome, **kw)
@@ -550,6 +551,7 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
         return done("spent" if calls else "pace_wait", calls=calls, spent=round(spent, 6),
                     due=round(due, 6), remaining=g["remaining"], model=model_id, last=last, **rs)
     except GatewayError as e:
+        out.update(calls=calls, spent=round(spent, 6))   # lần gọi thành công TRƯỚC lỗi vẫn được báo
         if e.status == 401:
             g.pop("vault", None)                              # bearer chết -> enroll lại run sau
             return done("auth_reset", reason=f"401 {e.code} — enroll lại ở run sau")

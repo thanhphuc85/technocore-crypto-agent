@@ -386,3 +386,21 @@ def test_real_devnet_states_estimated_and_released_are_not_settled():
     assert gw.settled_amount({"state": "estimated", "settled_spend": 6.4}) is None
     assert gw.settled_amount({"state": "released", "response_status": 503, "settled_spend": 0}) is None
     assert gw.settled_amount({"state": "settled", "response_status": 200, "settled_spend": "6.462"}) == 6.462
+
+
+def test_calls_made_before_a_503_are_still_reported(monkeypatch):
+    # Devnet 2026-10-24: 4 lần/lượt, lần thứ 3 gặp 503 -> trước đây dòng [session] báo "0✓".
+    monkeypatch.setenv("FLOP_GATEWAY_MAX_CALLS_PER_RUN", "4")
+    fake, n = FakeGateway(quota=20000.0, expires_ms=SOON), {"chat": 0}
+    real = fake.__call__
+
+    def flaky(method, url, headers=None, json=None, timeout=None):
+        if url.endswith("/chat/completions"):
+            n["chat"] += 1
+            if n["chat"] == 3:
+                return Resp(503, {"error": {"code": "provider_error", "message": ""}}, {"Retry-After": "1"})
+        return real(method, url, headers=headers, json=json, timeout=timeout)
+
+    r = gw.run_step({}, agent_key=_key("22"), http=flaky, now=NOW, prompts=["q"], expect_network="devnet",
+                    sleep=lambda s: None, log=lambda *a: None)
+    assert r["outcome"] == "rate_limited" and r["calls"] == 2 and r["spent"] == pytest.approx(1.8)
