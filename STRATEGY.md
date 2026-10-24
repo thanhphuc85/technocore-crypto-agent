@@ -172,8 +172,15 @@ exactly), 5 miners, an 8-line `flop-devnet-enroll/v1` challenge naming our SS58 
    BrightID or Self *on the agent's FLOP address*, then set `FLOP_FAUCET_TIER=linked` and
    `FLOP_FAUCET_PROVIDER=brightid|self`; the agent then requests the larger grant daily.
    The MetaMask/SIWE path (Human Passport / Guild score) needs a fresh human signature
-   every claim, so the agent refuses it - claim that way by hand. One human proof, one
-   address: never link the same identity to several wallets. Already set and inert until then:
+   every claim, so the agent refuses it - claim that way by hand **and set
+   `FLOP_FAUCET_TIER=manual`**. ⚠️ **Trap (measured on devnet 2026-10-24):** the 24 h cooldown
+   is shared by every tier on one address - after a quick 25 FLOP grant the verified request
+   is refused ("this address was just funded"). An agent left on `quick` would take the 25
+   first every day and block the 500-2000 grant. Pick one per address: `manual` (you claim
+   verified by hand), `linked` (agent claims verified via BrightID/Self) or `quick` (no
+   human proof). On `quick` the agent sends a one-time Telegram reminder of this. One human
+   proof, one address: never link the same identity to several wallets. Already set and
+   inert until then:
    `FLOP_FAUCET_COOLDOWN_HOURS=auto` (probe hourly, then follow the faucet's
    `Retry-After` / `next_claim_at`), `FLOP_FAUCET_MAX_PER_DAY=24`, `FLOP_FAUCET_JITTER_MIN=0`.
    If FLOP publishes a fixed period/cap, set those numbers instead. Only use URLs FLOP

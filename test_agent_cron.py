@@ -3538,3 +3538,22 @@ def test_gateway_lag_alert_goes_to_telegram_only_on_testnet(monkeypatch):
     monkeypatch.setenv("TESTNET_ENABLED", "true")
     ac.gateway_session_step({}, _real_key(), 1_800_000_000)
     assert sent == ["ALERT"]
+
+
+def test_faucet_manual_tier_never_claims_and_quick_warns_once(monkeypatch):
+    # Devnet 2026-10-24: chu kỳ 24h tính chung mọi mức -> lượt quick của agent chặn lượt
+    # Verified operator tự xin bằng MetaMask. manual = agent không xin; quick = nhắc 1 lần.
+    import flop_faucet
+    monkeypatch.setenv("FLOP_FAUCET_ENABLED", "on")
+    monkeypatch.setenv("FLOP_FAUCET_TIER", "manual")
+    monkeypatch.setattr(flop_faucet, "run_faucet_cycle", lambda **k: pytest.fail("manual không được xin"))
+    assert ac.faucet_step({}, None, None) == "manual"
+    sent = []
+    monkeypatch.setattr(ac, "_telegram_send", lambda t: sent.append(t) or True)
+    monkeypatch.setattr(ac, "save_state", lambda d: None)
+    monkeypatch.setenv("FLOP_FAUCET_TIER", "quick")
+    monkeypatch.delenv("TESTNET_ENABLED", raising=False)            # dừng ở skipped_simulation
+    state = {}
+    ac.faucet_step(state, None, None)
+    ac.faucet_step(state, None, None)
+    assert len(sent) == 1 and "FLOP_FAUCET_TIER=manual" in sent[0]

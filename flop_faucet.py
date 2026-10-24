@@ -17,7 +17,9 @@ Env:
   FLOP_FAUCET_ADDRESS       địa chỉ SS58 nhận FLOP. Có -> gửi đúng định dạng faucet.flop.network
                             (`POST /fund {"address": ...}`) và học chu kỳ từ <origin>/health.
                             Kiểm checksum trước khi gửi (sai 1 ký tự = mất FLOP).
-  FLOP_FAUCET_TIER          quick (mặc định, 25 FLOP) | linked (verified human, 500-2000).
+  FLOP_FAUCET_TIER          quick (mặc định, 25 FLOP) | linked (verified human, 500-2000)
+                            | manual (operator tự xin Verified bằng MetaMask -> agent KHÔNG xin:
+                            chu kỳ 24h tính chung mọi mức, lượt quick sẽ chặn lượt Verified).
   FLOP_FAUCET_PROVIDER      với linked: brightid | self — chứng minh người thật đã được NGƯỜI
                             gắn vào địa chỉ này. MetaMask/SIWE cần người ký mỗi lần -> agent từ chối.
   FLOP_FAUCET_AMOUNT        lượng dự kiến mỗi claim (mặc định 100).

@@ -3194,7 +3194,7 @@ def _faucet_body(req: dict):
                                "(đã gắn chứng minh vào địa chỉ này); đường MetaMask/SIWE phải bấm tay")
         body.update({"tier": "linked", "provider": provider})
     elif tier not in ("quick", ""):
-        raise RuntimeError(f"FLOP_FAUCET_TIER={tier!r} không hỗ trợ (quick|linked)")
+        raise RuntimeError(f"FLOP_FAUCET_TIER={tier!r} không hỗ trợ (quick|linked|manual)")
     return body, True
 
 
@@ -3298,6 +3298,23 @@ def faucet_step(state: dict, private_key, did) -> str:
     đều tưởng chưa claim lần nào: gõ faucet 288 lần/ngày, trần ngày vô tác dụng."""
     if os.environ.get("FLOP_FAUCET_ENABLED", "").strip().lower() not in ("1", "true", "on", "yes"):
         return "off"
+    # Chu kỳ 24h của faucet tính CHUNG cho mọi mức trên một địa chỉ (đo devnet 2026-10-24: nhận
+    # quick 25 xong thì xin Verified báo "vừa được cấp vốn"). Operator tự xin Verified bằng
+    # MetaMask (ký tay mỗi ngày) -> FLOP_FAUCET_TIER=manual: agent KHÔNG xin, để lượt 24h đó
+    # dành cho mức 500-2000.
+    tier = os.environ.get("FLOP_FAUCET_TIER", "").strip().lower() or "quick"
+    if tier == "manual":
+        print("[faucet] manual — operator tự xin mức Verified; agent không xin để không chặn lượt 24h")
+        return "manual"
+    if tier == "quick" and not state.get("faucet_quick_warned"):
+        msg = ("ℹ️ Faucet: agent đang tự xin mức QUICK (25 FLOP/ngày). Chu kỳ 24h tính chung mọi mức "
+               "trên địa chỉ này, nên nếu anh định tự xin mức Verified (500–2000) bằng MetaMask thì "
+               "lượt quick của agent sẽ CHẶN nó. Khi đó đặt FLOP_FAUCET_TIER=manual; còn nếu đã gắn "
+               "BrightID/Self vào ví thì đặt FLOP_FAUCET_TIER=linked + FLOP_FAUCET_PROVIDER.")
+        print(f"[faucet] {msg}")
+        if _telegram_send(msg):
+            state["faucet_quick_warned"] = int(time.time())
+            save_state({"faucet_quick_warned": state["faucet_quick_warned"]})
     try:
         import token_manager
         if not token_manager.testnet_enabled():
