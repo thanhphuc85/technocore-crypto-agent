@@ -3571,3 +3571,19 @@ def test_last_queued_job_is_followed_by_an_operator_prompt(monkeypatch):
     p = seen["prompts"]
     assert "Only job" in p[0] and p[1].startswith("OpA") and len(set(p)) == len(p)
     assert state["gateway_jobs"] == [] and state["gateway_op_idx"] == 1   # lần sau bắt đầu từ OpB
+
+
+def test_capped_room_skips_periodic_posts_without_failing(monkeypatch):
+    # Hai fork đo được 2026-10-24: lobby 20/20 -> telemetry/manifest/status-feed báo "fail" và
+    # thử lại MỖI lượt. Hết hạn mức không phải lỗi: bỏ qua tới ngày mới, không dựng nội dung.
+    import flop_governor
+    monkeypatch.setattr(ac, "POST_GOVERNOR", True)
+    now = 1_800_000_000
+    ac._post_gov_state.clear()
+    ac._post_gov_state[flop_governor.KEY] = {"day": flop_governor._today(now),
+                                             "rooms": {ac.ROOM: 10_000}, "alerted": []}
+    monkeypatch.setattr(ac.time, "time", lambda: now)
+    assert ac.room_capped(ac.ROOM) is True
+    assert ac.room_capped("some-quiet-room") is False
+    monkeypatch.setattr(ac, "POST_GOVERNOR", False)
+    assert ac.room_capped(ac.ROOM) is False

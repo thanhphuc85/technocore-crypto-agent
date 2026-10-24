@@ -59,6 +59,19 @@ def _fresh(state: dict, now) -> dict:
     return pc
 
 
+def is_capped(state: dict, room: str, caps: dict, now) -> bool:
+    """Phòng đã chạm trần hôm nay chưa — CHỈ ĐỌC (không đổi state, không tiêu cảnh báo).
+    Để caller bỏ qua việc đăng định kỳ TRƯỚC khi tốn công dựng nội dung."""
+    pc = state.get(KEY) if isinstance(state.get(KEY), dict) else {}
+    if pc.get("day") != _today(now):
+        return False
+    try:
+        n = int((pc.get("rooms") or {}).get(room, 0))
+    except (TypeError, ValueError):
+        return False
+    return n >= cap_for(caps, room)
+
+
 def check(state: dict, room: str, caps: dict, now) -> dict:
     """Được đăng thêm 1 tin vào `room` không? KHÔNG tăng đếm (chỉ tăng khi đăng thành công).
     Trả {allowed, count, cap, alert}: `alert` là chuỗi báo động khi phòng VỪA chạm trần lần

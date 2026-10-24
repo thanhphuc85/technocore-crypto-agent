@@ -76,3 +76,15 @@ def test_garbage_state_does_not_crash():
     r = g.check(st, "kibble", CAPS, DAY1)
     assert r["allowed"] and r["count"] == 3 and st[g.KEY]["alerted"] == ["a"]
     assert "kibble 3/1300" in g.summary_line(st, CAPS, DAY1)
+
+
+def test_is_capped_is_read_only_and_resets_next_day():
+    st = {}
+    for i in range(CAPS["lobby"] if "lobby" in CAPS else g.cap_for(CAPS, "lobby")):
+        _post(st, "lobby", DAY1 + i)
+    before = repr(st)
+    assert g.is_capped(st, "lobby", CAPS, DAY1 + 100) is True
+    assert repr(st) == before                                   # không đổi state, không tiêu cảnh báo
+    assert g.check(st, "lobby", CAPS, DAY1 + 101)["alert"]       # cảnh báo vẫn còn cho lần chặn thật
+    assert g.is_capped(st, "lobby", CAPS, DAY1 + 86400) is False # sang ngày UTC mới
+    assert g.is_capped({}, "flop", CAPS, DAY1) is False

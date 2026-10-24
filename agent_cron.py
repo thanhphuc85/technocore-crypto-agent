@@ -1251,6 +1251,15 @@ def _post_caps() -> dict:
     return flop_governor.parse_caps(os.environ.get("FLOP_POST_CAPS", ""))
 
 
+def room_capped(room: str) -> bool:
+    """Phòng đã hết hạn mức đăng hôm nay (governor)? Hết hạn mức KHÔNG phải lỗi đường ghi:
+    bài đăng định kỳ bỏ qua tới ngày UTC mới, không báo "fail" và không gõ lại mỗi lượt."""
+    if not POST_GOVERNOR:
+        return False
+    import flop_governor as _gov
+    return _gov.is_capped(_post_gov_state, room, _post_caps(), time.time())
+
+
 def post_message(private_key, did, text, room=ROOM) -> bool:
     if POST_GOVERNOR:
         import flop_governor as _gov
@@ -4359,7 +4368,10 @@ def main():
     tele_status = "skip"
     if force or _due(state, "last_telemetry", TELEMETRY_INTERVAL_H, now,
                      phase_s=_did_cadence_offset(did)):
-        if broadcast_telemetry(private_key, did):
+        if room_capped(ROOM):
+            tele_status = "cap"
+            print(f"[telemetry] r/{ROOM} đã hết hạn mức hôm nay — chờ sang ngày UTC mới (không phải lỗi)")
+        elif broadcast_telemetry(private_key, did):
             save_state({"last_telemetry": now})
             tele_status = "ok"
         else:
@@ -4373,7 +4385,10 @@ def main():
     #     Cùng nguyên tắc: chỉ đóng cổng khi post thành công.
     manifest_status = "skip"
     if _due(state, "last_manifest", MANIFEST_INTERVAL_H, now):
-        if broadcast_manifest(private_key, did):
+        if room_capped(MANIFEST_ROOM):
+            manifest_status = "cap"
+            print(f"[manifest] r/{MANIFEST_ROOM} đã hết hạn mức hôm nay — chờ sang ngày UTC mới (không phải lỗi)")
+        elif broadcast_manifest(private_key, did):
             save_state({"last_manifest": now})
             manifest_status = "ok"
         else:
@@ -4400,7 +4415,9 @@ def main():
     digest_status = "off"
     if DIGEST_ENABLED:
         if _due(state, "last_digest", DIGEST_INTERVAL_H, now):
-            if broadcast_digest(private_key, did):
+            if room_capped(ROOM):
+                digest_status = "cap"           # kiểm TRƯỚC: digest tốn 1 lần suy luận LLM
+            elif broadcast_digest(private_key, did):
                 save_state({"last_digest": now})
                 digest_status = "ok"
             else:
@@ -4424,6 +4441,8 @@ def main():
                 status_feed_status = "skip-outage"
                 print("[status-feed] bỏ qua — đường ghi technocore.chat đang lỗi "
                       f"(post ok={_post_ok_count} fail={_post_fail_count}); không cố post.")
+            elif not STATUS_FEED_DRY_RUN and room_capped(STATUS_FEED_ROOM):
+                status_feed_status = "cap"
             elif broadcast_status_feed(private_key, did, state):
                 save_state({"last_status_feed": now})
                 status_feed_status = "dry" if STATUS_FEED_DRY_RUN else "ok"
@@ -4446,7 +4465,9 @@ def main():
             state["last_recap"] = now
             recap_status = "seed"
         elif _due(state, "last_recap", RECAP_INTERVAL_H, now):
-            if broadcast_recap(private_key, did, state, now):
+            if room_capped(ROOM):
+                recap_status = "cap"
+            elif broadcast_recap(private_key, did, state, now):
                 save_state({"last_recap": now})
                 recap_status = "ok"
             else:
