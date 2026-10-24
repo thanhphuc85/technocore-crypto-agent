@@ -322,3 +322,17 @@ def test_oversized_request_halves_the_learned_cap_and_errors_parse_openai_shape(
         sizes.append((r["outcome"], state[gw.KEY].get("tok_cap")))
     assert sizes[0] == ("no_miner", 4096) and "provider_error" in gw.GatewayError(503, "provider_error").code
     assert ("spent", 1024) in sizes                                      # hạ dần 8192 -> 4096 -> 2048 -> 1024
+
+
+def test_missing_receipts_log_the_endpoint_shape_without_content():
+    fake, logs = FakeGateway(expires_ms=SOON), []
+    fake.override[("GET", "/v1/keys/me/receipts")] = Resp(data={"object": "list", "results": [], "grant": "x"})
+    gw.run_step({}, agent_key=_key("22"), http=fake, now=NOW, prompts=["q"], expect_network="devnet",
+                sleep=lambda s: None, log=logs.append)
+    line = next(x for x in logs if "biên nhận" in x)
+    assert "keys=['grant', 'object', 'results']" in line
+    fake2, logs2 = FakeGateway(expires_ms=SOON), []
+    fake2.override[("GET", "/v1/keys/me/receipts")] = Resp(403, {"error": "owner_credential"})
+    gw.run_step({}, agent_key=_key("22"), http=fake2, now=NOW, prompts=["q"], expect_network="devnet",
+                sleep=lambda s: None, log=logs2.append)
+    assert any("HTTP 403 owner_credential" in x for x in logs2)

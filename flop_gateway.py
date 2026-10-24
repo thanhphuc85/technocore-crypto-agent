@@ -242,12 +242,20 @@ def me(http, base: str, bearer: str) -> dict:
     return _call(http, "GET", base + "/keys/me", bearer=bearer)
 
 
-def receipts(http, base: str, bearer: str) -> list:
+def receipts_detail(http, base: str, bearer: str):
+    """(biên nhận, hình dạng). Hình dạng = các KHOÁ + số mục, không có nội dung — để log biết
+    endpoint thật trả gì khi không tìm thấy biên nhận (devnet 2026-10-24: 6 lần chi, 0 biên nhận)."""
     d = _call(http, "GET", base + "/keys/me/receipts", bearer=bearer)
     for k in ("receipts", "data", "items"):
         if isinstance(d.get(k), list):
-            return [x for x in d[k] if isinstance(x, dict)]
-    return []
+            items = [x for x in d[k] if isinstance(x, dict)]
+            first = sorted(items[0])[:12] if items else []
+            return items, f"{k}[{len(items)}] item_keys={first}"
+    return [], f"keys={sorted(d)[:12]}"
+
+
+def receipts(http, base: str, bearer: str) -> list:
+    return receipts_detail(http, base, bearer)[0]
 
 
 def estimate(http, base: str, model: str, prompt: str, max_tokens: int) -> dict:
@@ -471,13 +479,16 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
         seen = list(g.get("receipts_seen") or [])
         new = []
         try:
-            for rc in receipts(http, base, bearer):
+            items, shape = receipts_detail(http, base, bearer)
+            for rc in items:
                 k = _receipt_key(rc)
                 if rc.get("block_number") is not None and k not in seen:
                     new.append(rc)
                     seen.append(k)
-        except GatewayError:
-            pass
+        except GatewayError as e:
+            shape = f"HTTP {e.status} {e.code}".strip()
+        if calls and not new and int((g.get("stats") or {}).get("receipts") or 0) == 0:
+            log(f"[gateway] chưa có biên nhận on-chain — /keys/me/receipts: {shape}")
         g["receipts_seen"] = seen[-200:]
         st = dict(g.get("stats") or {})
         st["calls"] = int(st.get("calls") or 0) + calls
