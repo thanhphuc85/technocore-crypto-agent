@@ -113,7 +113,7 @@ def _write_summary(lines) -> None:
     if not path:
         return
     try:
-        with open(path, "a") as f:
+        with open(path, "a", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
     except Exception as e:
         print(f"[summary] không ghi được: {e}")
@@ -770,7 +770,7 @@ def short_nick(did: str) -> str:
 # --- State (cursor last_seq) lưu qua các lần cron chạy bằng actions/cache ---
 def load_state() -> dict:
     try:
-        with open(STATE_FILE, "r") as f:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return {}
@@ -782,7 +782,7 @@ def save_state(state: dict) -> None:
     try:
         merged = load_state()
         merged.update(state)
-        with open(STATE_FILE, "w") as f:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(merged, f)
     except Exception as e:
         print(f"[state] không lưu được: {e}")
@@ -4186,14 +4186,18 @@ def gateway_session_step(state: dict, private_key, now: int):
     # Đề ưu tiên = job kibble THẬT agent vừa làm (mỗi đề một việc khác nhau, có người đặt);
     # hết job mới dùng đề của operator. Nội dung job là UNTRUSTED -> isolate như mọi chỗ khác.
     jobs = [j for j in (state.get("gateway_jobs") or []) if isinstance(j, dict) and j.get("task")]
+    op = _gateway_prompts(now)
+    op_idx = int(state.get("gateway_op_idx") or 0) % max(1, len(op))
     if jobs:
+        # Job trước, rồi đề operator (xoay vòng) -> hàng còn 1 job mà gọi 2 lần thì lần hai
+        # dùng đề KHÁC, không gửi lại cùng job.
         prompts = [isolate_for_llm(j["task"]) + "\n\nComplete the task above concretely and accurately."
-                   for j in jobs]
+                   for j in jobs] + op[op_idx:] + op[:op_idx]
         g0 = state.get(flop_gateway.KEY)
         if isinstance(g0, dict):
-            g0["prompt_idx"] = 0                      # dùng job theo thứ tự hàng đợi
+            g0["prompt_idx"] = 0                      # thứ tự do danh sách trên quyết định
     else:
-        prompts = _gateway_prompts(now)
+        prompts = op
     if not prompts:
         print("[gateway] chưa có đề bài (job kibble / FLOP_GATEWAY_PROMPTS / "
               "FLOP_KIBBLE_REQUEST_QUESTIONS) — không dùng đề mặc định chung với fork")
@@ -4207,9 +4211,13 @@ def gateway_session_step(state: dict, private_key, now: int):
         http=_gateway_http,
         book_fn=book if testnet else None)
     if jobs and r.get("calls"):
-        state["gateway_jobs"] = jobs[int(r["calls"]):]   # job đã dùng làm đề -> ra khỏi hàng
+        used = int(r["calls"])
+        state["gateway_jobs"] = jobs[used:]              # job đã dùng làm đề -> ra khỏi hàng
+        if used > len(jobs) and op:                      # phần còn lại dùng đề operator
+            state["gateway_op_idx"] = (op_idx + used - len(jobs)) % len(op)
     save_state({flop_gateway.KEY: state.get(flop_gateway.KEY),
-                "gateway_jobs": state.get("gateway_jobs", [])})
+                "gateway_jobs": state.get("gateway_jobs", []),
+                "gateway_op_idx": state.get("gateway_op_idx", 0)})
     oc = r.get("outcome")
     tag = "" if testnet else " (devnet tập, không ghi sổ)"
     status = f"{r.get('calls', 0)}✓ gateway/{oc}"

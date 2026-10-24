@@ -510,6 +510,7 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
                 items, shape = receipts_detail(http, base, bearer)
             except GatewayError as e:
                 items, shape = [], f"HTTP {e.status} {e.code}".strip()
+            live = {_receipt_key(rc) for rc in items}
             for rc in items:
                 key = f"{rc.get('state')}/{rc.get('response_status')}"
                 hist[key] = hist.get(key, 0) + 1
@@ -522,7 +523,14 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
                 amt += a
                 if book_fn and a > 0:
                     book_fn(a, k[:80], str(rc.get("model") or model_id))
-            g["receipts_seen"] = seen[-200:]
+            # Nhớ MỌI biên nhận gateway còn trả (cắt cứng 200 mục từng có thể quên một biên nhận
+            # vẫn nằm trong phản hồi -> ghi sổ lần hai) + tối đa 200 cái đã rời phản hồi.
+            # Phản hồi rỗng/lỗi -> KHÔNG cắt gì (lần sau gateway trả đủ thì không ghi trùng).
+            if live:
+                gone = [k for k in seen if k not in live]
+                g["receipts_seen"] = gone[-200:] + [k for k in seen if k in live]
+            else:
+                g["receipts_seen"] = seen[-5000:]
             st = dict(g.get("stats") or {})
             st["receipts"] = int(st.get("receipts") or 0) + len(new)
             st["settled"] = round(float(st.get("settled") or 0) + amt, 6)
@@ -558,7 +566,8 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
         min_tok = int(_env_num("FLOP_GATEWAY_MIN_TOKENS", 64))
         gap = _env_num("FLOP_GATEWAY_CALL_GAP_SEC", 31)        # allowance: 2 yêu cầu/phút
         idx = int(g.get("prompt_idx") or 0)
-        pick = [prompts[(idx + i) % len(prompts)] for i in range(max_calls)]
+        # Mỗi lần gọi một đề KHÁC: ít đề hơn số lần gọi thì gọi ít lần hơn, không lặp đề.
+        pick = [prompts[(idx + i) % len(prompts)] for i in range(min(max_calls, len(prompts)))]
         est = estimate(http, base, model_id, pick[0], cap)
         ptok = int(est.get("estimated_input_tokens") or len(pick[0]) // 4)
         min_cost = ptok * pp + min_tok * pc

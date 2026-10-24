@@ -401,8 +401,8 @@ def test_calls_made_before_a_503_are_still_reported(monkeypatch):
                 return Resp(503, {"error": {"code": "provider_error", "message": ""}}, {"Retry-After": "1"})
         return real(method, url, headers=headers, json=json, timeout=timeout)
 
-    r = gw.run_step({}, agent_key=_key("22"), http=flaky, now=NOW, prompts=["q"], expect_network="devnet",
-                    sleep=lambda s: None, log=lambda *a: None)
+    r = gw.run_step({}, agent_key=_key("22"), http=flaky, now=NOW, prompts=["q1", "q2", "q3", "q4"],
+                    expect_network="devnet", sleep=lambda s: None, log=lambda *a: None)
     assert r["outcome"] == "rate_limited" and r["calls"] == 2 and r["spent"] == pytest.approx(1.8)
 
 
@@ -452,3 +452,29 @@ def test_lag_is_detected_across_refunds(monkeypatch):
         rem -= 13.0 - 1.5                                              # hoàn 1,5 mỗi lượt
     line, alert, ok = gw.lag_status(g, NOW + 4 * 3600, "rate_limited", pct=10, alert_hours=3, realert_hours=6)
     assert line and "tụt lại" in line
+
+
+def test_receipts_beyond_200_are_never_booked_twice():
+    # Gateway trả > 200 biên nhận (và có lượt trả rỗng): mỗi biên nhận chỉ được ghi sổ 1 lần.
+    fake, booked, state = FakeGateway(quota=20000.0, expires_ms=(NOW + 30 * 86400) * 1000), [], {}
+    fake.receipts = [{"request_id": f"r{i}", "state": "settled", "settled_spend": 1.0} for i in range(250)]
+    fake.report_cost = True
+    book = lambda c, ref, m: booked.append(ref)                          # noqa: E731
+    for i, body in enumerate([None, {"receipts": []}, None, None]):
+        if body is not None:
+            fake.override[("GET", "/v1/keys/me/receipts")] = Resp(data=body)
+        else:
+            fake.override.pop(("GET", "/v1/keys/me/receipts"), None)
+        gw.run_step(state, agent_key=_key("22"), http=fake, now=NOW + i * 300, prompts=["q"],
+                    expect_network="devnet", book_fn=book, sleep=lambda s: None, log=lambda *a: None)
+    assert len(booked) == len(set(booked))                               # không biên nhận nào ghi 2 lần
+    assert len([r for r in booked if r[1:].isdigit()]) == 250          # đủ 250 biên nhận "r<số>"
+
+
+def test_one_queued_job_is_not_sent_twice_in_a_run(monkeypatch):
+    monkeypatch.setenv("FLOP_GATEWAY_MAX_CALLS_PER_RUN", "2")
+    fake = FakeGateway(quota=20000.0, expires_ms=SOON)
+    gw.run_step({}, agent_key=_key("22"), http=fake, now=NOW, prompts=["only one"],
+                expect_network="devnet", sleep=lambda s: None, log=lambda *a: None)
+    sent = [c[3]["messages"][0]["content"] for c in fake.calls if c[1] == "/v1/chat/completions"]
+    assert sent == ["only one"]                                          # 1 đề -> 1 lần gọi

@@ -134,7 +134,7 @@ def _token(token: str = None) -> str:
 
 def _load(path: str = None) -> dict:
     try:
-        with open(pacer_path(path), "r") as f:
+        with open(pacer_path(path), "r", encoding="utf-8") as f:
             data = json.load(f)
         return data if isinstance(data, dict) else {}
     except FileNotFoundError:
@@ -146,7 +146,7 @@ def _load(path: str = None) -> dict:
 
 def _save(state: dict, path: str = None) -> None:
     try:
-        with open(pacer_path(path), "w") as f:
+        with open(pacer_path(path), "w", encoding="utf-8") as f:
             json.dump(state, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"[pacer] không lưu được state: {e}")

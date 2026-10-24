@@ -152,7 +152,7 @@ def load_ledger(path: str = None) -> dict:
     """Đọc toàn bộ sổ cái (state rỗng nếu file chưa tồn tại hoặc hỏng cấu trúc)."""
     p = ledger_path(path)
     try:
-        with open(p, "r") as f:
+        with open(p, "r", encoding="utf-8") as f:
             data = json.load(f)
     except FileNotFoundError:
         return _empty_state()
@@ -169,7 +169,7 @@ def load_ledger(path: str = None) -> dict:
 def _save_ledger(state: dict, path: str = None) -> None:
     p = ledger_path(path)
     try:
-        with open(p, "w") as f:
+        with open(p, "w", encoding="utf-8") as f:
             json.dump(state, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"[ledger] không lưu được {p}: {e}")

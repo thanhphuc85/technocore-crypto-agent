@@ -3557,3 +3557,17 @@ def test_faucet_manual_tier_never_claims_and_quick_warns_once(monkeypatch):
     ac.faucet_step(state, None, None)
     ac.faucet_step(state, None, None)
     assert len(sent) == 1 and "FLOP_FAUCET_TIER=manual" in sent[0]
+
+
+def test_last_queued_job_is_followed_by_an_operator_prompt(monkeypatch):
+    import flop_gateway
+    seen = {}
+    monkeypatch.setattr(flop_gateway, "run_step", lambda st, **k: seen.update(k) or
+                        {"outcome": "spent", "calls": 2, "spent": 1, "due": 1, "remaining": 5})
+    monkeypatch.setattr(ac, "save_state", lambda d: None)
+    monkeypatch.setenv("FLOP_GATEWAY_PROMPTS", "OpA|OpB")
+    state = {"gateway_jobs": [{"id": "k1", "task": "Only job"}]}
+    ac.gateway_session_step(state, _real_key(), 1_800_000_000)
+    p = seen["prompts"]
+    assert "Only job" in p[0] and p[1].startswith("OpA") and len(set(p)) == len(p)
+    assert state["gateway_jobs"] == [] and state["gateway_op_idx"] == 1   # lần sau bắt đầu từ OpB
