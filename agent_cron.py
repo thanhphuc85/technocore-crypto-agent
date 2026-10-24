@@ -4206,6 +4206,23 @@ def gateway_session_step(state: dict, private_key, now: int):
     print(f"[session] {status}{detail}{src}{tag}")
     if r.get("reason"):
         print(f"[gateway] lý do: {str(r['reason'])[:200]}")
+    # Chi tụt lại so với kế hoạch nhiều giờ -> Telegram kèm lý do (chỉ khi chi THẬT trên
+    # testnet; buổi tập devnet chỉ in log vì allowance devnet lớn hơn sức chi rất nhiều).
+    try:
+        g = state.get(flop_gateway.KEY) or {}
+        line, alert, ok = flop_gateway.lag_status(
+            g, now, oc or "?", pct=_env_float("FLOP_GATEWAY_LAG_PCT", 10),
+            alert_hours=_env_float("FLOP_GATEWAY_LAG_ALERT_HOURS", 3),
+            realert_hours=_env_float("FLOP_GATEWAY_LAG_REALERT_HOURS", 6))
+        state[flop_gateway.KEY] = g
+        save_state({flop_gateway.KEY: g})
+        if line:
+            print(line)
+        for msg in (alert, ok):
+            if msg and testnet:
+                _telegram_send(msg)
+    except Exception as e:
+        print(f"[gateway] lag-check bỏ qua ({str(e)[:80]})")
     if r.get("payment"):
         print(f"[gateway] 402 hình dạng thanh toán (KHÔNG tự trả): {r['payment']}")
     if r.get("receipts_new"):

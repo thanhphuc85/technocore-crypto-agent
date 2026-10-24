@@ -367,6 +367,70 @@ def settled_amount(rc: dict):
     return None
 
 
+# --- cảnh báo chi tụt lại ---------------------------------------------------------------
+
+_LAG_HINTS = {
+    "spent": "đã chạy hết công suất mỗi lượt mà vẫn không kịp — tăng FLOP_GATEWAY_MAX_CALLS_PER_RUN "
+             "(nếu ít 503), chờ trần token tự tăng, hoặc chọn model đắt hơn",
+    "no_miner": "miner không nhận cỡ yêu cầu — agent đang tự hạ cỡ",
+    "rate_limited": "gateway 429/503: thiếu miner rảnh hoặc chạm giới hạn tốc độ",
+    "payment_required": "402: gateway đòi thanh toán x402 — agent KHÔNG tự trả, cần chỉnh tay",
+    "unfunded": "ví chưa đủ số dư tối thiểu — kiểm tra faucet",
+    "forbidden": "403 — allowance bị thu hồi/hết hạn",
+    "exhausted": "quota/allowance đã hết",
+    "auth_reset": "401 — bearer hỏng, đang đăng ký lại",
+    "network_mismatch": "gateway báo sai mạng — kiểm FLOP_GATEWAY_URL / FLOP_GATEWAY_NETWORK",
+    "error_network": "không đọc được /health của gateway",
+    "model_unavailable": "model của key không còn trong catalog",
+    "backoff": "đang chờ theo Retry-After / lỗi trước",
+    "error": "lỗi khác — xem dòng [gateway] lý do",
+}
+
+
+def lag_status(g: dict, now: int, outcome: str, *, pct: float, alert_hours: float,
+               realert_hours: float):
+    """Theo dõi chi TỤT LẠI so với mục tiêu tuyến tính của cửa sổ. Trả (dòng log | None,
+    tin cảnh báo | None, tin hồi phục | None). Tụt = mục tiêu tới giờ - đã chi > pct% tổng
+    cửa sổ; cảnh báo khi tụt liên tục >= alert_hours (lặp lại mỗi realert_hours), kèm lý do
+    thường gặp nhất trong đợt (đếm outcome mỗi run). Hồi phục khi tụt < pct/2."""
+    win = g.get("window") if isinstance(g.get("window"), dict) else None
+    lag = dict(g.get("lag") or {})
+    if not win or not win.get("total"):
+        return None, None, None
+    total, spent = float(win["total"]), float(win.get("spent") or 0)
+    start = int(win.get("start") or now)
+    end = int(win.get("horizon") or now) - int(_env_num("FLOP_GATEWAY_MARGIN_SEC", 1800))
+    frac_t = 1.0 if end <= start else min(1.0, max(0.0, (now - start) / (end - start)))
+    behind = total * frac_t - spent
+    share = behind / total if total > 0 else 0.0
+    if share * 100 <= pct / 2:
+        g["lag"] = {}
+        if lag.get("alerted"):
+            return None, None, (f"✅ FLOP gateway: chi đã bắt kịp kế hoạch (đã chi {spent:.2f}/"
+                                f"{total * frac_t:.2f} mục tiêu).")
+        return None, None, None
+    if share * 100 <= pct:
+        g["lag"] = lag                               # vùng đệm: không mở/đóng đợt
+        return None, None, None
+    lag.setdefault("since", now)
+    reasons = dict(lag.get("reasons") or {})
+    reasons[outcome] = int(reasons.get(outcome) or 0) + 1
+    lag["reasons"] = reasons
+    top = max(reasons, key=reasons.get)
+    hours = (now - int(lag["since"])) / 3600
+    line = (f"[gateway] ⚠️ chi tụt lại {behind:.2f} FLOP ({share:.0%} cửa sổ) trong {hours:.1f}h — "
+            f"lý do chính: {top}")
+    alert = None
+    if hours >= alert_hours and now - int(lag.get("alerted") or 0) >= realert_hours * 3600:
+        lag["alerted"] = now
+        counts = ", ".join(f"{k}={v}" for k, v in sorted(reasons.items(), key=lambda x: -x[1]))
+        alert = (f"⚠️ FLOP gateway: chi TỤT LẠI {hours:.1f}h liền — đã chi {spent:.2f} / mục tiêu "
+                 f"{total * frac_t:.2f} FLOP (thiếu {behind:.2f}, {share:.0%} cửa sổ {total:.2f}).\n"
+                 f"Kết quả các lượt: {counts}.\n→ {_LAG_HINTS.get(top, top)}")
+    g["lag"] = lag
+    return line, alert, None
+
+
 # --- một nhịp ---------------------------------------------------------------------------
 
 def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_network: str,

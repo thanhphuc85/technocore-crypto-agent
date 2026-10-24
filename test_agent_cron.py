@@ -3522,3 +3522,19 @@ def test_answered_kibble_jobs_become_gateway_prompts_and_are_consumed(monkeypatc
     ac.gateway_session_step(state, _real_key(), 1_800_000_000)
     assert "Compare TWAP vs spot" in seen["prompts"][0] and ac.DELIM_OPEN in seen["prompts"][1]
     assert [j["id"] for j in state["gateway_jobs"]] == ["k2"]          # 2 job đã dùng
+
+
+def test_gateway_lag_alert_goes_to_telegram_only_on_testnet(monkeypatch):
+    import flop_gateway
+    sent = []
+    monkeypatch.setattr(ac, "_telegram_send", lambda t: sent.append(t) or True)
+    monkeypatch.setattr(ac, "save_state", lambda d: None)
+    monkeypatch.setenv("FLOP_GATEWAY_PROMPTS", "q")
+    monkeypatch.setattr(flop_gateway, "run_step", lambda st, **k: {"outcome": "rate_limited", "calls": 0})
+    monkeypatch.setattr(flop_gateway, "lag_status", lambda g, now, oc, **k: ("line", "ALERT", None))
+    monkeypatch.delenv("TESTNET_ENABLED", raising=False)
+    ac.gateway_session_step({}, _real_key(), 1_800_000_000)
+    assert sent == []                                             # tập devnet: chỉ log
+    monkeypatch.setenv("TESTNET_ENABLED", "true")
+    ac.gateway_session_step({}, _real_key(), 1_800_000_000)
+    assert sent == ["ALERT"]

@@ -404,3 +404,26 @@ def test_calls_made_before_a_503_are_still_reported(monkeypatch):
     r = gw.run_step({}, agent_key=_key("22"), http=flaky, now=NOW, prompts=["q"], expect_network="devnet",
                     sleep=lambda s: None, log=lambda *a: None)
     assert r["outcome"] == "rate_limited" and r["calls"] == 2 and r["spent"] == pytest.approx(1.8)
+
+
+def test_lag_alert_fires_after_hours_with_the_main_reason_then_recovers(monkeypatch):
+    monkeypatch.setenv("FLOP_GATEWAY_MARGIN_SEC", "0")
+    day = 86400
+    g = {"window": {"start": NOW, "horizon": NOW + day, "total": 2000.0, "spent": 0.0}}
+    kw = dict(pct=10, alert_hours=3, realert_hours=6)
+    # 1h: tụt 83 FLOP = 4% -> chưa tính là tụt
+    assert gw.lag_status(g, NOW + 3600, "rate_limited", **kw) == (None, None, None)
+    # 4h vào cửa sổ, chưa chi gì -> tụt 16,7%: mở đợt, chưa đủ 3h nên chỉ log
+    line, alert, ok = gw.lag_status(g, NOW + 4 * 3600, "rate_limited", **kw)
+    assert line and "rate_limited" in line and alert is None
+    gw.lag_status(g, NOW + 5 * 3600, "no_miner", **kw)
+    line, alert, ok = gw.lag_status(g, NOW + 7 * 3600 + 60, "rate_limited", **kw)
+    assert alert and "TỤT LẠI" in alert and "rate_limited=2" in alert and "thiếu miner" in alert
+    assert gw.lag_status(g, NOW + 8 * 3600, "rate_limited", **kw)[1] is None   # chưa tới hạn nhắc lại
+    g["window"]["spent"] = 2000.0 * 9 / 24                                       # bắt kịp
+    line, alert, ok = gw.lag_status(g, NOW + 9 * 3600, "spent", **kw)
+    assert ok and "bắt kịp" in ok and g["lag"] == {}
+
+
+def test_lag_check_is_quiet_without_a_window():
+    assert gw.lag_status({}, NOW, "error", pct=10, alert_hours=3, realert_hours=6) == (None, None, None)
