@@ -267,3 +267,16 @@ def test_empty_prompts_make_no_requests():
     r = gw.run_step({}, agent_key=_key("22"), http=fake, now=NOW, prompts=[], expect_network="devnet",
                     sleep=lambda s: None, log=lambda *a: None)
     assert r["outcome"] == "unconfigured" and fake.calls == []
+
+
+def test_health_failure_reason_is_reported():
+    fake = FakeGateway()
+    fake.override[("GET", "/health")] = Resp(403, {"error": "forbidden"})
+    r = _run({}, fake)
+    assert r["outcome"] == "error_network" and "HTTP 403 forbidden" in r["reason"]
+
+    def boom(*a, **k):
+        raise TimeoutError("read timed out")
+    r2 = gw.run_step({}, agent_key=_key("22"), http=boom, now=NOW, prompts=["q"], expect_network="devnet",
+                     sleep=lambda s: None, log=lambda *a: None)
+    assert "TimeoutError" in r2["reason"]

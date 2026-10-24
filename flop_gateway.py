@@ -185,16 +185,26 @@ def _call(http, method: str, url: str, *, bearer: str = None, body: dict = None,
     return data
 
 
-def network(http, base: str):
-    """`network.network` ở <origin>/health ("devnet"/"testnet"/...) hoặc None."""
+def network_detail(http, base: str):
+    """(network, lỗi): `network.network` ở <origin>/health ("devnet"/"testnet"/...) và mô tả
+    lỗi khi không đọc được (mã HTTP / loại ngoại lệ) — để log nói ĐƯỢC vì sao, không đoán."""
     try:
-        d = _call(http, "GET", origin(base) + "/health", timeout=10)
-    except Exception:
-        return None
+        d = _call(http, "GET", origin(base) + "/health", timeout=20)
+    except GatewayError as e:
+        return None, f"HTTP {e.status} {e.code}".strip()
+    except Exception as e:
+        return None, f"{type(e).__name__}: {str(e)[:120]}"
     net = d.get("network")
     if isinstance(net, dict):
         net = net.get("network")
-    return net.strip().lower() if isinstance(net, str) and net.strip() else None
+    if isinstance(net, str) and net.strip():
+        return net.strip().lower(), ""
+    return None, f"/health không có trường network (keys: {sorted(d)[:8]})"
+
+
+def network(http, base: str):
+    """`network.network` ở <origin>/health hoặc None."""
+    return network_detail(http, base)[0]
 
 
 def catalog(http, base: str) -> dict:
@@ -346,9 +356,9 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
     addr = wallet_address(wkey)
     g["address"] = addr
 
-    net = network(http, base)
+    net, why = network_detail(http, base)
     if net is None:
-        return done("error_network", reason="không đọc được /health của gateway")
+        return done("error_network", reason=f"không đọc được /health của gateway ({why})")
     g["network"] = net
     if net != expect_network:
         return done("network_mismatch", reason=f"gateway báo '{net}', cần '{expect_network}' — không chi")
