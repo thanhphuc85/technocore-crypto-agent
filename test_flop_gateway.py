@@ -33,6 +33,7 @@ class FakeGateway:
         self.network, self.quota, self.cost = network, quota, cost
         self.expires_ms = expires_ms if expires_ms is not None else (NOW + 20 * 3600) * 1000
         self.calls, self.override, self.challenge_addr, self.host = [], {}, None, "api.flop.network"
+        self.report_cost = True                 # devnet thật (2026-10-24) KHÔNG trả usage.cost_flop
         self.receipts = [{"model": "m1", "prompt_hash": "p1", "tee_quote_hash": "t", "block_number": 7,
                           "tx_hash": "0xaa", "miner": "5MinerA"}]
 
@@ -65,7 +66,7 @@ class FakeGateway:
                               "model": "m1", "choices": [{"index": 0, "finish_reason": "stop",
                                                           "message": {"role": "assistant", "content": "ok"}}],
                               "usage": {"prompt_tokens": 20, "completion_tokens": 100, "total_tokens": 120,
-                                        "cost_flop": self.cost, "gflops_used": 3.2}})
+                                        **({"cost_flop": self.cost, "gflops_used": 3.2} if self.report_cost else {})}})
         if path == "/v1/keys/me/receipts":
             return Resp(data={"receipts": self.receipts})
         return Resp(404, {"error": "not_found", "message": path})
@@ -280,3 +281,21 @@ def test_health_failure_reason_is_reported():
     r2 = gw.run_step({}, agent_key=_key("22"), http=boom, now=NOW, prompts=["q"], expect_network="devnet",
                      sleep=lambda s: None, log=lambda *a: None)
     assert "TimeoutError" in r2["reason"]
+
+
+def test_spend_is_taken_from_the_gateway_quota_when_usage_has_no_cost(monkeypatch):
+    # Hình dạng THẬT của devnet: usage chỉ có token; quota /keys/me giảm đúng số đã chi.
+    fake, booked, state = FakeGateway(expires_ms=SOON, cost=6.513), [], {}
+    fake.report_cost = False
+    r = _run(state, fake, booked)
+    assert r["calls"] == 2 and [round(b[0], 3) for b in booked] == [6.513, 6.513]
+    assert r["last"]["src"] == "quota" and r["spent"] == pytest.approx(13.026)
+    assert state[gw.KEY]["window"]["spent"] == pytest.approx(13.026)      # nhịp chi tiến lên, không kẹt 0
+
+
+def test_default_token_cap_is_the_model_limit(monkeypatch):
+    monkeypatch.delenv("FLOP_GATEWAY_MAX_TOKENS", raising=False)
+    fake = FakeGateway(quota=20000.0, expires_ms=SOON)
+    _run({}, fake)
+    sent = [c[3]["max_tokens"] for c in fake.calls if c[1] == "/v1/chat/completions"]
+    assert sent and max(sent) == 8192                                     # không còn kẹt ở 1024

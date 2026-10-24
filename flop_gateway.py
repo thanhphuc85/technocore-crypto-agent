@@ -398,7 +398,10 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
         g["window"] = win
         max_calls = max(1, int(_env_num("FLOP_GATEWAY_MAX_CALLS_PER_RUN", 2)))
         pp, pc = _price(model)
-        cap = _completion_cap(model, int(_env_num("FLOP_GATEWAY_MAX_TOKENS", 1024)))
+        # Trần token/lần: mặc định = giới hạn của model (đo devnet 2026-10-24: trần 1024 chỉ chi
+        # được ~3.7k/20k quota trong 24h). Lần gọi vẫn được định cỡ theo phần đến hạn.
+        cap = _completion_cap(model, int(_env_num("FLOP_GATEWAY_MAX_TOKENS", 0)) or 8192)
+        max_wait = int(_env_num("FLOP_GATEWAY_MAX_WAIT_MS", 180000))
         min_tok = int(_env_num("FLOP_GATEWAY_MIN_TOKENS", 64))
         gap = _env_num("FLOP_GATEWAY_CALL_GAP_SEC", 31)        # allowance: 2 yêu cầu/phút
         idx = int(g.get("prompt_idx") or 0)
@@ -411,7 +414,7 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
                         reason=f"đến hạn {due:.4f} < giá tối thiểu 1 lần gọi {min_cost:.4f} — tích sang run sau")
         n = min(max_calls, max(1, int(due // min_cost)))      # gọi ít mà to, không nhiều mà vụn
         per_call = min(due / n, remaining)
-        spent, calls, last = 0.0, 0, {}
+        spent, calls, last, quota_now = 0.0, 0, {}, remaining
         for i, prompt in enumerate(pick[:n]):
             if i:
                 est = estimate(http, base, model_id, prompt, cap)
@@ -421,21 +424,33 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
                 break
             if calls:
                 sleep(gap)
-            r = chat(http, base, bearer, model_id, prompt, mt, max_cost=per_call * 1.1)
+            r = chat(http, base, bearer, model_id, prompt, mt, max_cost=per_call * 1.1,
+                     max_wait_ms=max_wait)
             u = r.get("usage") or {}
-            cost = float(u.get("cost_flop") or 0)
+            cost, src = float(u.get("cost_flop") or 0), "usage"
+            # Devnet 2026-10-24: usage KHÔNG có cost_flop (chỉ token). Số đã chi thật = quota
+            # gateway giảm bao nhiêu (/keys/me trước/sau) — sổ của CHÍNH gateway, không phải ước tính.
+            try:
+                after = float(me(http, base, bearer).get("remaining_quota") or 0)
+            except GatewayError:
+                after = None
+            if after is not None:
+                delta = round(quota_now - after, 9)
+                quota_now = after
+                if cost <= 0 and delta > 0:
+                    cost, src = delta, "quota"
             calls += 1
             spent += cost
             last = {"id": r.get("id"), "tokens": u.get("completion_tokens"), "cost": cost,
-                    "gflops": u.get("gflops_used")}
+                    "src": src, "gflops": u.get("gflops_used")}
             if cost <= 0:
-                # Không có cost_flop thì KHÔNG ghi sổ theo ước tính — in khoá thật để chỉnh.
+                # Không có cost_flop lẫn quota giảm -> KHÔNG ghi sổ theo ước tính; in khoá thật.
                 last["usage_keys"] = sorted(u)[:10]
-                log(f"[gateway] ⚠️ phản hồi thiếu usage.cost_flop (usage keys: {last['usage_keys']})")
+                log(f"[gateway] ⚠️ không xác định được số đã chi (usage keys: {last['usage_keys']})")
             if book_fn and cost > 0:
                 book_fn(cost, str(r.get("id") or "")[:80], model_id)
             # Ghi tiến độ NGAY sau mỗi lần chi: lỗi ở lần gọi sau không làm mất số đã chi.
-            g["remaining"] = max(0.0, remaining - spent)
+            g["remaining"] = max(0.0, min(quota_now, remaining - spent))
             g["window"] = {**g["window"], "spent": float(g["window"].get("spent") or 0) + cost}
             if spent >= due - 1e-9 or spent >= remaining:
                 break
@@ -458,11 +473,11 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
         st["receipts"] = int(st.get("receipts") or 0) + len(new)
         g["stats"] = st
         g["last"] = last
-        g["remaining"] = max(0.0, remaining - spent)
+        g["remaining"] = max(0.0, min(quota_now, remaining - spent))
         return done("spent" if calls else "pace_wait", calls=calls, spent=round(spent, 6),
                     due=round(due, 6), remaining=g["remaining"], receipts_new=len(new),
                     miners=[str(x.get("miner") or "") for x in new if x.get("miner")],
-                    model=model_id, last=last)
+                    model=model_id, last=last, receipts_total=st["receipts"])
     except GatewayError as e:
         if e.status == 401:
             g.pop("vault", None)                              # bearer chết -> enroll lại run sau

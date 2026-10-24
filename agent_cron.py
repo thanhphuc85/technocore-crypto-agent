@@ -4164,7 +4164,10 @@ def gateway_session_step(state: dict, private_key, now: int):
     oc = r.get("outcome")
     tag = "" if testnet else " (devnet tập, không ghi sổ)"
     status = f"{r.get('calls', 0)}✓ gateway/{oc}"
+    _l = r.get("last") or {}
     detail = (f" spent={r.get('spent')} due={r.get('due')} quota={r.get('remaining')}"
+              + (f" tokens={_l.get('tokens')} src={_l.get('src')}" if _l else "")
+              + (f" receipts={r.get('receipts_total')}" if r.get("receipts_total") is not None else "")
               if oc in ("spent", "pace_wait") else "")
     print(f"[session] {status}{detail}{tag}")
     if r.get("reason"):
