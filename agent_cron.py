@@ -3184,11 +3184,16 @@ def _mempool_submit_fn(req: dict) -> dict:
     }
 
 
+_faucet_default_addr = None          # địa chỉ SS58 của VÍ gateway (DID) — faucet_step đặt mỗi run
+
+
 def _faucet_body(req: dict):
     """Thân yêu cầu faucet. Có FLOP_FAUCET_ADDRESS -> định dạng THẬT của faucet.flop.network
     (`POST /fund {"address": <SS58>}`; mức verified: + tier=linked, provider=brightid|self).
     Không có -> payload ký kiểu cũ của scaffold. Trả (body, flop_format)."""
-    addr = os.environ.get("FLOP_FAUCET_ADDRESS", "").strip()
+    # Trống -> dùng chính VÍ gateway (cùng tài khoản mua compute; ngày testnet không phải đặt
+    # thêm biến). Không có ví -> payload ký kiểu scaffold cũ như trước.
+    addr = os.environ.get("FLOP_FAUCET_ADDRESS", "").strip() or (_faucet_default_addr or "")
     if not addr:
         return (req.get("signed") or {}), False
     if not ss58_valid(addr):
@@ -3233,6 +3238,8 @@ def _faucet_claim_fn(req: dict) -> dict:
     (flop_faucet.run_faucet_cycle bắt -> error_claim)."""
     url = req.get("faucet_url")
     body, flop_format = _faucet_body(req)
+    if flop_format and re.match(r"(?i)^https?://[^/]+/?$", url or ""):
+        url = url.rstrip("/") + "/fund"          # FLOP_FAUCET_URL chỉ có tên miền -> endpoint /fund
     r = requests.post(url, json=body,
                       headers={"User-Agent": UA, "Content-Type": "application/json"}, timeout=20)
     if r.status_code == 429:
@@ -3372,6 +3379,25 @@ def faucet_step(state: dict, private_key, did) -> str:
             print("[faucet] bỏ qua — FLOP_FAUCET_ENABLED bật nhưng TESTNET_ENABLED tắt: "
                   "faucet thật chỉ chạy cùng sổ testnet (bật TESTNET_ENABLED trước).")
             return "skipped_simulation"
+        global _faucet_default_addr
+        try:
+            import flop_gateway
+            _wk = flop_gateway.wallet_key(private_key)
+            _faucet_default_addr = flop_gateway.wallet_address(_wk) if _wk else None
+        except Exception:
+            _faucet_default_addr = None
+        _env_addr = os.environ.get("FLOP_FAUCET_ADDRESS", "").strip()
+        if (_env_addr and _faucet_default_addr and _env_addr != _faucet_default_addr
+                and state.get("faucet_addr_warned") != _env_addr):
+            # Faucet nạp vào ví KHÁC ví mua compute -> gateway báo ví chưa có tiền, và chi tiêu
+            # (thứ được tính airdrop) nằm ở tài khoản khác. Có thể cố ý -> chỉ cảnh báo 1 lần.
+            _m = (f"⚠️ Faucet nạp vào {_env_addr[:8]}…{_env_addr[-4:]} nhưng ví mua compute (gateway) là "
+                  f"{_faucet_default_addr[:8]}…{_faucet_default_addr[-4:]}. Nếu không cố ý, xoá "
+                  "FLOP_FAUCET_ADDRESS để faucet tự dùng ví gateway.")
+            print(f"[faucet] {_m}")
+            if _telegram_send(_m):
+                state["faucet_addr_warned"] = _env_addr
+                save_state({"faucet_addr_warned": _env_addr})
         import flop_faucet
         fpath = flop_faucet.state_path()
         flop_faucet._save(flop_faucet.merge_state(flop_faucet._load(fpath), state.get("faucet_state")),

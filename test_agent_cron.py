@@ -3653,3 +3653,39 @@ def test_testnet_without_a_backend_choice_uses_the_gateway(monkeypatch, tmp_path
     monkeypatch.setattr(ac, "gateway_session_step", lambda *a, **k: hit.append(1) or ("0✓ gateway/x", 0, {}))
     ac.main()
     assert hit == [1]
+
+
+def test_faucet_defaults_to_the_gateway_wallet_and_appends_fund(monkeypatch):
+    # Ngày testnet: FLOP_FAUCET_ADDRESS trống -> faucet phải nạp đúng ví mua compute (DID),
+    # và URL chỉ có tên miền -> tự thêm /fund.
+    monkeypatch.delenv("FLOP_FAUCET_ADDRESS", raising=False)
+    monkeypatch.delenv("FLOP_FAUCET_TIER", raising=False)
+    monkeypatch.setattr(ac, "_faucet_default_addr", FLOP_ADDR)
+    sent = {}
+    monkeypatch.setattr(ac.requests, "post", lambda url, json=None, **k: sent.update(url=url, body=json)
+                        or _resp_with_body({"success": True, "amount": 25, "txHash": "0x" + "ab" * 32}))
+    monkeypatch.setattr(ac, "_faucet_cooldown_s", lambda url, linked: 86460)
+    ac._faucet_claim_fn({"faucet_url": "https://faucet.flop.network", "signed": {"old": 1}})
+    assert sent["url"] == "https://faucet.flop.network/fund" and sent["body"] == {"address": FLOP_ADDR}
+    monkeypatch.setattr(ac, "_faucet_default_addr", None)
+    assert ac._faucet_body({"signed": {"old": 1}}) == ({"old": 1}, False)   # không ví -> như cũ
+
+
+def test_faucet_step_warns_once_when_faucet_and_wallet_differ(monkeypatch, tmp_path):
+    import flop_faucet
+    monkeypatch.setenv("FLOP_FAUCET_STATE", str(tmp_path / "f.json"))
+    monkeypatch.setenv("TOKEN_LEDGER_FILE", str(tmp_path / "l.json"))
+    monkeypatch.setenv("FLOP_FAUCET_ENABLED", "on")
+    monkeypatch.setenv("FLOP_FAUCET_TIER", "linked")
+    monkeypatch.setenv("TESTNET_ENABLED", "true")
+    monkeypatch.setenv("FLOP_WALLET_USE_DID", "on")
+    monkeypatch.setenv("FLOP_FAUCET_ADDRESS", "5DZsAQuavUAM7A6XvoTkDQgtQdRCMcALdUd6Bx4FSoFMF8ux")
+    sent = []
+    monkeypatch.setattr(ac, "_telegram_send", lambda t: sent.append(t) or True)
+    monkeypatch.setattr(ac, "save_state", lambda d: None)
+    monkeypatch.setattr(flop_faucet, "run_faucet_cycle", lambda **k: {"outcome": "skipped_cooldown"})
+    monkeypatch.setattr(flop_faucet, "seconds_until_next", lambda **k: None)
+    state = {}
+    ac.faucet_step(state, _real_key(), "did")
+    ac.faucet_step(state, _real_key(), "did")
+    assert len([m for m in sent if "ví mua compute" in m]) == 1
