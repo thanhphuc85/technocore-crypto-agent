@@ -1856,7 +1856,9 @@ def persist_ledger_to_kv(private_key, did) -> None:
                 "spend_count_by_hour": led.get("spend_count_by_hour", {}),
                 "credit_by_hour": led.get("credit_by_hour", {}),
                 "first_spend_day": led.get("first_spend_day"),
-                "unlock": led.get("unlock", {})}
+                "unlock": led.get("unlock", {}),
+                # Dấu băm biên nhận gateway đã ghi -> cache mất vẫn không ghi trùng.
+                "gateway_refs": (led.get("gateway_refs") or [])[-100:]}
         entries = (led.get("entries", []) or [])
         body = None
         # Cắt dần tới khi VỪA giới hạn. Số dư và các tổng chạy không suy từ entries, nên
@@ -4755,7 +4757,13 @@ def main():
     session_status = "off"
     _wd_settled, _wd_last = 0, {}              # cho bộ canh chi thật (testnet) bên dưới
     _sess_on = os.environ.get("FLOP_SESSION_ENABLED", "").strip().lower() in ("1", "true", "on", "yes")
-    if _sess_on and os.environ.get("FLOP_SESSION_BACKEND", "").strip().lower() == "gateway":
+    _backend = os.environ.get("FLOP_SESSION_BACKEND", "").strip().lower()
+    if not _backend:
+        import token_manager as _tmb
+        # Testnet bật mà chưa chọn: dùng gateway — đường FLOP CÔNG BỐ. Scaffold mempool cũ không
+        # có endpoint thật nên quên đặt biến = cả ngày không chi gì. Đặt "mempool" để ép đường cũ.
+        _backend = "gateway" if _tmb.testnet_enabled() else "mempool"
+    if _sess_on and _backend == "gateway":
         # Đường THẬT FLOP công bố: mua compute qua gateway api.flop.network (flop_gateway).
         try:
             session_status, _wd_settled, _wd_last = gateway_session_step(state, private_key, now)

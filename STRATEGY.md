@@ -148,7 +148,8 @@ exactly), 5 miners, an 8-line `flop-devnet-enroll/v1` challenge naming our SS58 
    (`faucet=skipped_simulation`) so a real claim is never booked into the mock ledger.
 2. `FLOP_SESSION_MODEL_HASH` from the published model catalog; delete
    `FLOP_SESSION_SIM_MODEL_HASH`.
-3. **Gateway backend (the path FLOP published):** `FLOP_SESSION_BACKEND=gateway` and
+3. **Gateway backend (the path FLOP published):** `FLOP_SESSION_BACKEND=gateway` (the default
+   once `TESTNET_ENABLED` is on; set `mempool` only to force the old scaffold) and
    **`FLOP_WALLET_USE_DID=on` - the DID key is the FLOP wallet** (SS58
    `5CFP215CEbCtDduwG1Nzu5rmYXKfHc47wSATUi1oRvrkQnUP` for the current DID). Decided
    2026-10-24: tclk's FLOP HTLC rail (`@flop-labs/tclk-flop`, tclk #210) binds each party's

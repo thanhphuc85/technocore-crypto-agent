@@ -207,6 +207,16 @@ def network_detail(http, base: str):
     return None, f"/health không có trường network (keys: {sorted(d)[:8]})"
 
 
+def network_matches(net: str, expect: str) -> bool:
+    """`/health` có thể ghi "flop-testnet-1" thay vì đúng "testnet": khớp khi từ khoá nằm trong
+    tên như một TỪ riêng (tách theo ký tự không phải chữ/số). "devnet" không bao giờ khớp
+    "testnet" và ngược lại -> chi devnet không bao giờ bị ghi vào sổ testnet."""
+    net, expect = (net or "").strip().lower(), (expect or "").strip().lower()
+    if not net or not expect:
+        return False
+    return net == expect or expect in re.split(r"[^a-z0-9]+", net)
+
+
 def network(http, base: str):
     """`network.network` ở <origin>/health hoặc None."""
     return network_detail(http, base)[0]
@@ -513,7 +523,7 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
     if net is None:
         return done("error_network", reason=f"không đọc được /health của gateway ({why})")
     g["network"] = net
-    if net != expect_network:
+    if not network_matches(net, expect_network):
         return done("network_mismatch", reason=f"gateway báo '{net}', cần '{expect_network}' — không chi")
 
     def backoff(sec, why):

@@ -2994,6 +2994,7 @@ def test_mempool_adapter_raises_on_error_body(monkeypatch):
 def test_main_testnet_stops_new_sessions_at_pending_cap(monkeypatch, tmp_path):
     import flop_session
     import time as _t
+    monkeypatch.setenv("FLOP_SESSION_BACKEND", "mempool")   # testnet mặc định = gateway; test đường cũ
     monkeypatch.setattr(ac, "SEED_HEX", SEED_HEX)
     monkeypatch.setattr(ac, "RUNNER_ROLE", "primary")
     now = int(_t.time())
@@ -3615,3 +3616,40 @@ def test_success_text_with_a_duration_is_not_read_as_a_wait(monkeypatch):
     monkeypatch.setattr(ac, "_faucet_cooldown_s", lambda url, linked: 86460)
     out = ac._faucet_claim_fn({"faucet_url": "https://faucet.flop.network/fund"})
     assert out["amount"] == 25 and out["retry_after_s"] == 86460          # chu kỳ /health, không phải 2s
+
+
+def test_gateway_refs_travel_with_the_kv_ledger(tmp_path, monkeypatch):
+    import token_manager as tm
+    p = str(tmp_path / "led.json")
+    monkeypatch.setenv("TOKEN_LEDGER_FILE", p)
+    tm.save_ledger({"balances": {"FLOP": "1"}, "entries": [], "gateway_refs": ["a" * 16, "b" * 16]})
+    sent = {}
+    monkeypatch.setattr(ac, "kv_set", lambda pk, did, k, v: sent.update({k: v}) or True)
+    ac.persist_ledger_to_kv("pk", "did")
+    assert json.loads(sent["token_ledger"])["gateway_refs"] == ["a" * 16, "b" * 16]
+
+
+def test_testnet_without_a_backend_choice_uses_the_gateway(monkeypatch, tmp_path):
+    # Quên đặt FLOP_SESSION_BACKEND ngày testnet -> trước đây rơi về scaffold mempool (không có
+    # endpoint thật) = cả ngày không chi gì.
+    monkeypatch.setenv("TOKEN_LEDGER_FILE", str(tmp_path / "led.json"))
+    monkeypatch.setenv("FLOP_PACER_FILE", str(tmp_path / "pacer.json"))
+    monkeypatch.setattr(ac, "SEED_HEX", SEED_HEX)
+    monkeypatch.setattr(ac, "RUNNER_ROLE", "primary")
+    for name in ("hydrate_durable_from_kv", "hydrate_ledger_from_kv", "write_heartbeat",
+                 "persist_durable_to_kv", "persist_ledger_to_kv", "_write_summary", "check_price_alert"):
+        monkeypatch.setattr(ac, name, lambda *a, **k: None)
+    monkeypatch.setattr(ac, "load_state", lambda: {})
+    monkeypatch.setattr(ac, "save_state", lambda d: None)
+    monkeypatch.setattr(ac, "broadcast_telemetry", lambda *a, **k: True)
+    monkeypatch.setattr(ac, "broadcast_manifest", lambda *a, **k: True)
+    monkeypatch.setattr(ac, "auto_respond", lambda *a, **k: (0, 0))
+    monkeypatch.setattr(ac, "_telegram_send", lambda *a, **k: True)
+    monkeypatch.setattr(ac, "_server_ok_count", 1)
+    monkeypatch.setenv("FLOP_SESSION_ENABLED", "on")
+    monkeypatch.delenv("FLOP_SESSION_BACKEND", raising=False)
+    monkeypatch.setenv("TESTNET_ENABLED", "true")
+    hit = []
+    monkeypatch.setattr(ac, "gateway_session_step", lambda *a, **k: hit.append(1) or ("0✓ gateway/x", 0, {}))
+    ac.main()
+    assert hit == [1]

@@ -30,6 +30,7 @@ Chạy thử offline (không key, không mạng):
 """
 
 import os
+import hashlib
 import json
 import time
 import calendar
@@ -576,6 +577,9 @@ def spend(amount, memo, token: str = None, *, path: str = None,
             "signed": signed, "reason": "chi tiêu mô phỏng (không đụng chain)"}
 
 
+GATEWAY_REFS_KEEP = 100      # gateway trả tối đa ~20 biên nhận/lần -> 100 là dư
+
+
 def record_gateway_spend(amount, memo, ref: str, token: str = None, *, path: str = None,
                          log=print) -> dict:
     """Ghi sổ một lần chi ĐÃ XẢY RA ở gateway FLOP (api.flop.network trừ quota; `ref` = id
@@ -589,6 +593,14 @@ def record_gateway_spend(amount, memo, ref: str, token: str = None, *, path: str
     if amt is None or amt <= 0 or not ref:
         return {"outcome": "skipped_insufficient", "reason": f"thiếu số lượng/bằng chứng ({amount!r}, {ref!r})"}
     state = load_ledger(path)
+    # Chống ghi TRÙNG ngay trong sổ (bền qua KV): danh sách "biên nhận đã ghi" của gateway nằm
+    # trong state.json (Actions cache) — cache mất thì lượt sau thấy lại tới 20 biên nhận cũ và
+    # ghi lần hai, cộng VĨNH VIỄN vào tổng chi (chỉ tăng). Giữ dấu băm của GATEWAY_REFS_KEEP ref.
+    h = hashlib.sha256(str(ref).encode("utf-8")).hexdigest()[:16]
+    refs = [x for x in (state.get("gateway_refs") or []) if isinstance(x, str)]
+    if h in refs:
+        return {"outcome": "duplicate", "reason": f"ref {str(ref)[:24]} đã ghi sổ trước đó"}
+    state["gateway_refs"] = (refs + [h])[-GATEWAY_REFS_KEEP:]
     cur = _parse_amount(state["balances"].get(token, "0")) or Decimal(0)
     new_bal = _fmt(max(Decimal(0), cur - amt))
     state["balances"][token] = new_bal

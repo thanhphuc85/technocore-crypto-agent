@@ -586,3 +586,10 @@ def test_switching_network_starts_clean():
     gw.run_step(state, agent_key=_key("22"), http=fake, now=NOW + 300, prompts=["a", "b"],
                 expect_network="testnet", sleep=lambda s: None, log=logs.append)
     assert "/v1/enroll/wallet" not in fake.paths()                       # cùng mạng: giữ trạng thái
+
+
+def test_network_name_variants_match_but_devnet_never_counts_as_testnet():
+    assert gw.network_matches("testnet", "testnet") and gw.network_matches("flop-testnet-1", "testnet")
+    assert gw.network_matches("Testnet", "testnet")
+    assert not gw.network_matches("devnet", "testnet") and not gw.network_matches("testnetish", "testnet")
+    assert not gw.network_matches("flop-devnet", "testnet") and not gw.network_matches(None, "testnet")
