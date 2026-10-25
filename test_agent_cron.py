@@ -3689,3 +3689,42 @@ def test_faucet_step_warns_once_when_faucet_and_wallet_differ(monkeypatch, tmp_p
     ac.faucet_step(state, _real_key(), "did")
     ac.faucet_step(state, _real_key(), "did")
     assert len([m for m in sent if "ví mua compute" in m]) == 1
+
+
+def test_new_settled_receipts_persist_the_ledger_immediately(monkeypatch):
+    # Biên nhận mới ghi sổ -> lưu sổ cái NGAY, không đợi cuối run (run chết giữa chừng = mất số chi).
+    import flop_gateway
+    persisted = []
+    monkeypatch.setattr(ac, "persist_ledger_to_kv", lambda pk, did: persisted.append(did))
+    monkeypatch.setattr(ac, "save_state", lambda d: None)
+    monkeypatch.setenv("FLOP_GATEWAY_PROMPTS", "q")
+    monkeypatch.setenv("TESTNET_ENABLED", "true")
+    monkeypatch.setattr(flop_gateway, "run_step", lambda st, **k: {"outcome": "pace_wait", "calls": 0,
+                                                                   "receipts_new": 2, "settled_new": 13.0})
+    ac.gateway_session_step({}, _real_key(), 1_800_000_000)
+    assert persisted == [ac.did_of(_real_key())]
+    persisted.clear()
+    monkeypatch.setattr(flop_gateway, "run_step", lambda st, **k: {"outcome": "pace_wait", "calls": 0,
+                                                                   "receipts_new": 0})
+    ac.gateway_session_step({}, _real_key(), 1_800_000_000)
+    assert persisted == []                                              # không có gì mới -> không ghi KV thừa
+
+
+def test_faucet_claim_persists_the_ledger_immediately(monkeypatch, tmp_path):
+    import flop_faucet
+    monkeypatch.setenv("FLOP_FAUCET_STATE", str(tmp_path / "f.json"))
+    monkeypatch.setenv("TOKEN_LEDGER_FILE", str(tmp_path / "l.json"))
+    monkeypatch.setenv("FLOP_FAUCET_ENABLED", "on")
+    monkeypatch.setenv("FLOP_FAUCET_TIER", "linked")
+    monkeypatch.setenv("TESTNET_ENABLED", "true")
+    monkeypatch.delenv("FLOP_FAUCET_ADDRESS", raising=False)
+    monkeypatch.setattr(ac, "save_state", lambda d: None)
+    persisted = []
+    monkeypatch.setattr(ac, "persist_ledger_to_kv", lambda pk, did: persisted.append(did))
+    monkeypatch.setattr(flop_faucet, "run_faucet_cycle", lambda **k: {"outcome": "claimed", "amount": "500"})
+    assert ac.faucet_step({}, _real_key(), "did:x") == "claimed" and persisted == ["did:x"]
+    persisted.clear()
+    monkeypatch.setattr(flop_faucet, "run_faucet_cycle", lambda **k: {"outcome": "skipped_cooldown"})
+    monkeypatch.setattr(flop_faucet, "seconds_until_next", lambda **k: None)
+    ac.faucet_step({}, _real_key(), "did:x")
+    assert persisted == []

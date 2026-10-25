@@ -3420,6 +3420,10 @@ def faucet_step(state: dict, private_key, did) -> str:
                                               private_key=private_key, did=did)
         status = fr.get("outcome", "?")
         print(f"[faucet] {status}" + (f" — {fr['reason']}" if fr.get("reason") else ""))
+        if status == "claimed":
+            # Khoản nạp vừa vào sổ: lưu sổ cái NGAY (mốc "đã xin" lưu ở state.json ngay dưới đây;
+            # run chết trước persist cuối run thì sổ thiếu vĩnh viễn khoản nạp này).
+            persist_ledger_to_kv(private_key, did)
         state["faucet_state"] = flop_faucet._load(fpath)
         save_state({"faucet_state": state["faucet_state"]})
         return status
@@ -4284,6 +4288,11 @@ def gateway_session_step(state: dict, private_key, now: int):
         state, agent_key=private_key, now=now, prompts=prompts, expect_network=expect,
         http=_gateway_http,
         book_fn=book if testnet else None)
+    if testnet and r.get("receipts_new"):
+        # Lưu sổ cái NGAY: biên nhận vừa ghi đã được đánh dấu "đã ghi" trong state.json (cache lưu
+        # cả khi run lỗi). Nếu chỉ đợi persist cuối run mà run chết giữa chừng thì số chi mất
+        # VĨNH VIỄN (lượt sau coi biên nhận đã ghi rồi). persist ghi KV + bản sao state.json.
+        persist_ledger_to_kv(private_key, did_of(private_key))
     if jobs and r.get("calls"):
         used = int(r["calls"])
         state["gateway_jobs"] = jobs[used:]              # job đã dùng làm đề -> ra khỏi hàng
