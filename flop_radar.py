@@ -158,5 +158,7 @@ def check(state: dict, fetch_fn) -> str:
     if not lines:
         return None
     return ("🚨 FLOP TESTNET RADAR — có thay đổi:\n" + "\n".join(lines)
-            + "\n→ Mở checklist ngày 1 trong STRATEGY.md: đọc spec mới, chỉnh "
-              "_faucet_claim_fn/_mempool_submit_fn, dry-run rồi mới chi thật.")
+            + "\n→ Checklist ngày 1 (STRATEGY.md): đặt TESTNET_ENABLED=true (agent tự mua compute qua "
+              "gateway bằng ví DID); FLOP_FAUCET_ENABLED=on + FLOP_FAUCET_URL + FLOP_FAUCET_TIER "
+              "(manual/linked/quick); testnet có gateway riêng thì đặt FLOP_GATEWAY_URL. Xem dòng "
+              "[session]/[gateway] ở run đầu tiên.")
