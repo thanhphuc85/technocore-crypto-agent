@@ -88,6 +88,8 @@ def _env(monkeypatch):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("FLOP_WALLET_SEED_HEX", SEED)
     monkeypatch.setenv("FLOP_GATEWAY_CALL_GAP_SEC", "0")
+    monkeypatch.setenv("FLOP_GATEWAY_SKIP_PCT", "0")              # test tất định; nhiễu có test riêng
+    monkeypatch.setenv("FLOP_PACE_JITTER_PCT", "0")
 
 
 def _run(state, fake, booked=None, **kw):
@@ -478,3 +480,35 @@ def test_one_queued_job_is_not_sent_twice_in_a_run(monkeypatch):
                 expect_network="devnet", sleep=lambda s: None, log=lambda *a: None)
     sent = [c[3]["messages"][0]["content"] for c in fake.calls if c[1] == "/v1/chat/completions"]
     assert sent == ["only one"]                                          # 1 đề -> 1 lần gọi
+
+
+def test_random_skip_and_jitter_vary_the_rhythm_but_not_the_daily_total(monkeypatch):
+    monkeypatch.setenv("FLOP_GATEWAY_SKIP_PCT", "10")
+    monkeypatch.setenv("FLOP_PACE_JITTER_PCT", "20")
+    fake = FakeGateway(quota=2000.0, expires_ms=(NOW + 20 * 3600) * 1000, cost=6.5)
+    # rng 0.05 < 10% -> nghỉ cả lượt, không mua gì
+    r = gw.run_step({}, agent_key=_key("22"), http=fake, now=NOW, prompts=["a", "b"], expect_network="devnet",
+                    sleep=lambda s: None, log=lambda *a: None, rng=lambda: 0.05)
+    assert r["outcome"] == "pace_wait" and "nghỉ ngẫu nhiên" in r["reason"]
+    assert "/v1/chat/completions" not in fake.paths()
+    # Cả ngày với nhiễu thật: vẫn chi gần hết quota trước hạn (phần nghỉ được dồn sang lượt sau)
+    import random as _r
+    rnd = _r.Random(7).random
+    fake2, state, t = FakeGateway(quota=2000.0, expires_ms=(NOW + 20 * 3600) * 1000, cost=6.5), {}, NOW
+    outcomes = []
+    while t < NOW + 20 * 3600:
+        outcomes.append(gw.run_step(state, agent_key=_key("22"), http=fake2, now=t, prompts=["a", "b"],
+                                    expect_network="devnet", sleep=lambda s: None, log=lambda *a: None,
+                                    rng=rnd)["outcome"])
+        t += 300
+    assert fake2.quota < 2000 * 0.05                                     # >95% đã chi trước hạn
+    assert outcomes.count("pace_wait") > 0 and outcomes.count("spent") > 0
+
+
+def test_no_random_skip_near_the_deadline(monkeypatch):
+    monkeypatch.setenv("FLOP_GATEWAY_SKIP_PCT", "100")                  # luôn nghỉ... trừ khi sát hạn
+    monkeypatch.setenv("FLOP_GATEWAY_MARGIN_SEC", "0")
+    fake = FakeGateway(quota=20.0, expires_ms=(NOW + 600) * 1000)
+    r = gw.run_step({}, agent_key=_key("22"), http=fake, now=NOW, prompts=["a", "b"], expect_network="devnet",
+                    sleep=lambda s: None, log=lambda *a: None, rng=lambda: 0.0)
+    assert r["outcome"] == "spent"

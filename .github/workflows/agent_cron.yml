@@ -304,6 +304,8 @@ jobs:
           FLOP_GATEWAY_LAG_PCT: ${{ vars.FLOP_GATEWAY_LAG_PCT }}
           # Quota tăng từ mức này trở lên = faucet nạp (mở cửa sổ chi mới); ít hơn = hoàn tiền.
           FLOP_GATEWAY_TOPUP_MIN: ${{ vars.FLOP_GATEWAY_TOPUP_MIN }}
+          # % lượt nghỉ ngẫu nhiên (mặc định 10); nhiễu phần đến hạn dùng chung FLOP_PACE_JITTER_PCT.
+          FLOP_GATEWAY_SKIP_PCT: ${{ vars.FLOP_GATEWAY_SKIP_PCT }}
           FLOP_GATEWAY_LAG_ALERT_HOURS: ${{ vars.FLOP_GATEWAY_LAG_ALERT_HOURS }}
           FLOP_GATEWAY_LAG_REALERT_HOURS: ${{ vars.FLOP_GATEWAY_LAG_REALERT_HOURS }}
           FLOP_GATEWAY_MIN_TOKENS: ${{ vars.FLOP_GATEWAY_MIN_TOKENS }}

@@ -31,6 +31,7 @@ import base64
 import hashlib
 import math
 import os
+import random
 import re
 import time
 
@@ -442,7 +443,7 @@ def lag_status(g: dict, now: int, outcome: str, *, pct: float, alert_hours: floa
 # --- một nhịp ---------------------------------------------------------------------------
 
 def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_network: str,
-             book_fn=None, sleep=time.sleep, log=print) -> dict:
+             book_fn=None, sleep=time.sleep, log=print, rng=None) -> dict:
     """Một nhịp mua compute. Trả {"outcome", "calls", "spent", ...}; KHÔNG ném lỗi.
 
     `book_fn(amount, ref, model)` ghi sổ (chỉ khi mạng khớp `expect_network`); None = chạy
@@ -557,6 +558,18 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
                               _env_num("FLOP_GATEWAY_RUN_INTERVAL_SEC", 300),
                               _env_num("FLOP_GATEWAY_MARGIN_SEC", 1800), topup)
         g["window"] = win
+        # Nhịp mua bớt máy móc (như flop_pacer): thỉnh thoảng nghỉ cả lượt và co giãn phần đến
+        # hạn ±FLOP_PACE_JITTER_PCT. Phần không chi được TÍCH sang lượt sau (window_due cộng
+        # dồn) nên tổng chi trong ngày không đổi. Sát hạn thì không nghỉ, để kịp chi hết.
+        rnd = rng or random.random
+        interval = _env_num("FLOP_GATEWAY_RUN_INTERVAL_SEC", 300)
+        near_end = hz - _env_num("FLOP_GATEWAY_MARGIN_SEC", 1800) - now <= 3 * interval
+        if not near_end and rnd() * 100 < _env_num("FLOP_GATEWAY_SKIP_PCT", 10):
+            return done("pace_wait", due=round(due, 6), remaining=remaining, **rs,
+                        reason="nghỉ ngẫu nhiên lượt này (nhịp mua bớt đều đặn) — phần đến hạn dồn sang lượt sau")
+        jit = max(0.0, min(50.0, _env_num("FLOP_PACE_JITTER_PCT", 20))) / 100
+        if jit and not near_end:
+            due = min(float(remaining), due * (1 + (rnd() * 2 - 1) * jit))
         max_calls = max(1, int(_env_num("FLOP_GATEWAY_MAX_CALLS_PER_RUN", 2)))
         pp, pc = _price(model)
         # Trần token/lần: mặc định = giới hạn của model (đo devnet 2026-10-24: trần 1024 chỉ chi
