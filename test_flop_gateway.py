@@ -512,3 +512,41 @@ def test_no_random_skip_near_the_deadline(monkeypatch):
     r = gw.run_step({}, agent_key=_key("22"), http=fake, now=NOW, prompts=["a", "b"], expect_network="devnet",
                     sleep=lambda s: None, log=lambda *a: None, rng=lambda: 0.0)
     assert r["outcome"] == "spent"
+
+
+def _fixed_price_gateway(price_field, quota=200.0):
+    fake = FakeGateway(quota=quota, expires_ms=SOON, cost=5.0)
+    real = fake.__call__
+
+    def http(method, url, headers=None, json=None, timeout=None):
+        if url.endswith("/models"):
+            fake.calls.append((method, "/v1/models", headers or {}, json, url))
+            return Resp(data={"data": [{"id": "m1", "pricing": price_field,
+                                        "per_request_limits": {"completion_tokens": 2048}}]})
+        return real(method, url, headers=headers, json=json, timeout=timeout)
+    return fake, http
+
+
+def test_fixed_price_per_call_buys_by_count_with_the_largest_admitted_size(monkeypatch):
+    # Giá CỐ ĐỊNH 5 FLOP/lần (giá token = 0): trước đây min_cost = 0 -> pace_wait mãi, không mua gì.
+    fake, http = _fixed_price_gateway({"prompt": "0", "completion": "0", "request": "5"})
+    r = gw.run_step({}, agent_key=_key("22"), http=http, now=NOW, prompts=["a", "b"], expect_network="devnet",
+                    sleep=lambda s: None, log=lambda *a: None)
+    chats = [c[3] for c in fake.calls if c[1] == "/v1/chat/completions"]
+    assert r["outcome"] == "spent" and len(chats) == 2
+    assert all(c["max_tokens"] == 2048 for c in chats)                    # cùng giá -> cỡ lớn nhất
+    assert all(c["max_cost_flop"] == pytest.approx(5.5) for c in chats)    # trần = giá 1 lần + 10%
+
+
+def test_fixed_price_from_variable_and_unknown_price_is_reported(monkeypatch):
+    fake, http = _fixed_price_gateway({"prompt": "0", "completion": "0"})
+    state = {}
+    r = gw.run_step(state, agent_key=_key("22"), http=http, now=NOW, prompts=["a"], expect_network="devnet",
+                    sleep=lambda s: None, log=lambda *a: None)
+    assert r["outcome"] == "price_unknown" and "FLOP_GATEWAY_FIXED_PRICE" in r["reason"]
+    assert state[gw.KEY]["wait_until"] > NOW                               # không gõ lại mỗi lượt
+    monkeypatch.setenv("FLOP_GATEWAY_FIXED_PRICE", "5")
+    fake2, http2 = _fixed_price_gateway({"prompt": "0", "completion": "0"})
+    r2 = gw.run_step({}, agent_key=_key("22"), http=http2, now=NOW, prompts=["a"], expect_network="devnet",
+                     sleep=lambda s: None, log=lambda *a: None)
+    assert r2["outcome"] == "spent"

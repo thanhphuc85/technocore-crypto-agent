@@ -326,11 +326,18 @@ def size_call(per_call: float, prompt_tokens: int, price_prompt: float, price_co
 
 
 def _price(model: dict):
+    """(giá/token prompt, giá/token completion, giá CỐ ĐỊNH/lần gọi). Giá cố định lấy từ
+    FLOP_GATEWAY_FIXED_PRICE (operator đặt khi FLOP công bố ở chỗ khác) hoặc `pricing.request`
+    (trường OpenRouter). Devnet 2026-10-24 chỉ tính theo token; testnet có thể khác."""
     p = (model or {}).get("pricing") or {}
-    try:
-        return float(p.get("prompt") or 0), float(p.get("completion") or 0)
-    except (TypeError, ValueError):
-        return 0.0, 0.0
+
+    def num(v):
+        try:
+            return max(0.0, float(v or 0))
+        except (TypeError, ValueError):
+            return 0.0
+    fixed = num(os.environ.get("FLOP_GATEWAY_FIXED_PRICE", "").strip()) or num(p.get("request"))
+    return num(p.get("prompt")), num(p.get("completion")), fixed
 
 
 def _completion_cap(model: dict, default: int) -> int:
@@ -571,7 +578,14 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
         if jit and not near_end:
             due = min(float(remaining), due * (1 + (rnd() * 2 - 1) * jit))
         max_calls = max(1, int(_env_num("FLOP_GATEWAY_MAX_CALLS_PER_RUN", 2)))
-        pp, pc = _price(model)
+        pp, pc, preq = _price(model)
+        if pp <= 0 and pc <= 0 and preq <= 0:
+            # Không biết giá -> KHÔNG đoán và KHÔNG im lặng chờ mãi: báo rõ, thử lại sau 30 phút.
+            backoff(1800, "price_unknown")
+            return done("price_unknown", remaining=remaining, **rs,
+                        reason=(f"catalog không có giá cho {model_id} (pricing keys: "
+                                f"{sorted((model.get('pricing') or {}))[:8]}) — đặt FLOP_GATEWAY_FIXED_PRICE "
+                                "nếu FLOP công bố giá cố định/lần gọi"))
         # Trần token/lần: mặc định = giới hạn của model (đo devnet 2026-10-24: trần 1024 chỉ chi
         # được ~3.7k/20k quota trong 24h). Lần gọi vẫn được định cỡ theo phần đến hạn.
         cap = _completion_cap(model, int(_env_num("FLOP_GATEWAY_MAX_TOKENS", 0)) or 8192)
@@ -583,7 +597,9 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
         pick = [prompts[(idx + i) % len(prompts)] for i in range(min(max_calls, len(prompts)))]
         est = estimate(http, base, model_id, pick[0], cap)
         ptok = int(est.get("estimated_input_tokens") or len(pick[0]) // 4)
-        min_cost = ptok * pp + min_tok * pc
+        # Giá cố định/lần gọi: số lần gọi quyết định số chi; cỡ yêu cầu không làm đổi giá nên
+        # dùng cỡ lớn nhất miner còn nhận (tok_cap học được) — cùng giá, nhiều compute hơn.
+        min_cost = preq + ptok * pp + min_tok * pc
         if due < min_cost or min_cost <= 0:
             return done("pace_wait", due=round(due, 6), remaining=remaining, **rs,
                         reason=f"đến hạn {due:.4f} < giá tối thiểu 1 lần gọi {min_cost:.4f} — tích sang run sau")
@@ -596,13 +612,19 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
                 ptok = int(est.get("estimated_input_tokens") or len(prompt) // 4)
             # Cỡ được miner nhận học dần: devnet 2026-10-24 từ chối 8192 token ("no admitted miner
             # for model and budget" — ước tính 82 block, quá max_wait), nhận 1024.
-            mt = size_call(per_call, ptok, pp, pc, min(cap, int(g.get("tok_cap") or cap)), min_tok)
+            size_cap = min(cap, int(g.get("tok_cap") or cap))
+            if pc > 0:
+                mt = size_call(per_call - preq, ptok, pp, pc, size_cap, min_tok)
+            else:
+                mt = size_cap if per_call >= preq + ptok * pp else None
             if mt is None:
                 break
             if calls:
                 sleep(gap)
             g["last_mt"] = mt
-            r = chat(http, base, bearer, model_id, prompt, mt, max_cost=per_call * 1.1,
+            # Trần do gateway giữ = giá dự tính của CHÍNH lần gọi này (+10%), không phải cả phần đến hạn.
+            est_cost = preq + ptok * pp + mt * pc
+            r = chat(http, base, bearer, model_id, prompt, mt, max_cost=min(per_call, est_cost) * 1.1,
                      max_wait_ms=max_wait)
             u = r.get("usage") or {}
             cost, src = float(u.get("cost_flop") or 0), "usage"
