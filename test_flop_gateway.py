@@ -550,3 +550,39 @@ def test_fixed_price_from_variable_and_unknown_price_is_reported(monkeypatch):
     r2 = gw.run_step({}, agent_key=_key("22"), http=http2, now=NOW, prompts=["a"], expect_network="devnet",
                      sleep=lambda s: None, log=lambda *a: None)
     assert r2["outcome"] == "spent"
+
+
+def test_epoch_accepts_ms_and_seconds_and_does_not_re_enroll_every_run():
+    assert gw.epoch_s((NOW + 3600) * 1000) == NOW + 3600 and gw.epoch_s(NOW + 3600) == NOW + 3600
+    assert gw.epoch_s(None) is None and gw.epoch_s("x") is None and gw.epoch_s(0) is None
+    assert gw.horizon(NOW, NOW + 7200) == NOW + 7200                     # hạn tính bằng GIÂY
+    fake, state = FakeGateway(expires_ms=NOW + 20 * 3600), {}             # gateway trả GIÂY
+    _run(state, fake)
+    fake.calls.clear()
+    _run(state, fake)
+    assert "/v1/enroll/wallet" not in fake.paths()                        # trước đây: đăng ký lại mọi lượt
+
+
+def test_size_probe_never_jumps_back_to_the_model_cap():
+    # 1024 chạy ổn, 2048 từng bị từ chối: chỉ thử tới giữa khoảng, không nhảy lên 8192.
+    assert gw.probe_up(1024, 8192, 2048, NOW, NOW + 60) == 1280           # +25% vẫn dưới cỡ hỏng
+    assert gw.probe_up(1800, 8192, 2048, NOW, NOW + 60) == 1924           # +25% chạm cỡ hỏng -> giữa khoảng
+    assert gw.probe_up(2040, 8192, 2048, NOW, NOW + 60) == 2044
+    assert gw.probe_up(1024, 8192, 2048, NOW, NOW + 2 * 86400) == 1280    # quên cỡ hỏng sau 1 ngày
+    assert gw.probe_up(7000, 8192, None, None, NOW) == 8192               # không vượt trần model
+
+
+def test_switching_network_starts_clean():
+    # Trạng thái devnet (đang nghỉ 1h sau 403 hết hạn) không được kẹt sang testnet.
+    state = {gw.KEY: {"profile": f"{gw.base_url()}|devnet", "wait_until": NOW + 3600,
+                      "wait_why": "403 devnet_enrollment_expired", "vault": {"n": "x", "c": "y"},
+                      "window": {"start": NOW - 9999, "horizon": NOW + 99, "total": 20000.0, "spent": 5.0}}}
+    fake, logs = FakeGateway(network="testnet", expires_ms=SOON), []
+    r = gw.run_step(state, agent_key=_key("22"), http=fake, now=NOW, prompts=["a", "b"], expect_network="testnet",
+                    sleep=lambda s: None, log=logs.append)
+    assert r["outcome"] != "backoff" and "/v1/enroll/wallet" in fake.paths()
+    assert state[gw.KEY]["profile"].endswith("|testnet") and any("đổi sang" in x for x in logs)
+    fake.calls.clear()
+    gw.run_step(state, agent_key=_key("22"), http=fake, now=NOW + 300, prompts=["a", "b"],
+                expect_network="testnet", sleep=lambda s: None, log=logs.append)
+    assert "/v1/enroll/wallet" not in fake.paths()                       # cùng mạng: giữ trạng thái

@@ -274,14 +274,24 @@ def chat(http, base: str, bearer: str, model: str, prompt: str, max_tokens: int,
 
 # --- nhịp chi: rải quota còn lại tới lúc hết hạn ----------------------------------------
 
-def horizon(now: int, expires_at_ms) -> int:
-    """Mốc phải chi hết: hạn của allowance (ms) nếu có, không thì cuối ngày UTC."""
+def epoch_s(v):
+    """Mốc thời gian -> giây. OpenAPI ghi `expires_at` là mili-giây; nếu mạng khác trả GIÂY
+    mà vẫn chia 1000 thì hạn rơi về năm 1970 -> bearer luôn "sắp hết hạn" -> đăng ký lại ví
+    MỌI lượt. Giá trị > 1e11 coi là mili-giây, ngược lại là giây. Rỗng/rác -> None."""
     try:
-        exp = int(float(expires_at_ms)) // 1000
-        if exp > now:
-            return exp
+        x = int(float(v))
     except (TypeError, ValueError):
-        pass
+        return None
+    if x <= 0:
+        return None
+    return x // 1000 if x > 10**11 else x
+
+
+def horizon(now: int, expires_at) -> int:
+    """Mốc phải chi hết: hạn của allowance nếu có (ms hoặc s), không thì cuối ngày UTC."""
+    exp = epoch_s(expires_at)
+    if exp and exp > now:
+        return exp
     return now - now % 86400 + 86400
 
 
@@ -349,6 +359,20 @@ def _completion_cap(model: dict, default: int) -> int:
             except (TypeError, ValueError):
                 continue
     return default
+
+
+TOK_BAD_TTL = 86400                    # quên cỡ bị từ chối sau 1 ngày (miner có thể đã khoẻ hơn)
+
+
+def probe_up(tok_cap: int, cap: int, tok_bad, tok_bad_ts, now: int) -> int:
+    """Cỡ thử tiếp sau một chuỗi thành công. Không bao giờ nhảy thẳng về trần model: trước
+    đây 12 lần ổn định -> bỏ trần -> gửi 8192 -> bị từ chối -> hạ 4096 -> 2048 -> 1024, mất 3
+    lượt mỗi chu kỳ (~mỗi giờ trên devnet). Tăng tối đa 25%, và nếu đã biết cỡ bị từ chối
+    (trong 1 ngày) thì chỉ thử tới giữa khoảng [cỡ đang chạy, cỡ bị từ chối)."""
+    nxt = min(cap, int(tok_cap * 1.25))
+    if tok_bad and now - int(tok_bad_ts or 0) < TOK_BAD_TTL and nxt >= int(tok_bad):
+        nxt = (tok_cap + int(tok_bad)) // 2
+    return max(tok_cap, nxt)
 
 
 def _receipt_key(r: dict) -> str:
@@ -458,6 +482,14 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
     hạn, mốc chờ (Retry-After), biên nhận đã thấy, thống kê."""
     g = state.get(KEY) if isinstance(state.get(KEY), dict) else {}
     g = dict(g)
+    # Đổi gateway/mạng (vd tập devnet -> testnet thật): bắt đầu SẠCH. Không thì lịch nghỉ, cửa
+    # sổ chi, bearer, cỡ yêu cầu và biên nhận của mạng cũ (vd "chờ 1h" sau 403 hết hạn devnet)
+    # kẹt sang mạng mới — lượt đầu testnet có thể đứng chờ tới 1 giờ.
+    profile = f"{base_url()}|{expect_network}"
+    if g and g.get("profile") != profile:
+        log(f"[gateway] đổi sang {profile} — bỏ trạng thái của {g.get('profile') or 'mạng cũ'}")
+        g = {}
+    g["profile"] = profile
     out = {"outcome": "?", "calls": 0, "spent": 0.0}
     calls, spent = 0, 0.0                    # giữ được cả khi lần gọi sau lỗi (báo đúng số đã gọi)
 
@@ -489,7 +521,8 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
 
     try:
         bearer = open_bearer(agent_key, g.get("vault"))
-        if bearer and g.get("expires_at") and int(float(g["expires_at"])) // 1000 <= now + 120:
+        exp_s = epoch_s(g.get("expires_at"))
+        if bearer and exp_s and exp_s <= now + 120:
             bearer = None                                     # sắp hết hạn -> enroll lại (không hạn -> giữ)
         if not bearer:
             e = enroll(http, base, wkey, _env("FLOP_GATEWAY_PURPOSE") or None)
@@ -647,11 +680,11 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
                 # Không có cost_flop lẫn quota giảm -> KHÔNG ghi sổ theo ước tính; in khoá thật.
                 last["usage_keys"] = sorted(u)[:10]
                 log(f"[gateway] ⚠️ không xác định được số đã chi (usage keys: {last['usage_keys']})")
-            if g.get("tok_cap"):                       # ổn định 12 lần liền -> thử cỡ lớn hơn 25%
+            if g.get("tok_cap"):                       # ổn định 12 lần liền -> thử cỡ lớn hơn
                 g["tok_ok"] = int(g.get("tok_ok") or 0) + 1
                 if g["tok_ok"] >= 12:
-                    g["tok_cap"] = min(cap, int(g["tok_cap"] * 1.25)) if g["tok_cap"] * 1.25 < cap else None
-                    g["tok_ok"] = 0
+                    g["tok_cap"], g["tok_ok"] = probe_up(int(g["tok_cap"]), cap, g.get("tok_bad"),
+                                                         g.get("tok_bad_ts"), now), 0
             # Ghi tiến độ NGAY sau mỗi lần chi: lỗi ở lần gọi sau không làm mất số đã chi.
             g["remaining"] = max(0.0, min(quota_now, remaining - spent))
             g["window"] = {**g["window"], "spent": float(g["window"].get("spent") or 0) + cost}
@@ -688,7 +721,10 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
                         reason=f"403 {e.code} {e.message}".strip())
         if e.status == 503 and "no admitted miner" in e.message.lower() and g.get("last_mt"):
             # Không miner nào nhận yêu cầu CỠ này -> lần sau gửi nửa cỡ (không phải mạng quá tải).
-            g["tok_cap"] = max(int(_env_num("FLOP_GATEWAY_MIN_TOKENS", 64)) * 2, int(g["last_mt"]) // 2)
+            bad = int(g["last_mt"])
+            if not g.get("tok_bad") or bad < int(g["tok_bad"]):
+                g["tok_bad"], g["tok_bad_ts"] = bad, now      # cỡ NHỎ NHẤT từng bị từ chối
+            g["tok_cap"] = max(int(_env_num("FLOP_GATEWAY_MIN_TOKENS", 64)) * 2, bad // 2)
             g["tok_ok"] = 0
             backoff(60, "no_admitted_miner")
             return done("no_miner", reason=f"503 {e.code}: {e.message[:120]} — lần sau tối đa {g['tok_cap']} token")
