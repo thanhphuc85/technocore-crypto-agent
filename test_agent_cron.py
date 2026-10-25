@@ -3587,3 +3587,31 @@ def test_capped_room_skips_periodic_posts_without_failing(monkeypatch):
     assert ac.room_capped("some-quiet-room") is False
     monkeypatch.setattr(ac, "POST_GOVERNOR", False)
     assert ac.room_capped(ac.ROOM) is False
+
+
+def test_faucet_cooldown_written_in_text_is_a_wait_not_an_error(monkeypatch):
+    # Devnet 2026-10-24: "địa chỉ này vừa được cấp vốn; thử lại sau 1306 phút". Trước đây 4xx
+    # như vậy -> error_claim -> gõ lại mỗi giờ (~22 lần bị từ chối/ngày).
+    monkeypatch.setenv("FLOP_FAUCET_ADDRESS", FLOP_ADDR)
+    monkeypatch.delenv("FLOP_FAUCET_TIER", raising=False)
+
+    class R:
+        status_code, headers, content = 400, {}, b"{...}"
+        def json(self):
+            return {"success": False, "error": "This address was just funded; try again in 1306 minutes"}
+        def raise_for_status(self):
+            raise AssertionError("không được coi là lỗi")
+    monkeypatch.setattr(ac.requests, "post", lambda *a, **k: R())
+    out = ac._faucet_claim_fn({"faucet_url": "https://faucet.flop.network/fund"})
+    assert out == {"amount": 0, "retry_after_s": 1306 * 60}
+    assert ac._wait_from_text("Địa chỉ này vừa được cấp vốn; thử lại sau 1306 phút") == 1306 * 60
+    assert ac._wait_from_text("cooldown active") is None
+
+
+def test_success_text_with_a_duration_is_not_read_as_a_wait(monkeypatch):
+    monkeypatch.setenv("FLOP_FAUCET_ADDRESS", FLOP_ADDR)
+    monkeypatch.setattr(ac.requests, "post", lambda *a, **k: _resp_with_body(
+        {"success": True, "amount": 25, "message": "Funded in 2 seconds", "txHash": "0x" + "ab" * 32}))
+    monkeypatch.setattr(ac, "_faucet_cooldown_s", lambda url, linked: 86460)
+    out = ac._faucet_claim_fn({"faucet_url": "https://faucet.flop.network/fund"})
+    assert out["amount"] == 25 and out["retry_after_s"] == 86460          # chu kỳ /health, không phải 2s

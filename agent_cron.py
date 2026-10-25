@@ -3239,14 +3239,24 @@ def _faucet_claim_fn(req: dict) -> dict:
             body = r.json() if r.content else {}
         except ValueError:
             body = {}
-        wait = _faucet_retry_after(r.headers.get("Retry-After"), body if isinstance(body, dict) else {})
+        wait = _faucet_retry_after(r.headers.get("Retry-After"), body if isinstance(body, dict) else {}, True)
         return {"amount": 0, "retry_after_s": wait if wait is not None else 3600}
-    r.raise_for_status()
-    data = r.json() if r.content else {}
+    try:
+        data = r.json() if r.content else {}
+    except ValueError:
+        data = {}
     if not isinstance(data, dict):
         data = {}
-    _wait = _faucet_retry_after(None, data)
+    if r.status_code >= 400:
+        # Faucet từ chối với thời gian chờ trong câu chữ (400/403...): là "chưa tới lượt", KHÔNG
+        # phải lỗi — nếu coi là lỗi thì agent gõ lại mỗi giờ (~22 lần bị từ chối/ngày).
+        _wait = _faucet_retry_after(r.headers.get("Retry-After"), data, True)
+        if _wait is not None:
+            print(f"[faucet] chưa tới lượt (HTTP {r.status_code}) — chờ {_wait // 60} phút")
+            return {"amount": 0, "retry_after_s": _wait}
+        r.raise_for_status()
     err = _api_error(data)
+    _wait = _faucet_retry_after(None, data, bool(err))
     if err:
         if _wait is not None:                          # "chưa tới lượt, quay lại sau N giây"
             return {"amount": 0, "retry_after_s": _wait}
@@ -3270,8 +3280,9 @@ def _faucet_claim_fn(req: dict) -> dict:
     return out
 
 
-def _faucet_retry_after(header, body: dict):
-    """Số giây tới lượt claim kế tiếp từ header Retry-After hoặc thân phản hồi; None nếu không có."""
+def _faucet_retry_after(header, body: dict, text: bool = False):
+    """Số giây tới lượt claim kế tiếp từ header Retry-After hoặc thân phản hồi; None nếu không có.
+    `text=True` (CHỈ khi faucet từ chối) -> đọc cả thời gian chờ viết trong câu chữ."""
     if header is not None:
         try:
             return max(0, int(float(str(header).strip())))
@@ -3298,7 +3309,33 @@ def _faucet_retry_after(header, body: dict):
                 return max(0, int(t - time.time()))
             except ValueError:
                 continue
+    for k in (("error", "message", "detail", "reason") if text else ()):   # chờ viết trong CÂU CHỮ
+        w = _wait_from_text(body.get(k))
+        if w is not None:
+            return w
     return None
+
+
+_WAIT_UNITS = {"s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1, "giây": 1,
+               "m": 60, "min": 60, "mins": 60, "minute": 60, "minutes": 60, "phút": 60,
+               "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600, "giờ": 3600}
+_WAIT_RE = re.compile(r"(?i)(?:in|after|sau|wait|retry|again)\D{0,20}?(\d{1,6}(?:\.\d+)?)\s*"
+                      r"(seconds?|secs?|sec|s|minutes?|mins?|min|m|hours?|hrs?|hr|h|giây|phút|giờ)\b")
+
+
+def _wait_from_text(text):
+    """Số giây chờ trong câu báo của faucet, vd devnet 2026-10-24: "This address was just
+    funded; try again in 1306 minutes" / "...thử lại sau 1306 phút". Không thấy -> None."""
+    if not isinstance(text, str) or not text:
+        return None
+    m = _WAIT_RE.search(text)
+    if not m:
+        return None
+    unit = m.group(2).lower()
+    mult = _WAIT_UNITS.get(unit) or _WAIT_UNITS.get(unit.rstrip("s"))
+    if not mult:
+        return None
+    return max(0, int(float(m.group(1)) * mult))
 
 
 def faucet_step(state: dict, private_key, did) -> str:
