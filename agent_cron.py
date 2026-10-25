@@ -4237,7 +4237,7 @@ def start_jitter_seconds(raw, rng=None):
     return (rng or random).uniform(0, n)
 
 
-def _gateway_prompts(now: int) -> list:
+def _gateway_prompts(now: int, ctx: str = "") -> list:
     """Đề bài cho các lần mua compute qua gateway. KHÔNG có pool mặc định dùng chung: biên
     nhận on-chain mang prompt_hash, nên các fork gửi cùng đề = trùng hash công khai (tín hiệu
     sybil). Nguồn: FLOP_GATEWAY_PROMPTS ('a|b|c') của operator, không có thì phần thân các câu
@@ -4247,6 +4247,11 @@ def _gateway_prompts(now: int) -> list:
     if not raw:
         raw = [q["body"] for q in KIBBLE_REQ_QUESTIONS if q.get("body")]
     stamp = time.strftime("%Y-%m-%dT%H:%MZ", time.gmtime(now))
+    if ctx:
+        # Số liệu thị trường LIVE do chính agent dựng (trusted) -> mỗi đề là một câu hỏi khác thật
+        # sự, gắn với tình hình lúc đó, thay vì 120 câu cố định lặp lại khi faucet lớn.
+        return [f"{p}\n\nLive market context ({stamp}): {ctx}\n"
+                "(Use the figures where relevant; answer concretely.)" for p in raw[:200]]
     return [f"{p}\n\n(Answer concretely; as of {stamp}.)" for p in raw[:200]]
 
 
@@ -4271,7 +4276,15 @@ def gateway_session_step(state: dict, private_key, now: int):
     # Đề ưu tiên = job kibble THẬT agent vừa làm (mỗi đề một việc khác nhau, có người đặt);
     # hết job mới dùng đề của operator. Nội dung job là UNTRUSTED -> isolate như mọi chỗ khác.
     jobs = [j for j in (state.get("gateway_jobs") or []) if isinstance(j, dict) and j.get("task")]
-    op = _gateway_prompts(now)
+    # Đề dự phòng của operator chỉ cần khi hàng job không đủ cho một lượt -> chỉ lúc đó mới tốn
+    # một lần lấy số liệu thị trường live.
+    ctx = ""
+    if len(jobs) < int(_env_float("FLOP_GATEWAY_MAX_CALLS_PER_RUN", 2)):
+        try:
+            ctx = build_market_context()
+        except Exception:
+            ctx = ""
+    op = _gateway_prompts(now, ctx)
     op_idx = int(state.get("gateway_op_idx") or 0) % max(1, len(op))
     if jobs:
         # Job trước, rồi đề operator (xoay vòng) -> hàng còn 1 job mà gọi 2 lần thì lần hai

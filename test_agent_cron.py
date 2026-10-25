@@ -3728,3 +3728,22 @@ def test_faucet_claim_persists_the_ledger_immediately(monkeypatch, tmp_path):
     monkeypatch.setattr(flop_faucet, "seconds_until_next", lambda **k: None)
     ac.faucet_step({}, _real_key(), "did:x")
     assert persisted == []
+
+
+def test_operator_fallback_prompts_carry_live_market_context(monkeypatch):
+    # Faucet lớn -> đề dự phòng (120 câu) dùng nhiều: gắn số liệu live để mỗi đề là câu khác thật sự.
+    monkeypatch.setenv("FLOP_GATEWAY_PROMPTS", "Explain oracle failure modes|Compare TWAP vs spot")
+    p = ac._gateway_prompts(1_800_000_000, "BTC $84000 (-2.1%) · Fear&Greed 40(Fear)")
+    assert "Live market context (2027-01-15T08:00Z): BTC $84000" in p[0] and p[1].startswith("Compare TWAP")
+    assert "Live market context" not in ac._gateway_prompts(1_800_000_000)[0]      # không có số liệu -> như cũ
+    import flop_gateway
+    seen, calls = {}, []
+    monkeypatch.setattr(ac, "build_market_context", lambda *a, **k: calls.append(1) or "BTC $1")
+    monkeypatch.setattr(flop_gateway, "run_step", lambda st, **k: seen.update(k) or {"outcome": "pace_wait", "calls": 0})
+    monkeypatch.setattr(ac, "save_state", lambda d: None)
+    ac.gateway_session_step({}, _real_key(), 1_800_000_000)
+    assert calls == [1] and "BTC $1" in seen["prompts"][0]
+    calls.clear()
+    ac.gateway_session_step({"gateway_jobs": [{"id": "a", "task": "t1"}, {"id": "b", "task": "t2"}]},
+                            _real_key(), 1_800_000_000)
+    assert calls == []                                       # đủ job cho cả lượt -> không tốn lần lấy giá
