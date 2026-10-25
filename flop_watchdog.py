@@ -16,6 +16,8 @@ Thuần & test được: không mạng, không file, không env — caller truy�
 """
 from __future__ import annotations
 
+import re
+
 KEY = "real_spend_watch"
 PENDING_KEY = "flop_pending_sessions"
 PENDING_CAP = 200
@@ -67,6 +69,13 @@ def observe(state: dict, *, settled_onchain: int, status: str, spent_today_oncha
     w = dict(w) if isinstance(w, dict) else {}
     out = {"alert": None, "recovered": None}
     healthy_wait = str(status).endswith("pace-wait") and _num(spent_today_onchain) > 0
+    # Đường gateway (flop_gateway): "chưa tới nhịp" và "đã chi hết quota" là ĐÚNG THIẾT KẾ — với
+    # faucet 25 FLOP/ngày phần lớn các lượt là chờ. Trước đây status "…gateway/pace_wait" (gạch
+    # dưới) không khớp "pace-wait" -> mỗi lượt chờ bị đếm là "không chi" -> báo động GIẢ sau 6
+    # lượt, lặp mỗi 6h. Coi là TRUNG TÍNH: không đếm lỗi, cũng KHÔNG xoá đếm — nếu settlement hỏng
+    # thật, các lượt mua (chưa settle) xen giữa lượt chờ vẫn tích lại và báo động được.
+    if settled_onchain <= 0 and re.search(r"gateway/(pace_wait|exhausted)$", str(status)):
+        return out
     if settled_onchain > 0 or healthy_wait:
         if w.get("alerted_ts") and settled_onchain > 0:
             mins = max(0, int((now - int(_num(w.get("since", now)))) / 60))

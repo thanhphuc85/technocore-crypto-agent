@@ -102,3 +102,27 @@ def test_pending_block_lifts_after_window_not_after_48h():
     assert blocked is False and n == 0                                     # hết 6h: đăng tiếp
     assert len(st[wd.PENDING_KEY]) == 3                                    # danh sách vẫn giữ để đối soát
     assert wd.pending_block(st, now + 3600, 3, window_sec=1800)[0] is False
+
+
+def test_gateway_waiting_is_neutral_not_a_miss():
+    # Faucet 25 FLOP/ngày: phần lớn lượt là "gateway/pace_wait" — đúng thiết kế, không được
+    # sinh báo động "không chi thật" (trước đây: báo động giả sau 6 lượt, lặp mỗi 6h).
+    st, now = {}, 1_800_000_000
+    for i in range(30):
+        r = wd.observe(st, settled_onchain=0, status="0✓ gateway/pace_wait", spent_today_onchain=0,
+                       now=now + i * 300)
+        assert r["alert"] is None
+    for i in range(10):
+        assert wd.observe(st, settled_onchain=0, status="0✓ gateway/exhausted", spent_today_onchain=5,
+                          now=now + 9000 + i * 300)["alert"] is None
+
+
+def test_broken_settlement_still_alerts_through_waiting_runs():
+    # Mua được (spent) nhưng KHÔNG bao giờ settle, xen giữa là lượt chờ: vẫn phải báo động.
+    st, now, alerts = {}, 1_800_000_000, []
+    for i in range(14):
+        status = "2✓ gateway/spent" if i % 2 == 0 else "0✓ gateway/pace_wait"
+        r = wd.observe(st, settled_onchain=0, status=status, spent_today_onchain=0, now=now + i * 300)
+        if r["alert"]:
+            alerts.append(r["alert"])
+    assert len(alerts) == 1 and "gateway/spent" in alerts[0]
