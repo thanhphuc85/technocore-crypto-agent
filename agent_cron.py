@@ -1815,6 +1815,13 @@ def maybe_send_daily_report(state: dict, now: int, extras: dict = None) -> bool:
             pass
         # Rút gọn CHỈ cho tin nhắn — log Actions và job summary giữ bản đầy đủ.
         extras = dict(extras or {})
+        try:                                  # đường mua compute THẬT (gateway): nhịp + quota + biên nhận
+            import flop_gateway
+            _gl = flop_gateway.report_line(state.get(flop_gateway.KEY) or {}, now)
+            if _gl:
+                extras["gateway"] = _gl
+        except Exception:
+            pass
         if extras.get("kibble"):
             extras["kibble"] = fr.compact_kibble(extras["kibble"])
         try:                                  # dự phóng CHI qua kỳ testnet

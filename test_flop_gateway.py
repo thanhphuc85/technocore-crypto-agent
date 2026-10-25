@@ -593,3 +593,15 @@ def test_network_name_variants_match_but_devnet_never_counts_as_testnet():
     assert gw.network_matches("Testnet", "testnet")
     assert not gw.network_matches("devnet", "testnet") and not gw.network_matches("testnetish", "testnet")
     assert not gw.network_matches("flop-devnet", "testnet") and not gw.network_matches(None, "testnet")
+
+
+def test_report_line_summarises_pace_quota_and_receipts(monkeypatch):
+    monkeypatch.setenv("FLOP_GATEWAY_MARGIN_SEC", "0")
+    assert gw.report_line({}, NOW) is None                                # chưa chạy lần nào
+    g = {"last_run": NOW, "last_outcome": "pace_wait", "network": "testnet", "remaining": 1500.0,
+         "window": {"start": NOW, "horizon": NOW + 86400, "total": 2000.0, "spent": 400.0},
+         "stats": {"receipts": 62, "settled": 400.0}}
+    line = gw.report_line(g, NOW + 43200)                                 # nửa ngày: mục tiêu 1000
+    assert "mạng testnet" in line and "đã chi 400.00/1000.00 mục tiêu (40%)" in line
+    assert "quota còn 1500.00" in line and "biên nhận settle 62 (400.00 FLOP)" in line
+    assert "lượt cuối: pace_wait" in line

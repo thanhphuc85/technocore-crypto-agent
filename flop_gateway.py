@@ -481,6 +481,30 @@ def lag_status(g: dict, now: int, outcome: str, *, pct: float, alert_hours: floa
     return line, alert, None
 
 
+def report_line(g: dict, now: int):
+    """Một dòng cho báo cáo ngày: quota còn, đã chi so với mục tiêu tới giờ, biên nhận đã settle,
+    kết quả lượt gần nhất. Báo cáo cũ chỉ biết bộ chia `flop_pacer` -> trên testnet (gateway)
+    dòng nhịp biến mất. None nếu gateway chưa chạy lần nào."""
+    if not isinstance(g, dict) or not g.get("last_run"):
+        return None
+    parts = [f"mạng {g.get('network') or '?'}"]
+    win = g.get("window") if isinstance(g.get("window"), dict) else None
+    if win and win.get("total"):
+        total, spent = float(win["total"]), float(win.get("spent") or 0)
+        start = int(win.get("start") or now)
+        end = int(win.get("horizon") or now) - int(_env_num("FLOP_GATEWAY_MARGIN_SEC", 1800))
+        frac = 1.0 if end <= start else min(1.0, max(0.0, (now - start) / (end - start)))
+        target = total * frac
+        pct = int(spent / target * 100) if target > 0 else 100
+        parts.append(f"đã chi {spent:.2f}/{target:.2f} mục tiêu ({pct}%)")
+    if g.get("remaining") is not None:
+        parts.append(f"quota còn {float(g['remaining']):.2f}")
+    st = g.get("stats") or {}
+    parts.append(f"biên nhận settle {int(st.get('receipts') or 0)} ({float(st.get('settled') or 0):.2f} FLOP)")
+    parts.append(f"lượt cuối: {g.get('last_outcome', '?')}")
+    return " · ".join(parts)
+
+
 # --- một nhịp ---------------------------------------------------------------------------
 
 def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_network: str,
@@ -505,6 +529,7 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
 
     def done(outcome, **kw):
         out.update(outcome=outcome, **kw)
+        g["last_outcome"], g["last_run"] = outcome, now
         state[KEY] = g
         return out
 
