@@ -146,8 +146,9 @@ exactly), 5 miners, an 8-line `flop-devnet-enroll/v1` challenge naming our SS58 
 1. `TESTNET_ENABLED=true` **first**; `FLOP_TESTNET_START=2026-11-03` (or the confirmed
    date). The faucet refuses to claim while the ledger is in simulation mode
    (`faucet=skipped_simulation`) so a real claim is never booked into the mock ledger.
-2. `FLOP_SESSION_MODEL_HASH` from the published model catalog; delete
-   `FLOP_SESSION_SIM_MODEL_HASH`.
+2. *(Gateway path: nothing to set — the gateway assigns the model at wallet enrollment and
+   the agent re-enrolls if that model is retired.)* Only for the old mempool scaffold:
+   `FLOP_SESSION_MODEL_HASH` from the published model catalog.
 3. **Gateway backend (the path FLOP published):** `FLOP_SESSION_BACKEND=gateway` (the default
    once `TESTNET_ENABLED` is on; set `mempool` only to force the old scaffold) and
    **`FLOP_WALLET_USE_DID=on` - the DID key is the FLOP wallet** (SS58
@@ -166,9 +167,12 @@ exactly), 5 miners, an 8-line `flop-devnet-enroll/v1` challenge naming our SS58 
    booked). The scaffold mempool path stays for reference: `FLOP_MEMPOOL_URL`,
    `FLOP_RPC_URL`/`FLOP_SUBMIT_URL` (+ `FLOP_TX_MODE`).
 4. `FLOP_FAUCET_ENABLED=on`, `FLOP_FAUCET_URL` (devnet shape:
-   `https://faucet.flop.network/fund`; a bare domain gets `/fund` appended). `FLOP_FAUCET_ADDRESS` can stay empty: the faucet then funds the gateway wallet (the DID, item 3) - the account that buys the compute; a different address triggers a one-time warning.
-   With an address set the adapter sends the real body and reads the 24 h cooldown from
-   the faucet's `/health`, so `auto` waits a full day instead of probing hourly.
+   `https://faucet.flop.network/fund`; a bare domain gets `/fund` appended).
+   `FLOP_FAUCET_ADDRESS` can stay empty: the faucet then funds the gateway wallet (the DID,
+   item 3) - the account that buys the compute; a different address triggers a one-time
+   warning. The adapter sends the real body, reads the 24 h cooldown from the faucet's
+   `/health` and understands a cooldown written in a rejection ("try again in N minutes"), so
+   `auto` waits a full day instead of probing hourly.
    **Verified-human tier (operator only):** prove personhood once on the faucet page with
    BrightID or Self *on the agent's FLOP address*, then set `FLOP_FAUCET_TIER=linked` and
    `FLOP_FAUCET_PROVIDER=brightid|self`; the agent then requests the larger grant daily.
@@ -186,11 +190,22 @@ exactly), 5 miners, an 8-line `flop-devnet-enroll/v1` challenge naming our SS58 
    `Retry-After` / `next_claim_at`), `FLOP_FAUCET_MAX_PER_DAY=24`, `FLOP_FAUCET_JITTER_MIN=0`.
    If FLOP publishes a fixed period/cap, set those numbers instead. Only use URLs FLOP
    publishes - `*.invalid` hosts and `REPLACE_WITH_...` values in the docs are placeholders.
-5. `FLOP_SESSION_BUDGET=auto`, `FLOP_MAX_PER_RUN=2%`, `FLOP_SESSION_MAX_PER_RUN=3`,
-   `FLOP_INFERENCE_COST` + `FLOP_SESSION_FLOPS` = observed market price.
-6. Watch the first runs: `session=N✓ settle/spent_onchain … due=…`. `pace-wait` all day
-   means the price floor is above the budget; `submit/skipped_unconfigured` means an
-   endpoint is still missing.
+5. *(Gateway path: nothing to set.)* The gateway pacer spreads the remaining quota to the
+   allowance expiry (or the UTC day end) on its own, with jitter (`FLOP_GATEWAY_SKIP_PCT`,
+   `FLOP_PACE_JITTER_PCT`) and at most `FLOP_GATEWAY_MAX_CALLS_PER_RUN` (2) calls per run;
+   raise that only if the first day shows few 503s and spending falls behind. If the log shows
+   `price_unknown`, set `FLOP_GATEWAY_FIXED_PRICE` to the price FLOP publishes. Only for the
+   old mempool scaffold: `FLOP_SESSION_BUDGET=auto`, `FLOP_MAX_PER_RUN=2%`,
+   `FLOP_SESSION_MAX_PER_RUN=3`, `FLOP_INFERENCE_COST` + `FLOP_SESSION_FLOPS`.
+6. Watch the first runs (or ask for a log check): `[faucet] +N FLOP … tx=…` then
+   `[gateway] enroll ví 5CFP…`, `[session] N✓ gateway/spent … quota=…`, and one run later
+   `[gateway] biên nhận: settled +N (X FLOP)` - that settled amount is what the ledger books
+   as compute purchased. `gateway/pace_wait` between buys is normal. Outcomes that need
+   action: `network_mismatch` (set `FLOP_GATEWAY_URL`/`FLOP_GATEWAY_NETWORK`),
+   `payment_required` (x402 - the agent never pays by itself; fit by hand), `unfunded` (faucet
+   not reaching the DID wallet), `price_unknown` (item 5). The daily Telegram report carries a
+   `gateway:` line (spend vs target, quota left, settled receipts); a lag alert fires after 3 h
+   behind plan.
 7. **Miner selection (code, once the API shows what it returns about miners).** FLOP lets
    buyers choose ("buyers choose their miners"; "pick a capable miner"), but no miner
    list, price, status or error history is published yet, so do not guess weights. Build
