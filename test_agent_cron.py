@@ -3747,3 +3747,17 @@ def test_operator_fallback_prompts_carry_live_market_context(monkeypatch):
     ac.gateway_session_step({"gateway_jobs": [{"id": "a", "task": "t1"}, {"id": "b", "task": "t2"}]},
                             _real_key(), 1_800_000_000)
     assert calls == []                                       # đủ job cho cả lượt -> không tốn lần lấy giá
+
+
+def test_faucet_waits_are_clamped_and_never_raise():
+    # Fuzz 2026-10-26: số khổng lồ -> OverflowError; "sau 999999 phút" -> hẹn ~2 năm = tắt faucet.
+    assert ac._faucet_retry_after(None, {"retry_after": "9" * 400}) in (None, ac.FAUCET_WAIT_MAX)
+    assert ac._faucet_retry_after(None, {"error": "try again in 999999 minutes"}, True) == ac.FAUCET_WAIT_MAX
+    assert ac._faucet_retry_after("3600", {}) == 3600                     # giá trị bình thường giữ nguyên
+    assert ac.scrub_links_and_addresses(None) is None
+
+
+def test_gateway_parsers_survive_hostile_values():
+    import flop_gateway as gw
+    assert gw.epoch_s("9" * 400) is None and gw.epoch_s(float("inf")) is None and gw.epoch_s(10**20) is None
+    assert gw.network_matches(-1, "testnet") is False and gw.network_matches(1.5, "testnet") is False

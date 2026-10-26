@@ -605,3 +605,29 @@ def test_report_line_summarises_pace_quota_and_receipts(monkeypatch):
     assert "mạng testnet" in line and "đã chi 400.00/1000.00 mục tiêu (40%)" in line
     assert "quota còn 1500.00" in line and "biên nhận settle 62 (400.00 FLOP)" in line
     assert "lượt cuối: pace_wait" in line
+
+
+def test_retired_model_triggers_re_enrollment_instead_of_a_permanent_stall():
+    fake, state = FakeGateway(expires_ms=SOON), {}
+    _run(state, fake)                                                     # đăng ký, model m1
+    fake.override[("GET", "/v1/models")] = Resp(data={"data": [
+        {"id": "m2", "pricing": {"prompt": "0.006", "completion": "0.006"}}]})
+    r = _run(state, fake)
+    assert r["outcome"] == "model_unavailable" and "vault" not in state[gw.KEY]
+    state[gw.KEY]["wait_until"] = 0
+    fake.calls.clear()
+    fake.override[("POST", "/v1/enroll/wallet")] = Resp(201, {"key": BEARER + "2", "model": "m2",
+                                                              "remaining_quota": 25.0, "expires_at": SOON})
+    r2 = _run(state, fake)
+    assert "/v1/enroll/wallet" in fake.paths() and state[gw.KEY]["model"] == "m2"
+    assert r2["outcome"] in ("spent", "pace_wait")
+
+
+def test_size_probe_runs_inside_run_step_after_twelve_admitted_calls(monkeypatch):
+    # probe_up có test riêng; đây kiểm chỗ GỌI nó trong run_step (độ phủ chỉ ra chưa test nào chạy qua).
+    fake, state = FakeGateway(quota=20000.0, expires_ms=SOON), {}
+    _run(state, fake)
+    g = state[gw.KEY]
+    g.update(tok_cap=1024, tok_ok=11, tok_bad=2048, tok_bad_ts=NOW, wait_until=0)
+    _run(state, fake)
+    assert state[gw.KEY]["tok_cap"] == 1280 and state[gw.KEY]["tok_ok"] in (0, 1)

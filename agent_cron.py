@@ -1963,6 +1963,8 @@ def _link_allowed(url: str) -> bool:
 
 
 def scrub_links_and_addresses(text: str) -> str:
+    if not isinstance(text, str):
+        return text
     text = _URL_RE.sub(lambda m: m.group(0) if _link_allowed(m.group(0)) else "[link removed]", text)
     text = _BARE_DOMAIN_RE.sub(lambda m: m.group(0) if _link_allowed(m.group(0)) else "[link removed]", text)
     text = _EVM_ADDR_RE.sub("[address removed]", text)
@@ -3296,7 +3298,21 @@ def _faucet_claim_fn(req: dict) -> dict:
     return out
 
 
+FAUCET_WAIT_MAX = 2 * 86400            # chu kỳ faucet thật = 24h; hẹn xa hơn 2 ngày là rác
+
+
 def _faucet_retry_after(header, body: dict, text: bool = False):
+    """Như _faucet_retry_after_raw nhưng KẸP về [0, FAUCET_WAIT_MAX] và không bao giờ ném lỗi:
+    "thử lại sau 999999 phút" hay số khổng lồ trước đây hoặc làm OverflowError, hoặc hẹn lượt
+    sau ~2 năm nữa = tắt faucet."""
+    try:
+        w = _faucet_retry_after_raw(header, body, text)
+    except (OverflowError, ValueError, TypeError):
+        return None
+    return None if w is None else max(0, min(int(w), FAUCET_WAIT_MAX))
+
+
+def _faucet_retry_after_raw(header, body: dict, text: bool = False):
     """Số giây tới lượt claim kế tiếp từ header Retry-After hoặc thân phản hồi; None nếu không có.
     `text=True` (CHỈ khi faucet từ chối) -> đọc cả thời gian chờ viết trong câu chữ."""
     if header is not None:
