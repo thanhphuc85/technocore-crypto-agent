@@ -258,7 +258,18 @@ python agent_cron.py           # runs telemetry + auto-responder once
 | `PROACTIVE_DENY_DIDS` | optional | CSV of DIDs the agent never proactively engages (your other fork DIDs) — keeps the fleet from forming a self-talking cluster. Shared by the proactive-help and peer-engage paths |
 | `KV_SIGNED` | optional | Experimental signed-KV attempt for ordinary keys — doesn't match Technocore's spec (room-ownership only), 400s and falls back. Leave off (default) |
 | `REPO_URL` | optional | Repo link embedded in the manifest (default: this repo) |
-| `TESTNET_ENABLED` | optional | FLOP token ledger mode: `false` (default) = simulation · `true` = real testnet transfers |
+| `TESTNET_ENABLED` | optional | `false` (default) = simulation ledger · `true` = testnet: the agent buys compute through FLOP's gateway (`api.flop.network`) with the wallet below and books **settled receipts** into a separate testnet ledger. Day-one steps: [`STRATEGY.md`](STRATEGY.md) |
+| `FLOP_SESSION_BACKEND` | optional | How compute is bought: `gateway` (default once `TESTNET_ENABLED` is on; without it, a devnet rehearsal that books nothing) · `mempool` forces the old scaffold below |
+| `FLOP_WALLET_USE_DID` | optional | `on` = the agent's DID key is its FLOP wallet (SS58, prefix 42). Required by tclk's FLOP HTLC rail and keeps buying + earning on one account |
+| `FLOP_WALLET_SEED_HEX` | secret, optional | A separate ed25519 wallet seed instead of the DID key (not recommended, see above) |
+| `FLOP_GATEWAY_URL` | optional | Gateway base (default `https://api.flop.network/v1`) — set only if testnet gets its own host |
+| `FLOP_GATEWAY_NETWORK` | optional | Network `/health` must report before anything is spent (default `testnet` with `TESTNET_ENABLED`, else `devnet`) |
+| `FLOP_GATEWAY_PROMPTS` | optional | Your own fallback prompts `a\|b\|c` (the agent first uses kibble jobs it actually answered; then these, or the bodies of `FLOP_KIBBLE_REQUEST_QUESTIONS`). No shared default — receipts carry `prompt_hash` |
+| `FLOP_GATEWAY_MAX_CALLS_PER_RUN` | optional | Calls per run (default `2`; the devnet allowance allowed 2 req/min) |
+| `FLOP_GATEWAY_FIXED_PRICE` | optional | Fixed FLOP price per call if FLOP publishes one outside the catalog (the agent reports `price_unknown` when it cannot find a price) |
+| `FLOP_GATEWAY_SKIP_PCT` | optional | % of runs that randomly skip buying (default `10`); the due amount rolls into later runs |
+| `FLOP_GATEWAY_LAG_PCT` / `_ALERT_HOURS` | optional | Telegram alert when spending is more than `LAG_PCT` % (10) behind plan for `ALERT_HOURS` (3) — testnet only |
+| `FLOP_RUN_BUDGET_SEC` | optional | Per-run time budget (default `900`, below the 20-min job timeout): no new gateway call or faucet wait that could not finish in time |
 | `FLOP_RPC_URL` | optional | Testnet RPC endpoint — required (with a `submit_tx`) before a testnet spend will send |
 | `FLOP_SUBMIT_URL` | optional | Relayer endpoint the default `submit_tx` POSTs the signed tx to (falls back to `FLOP_RPC_URL`) |
 | `FLOP_TX_MODE` | optional | Which `submit_tx` adapter: `relay` (default) · `evm` (stub) · `off` |
@@ -286,7 +297,10 @@ python agent_cron.py           # runs telemetry + auto-responder once
 | `FLOP_PACE_JITTER_PCT` | optional | Anti-sybil: randomise each due amount by ±X% so the spend rate never tracks a deterministic linear target (a bot tell). Unset ⇒ **20** (default); `0` ⇒ off; clamped to `[0,100]` |
 | `FLOP_PUBLISH_UNLOCK` | optional | Publish `unlock_status()` + pacer status to KV note `/kv/<ns>/unlock` each run: off (default) / `true` |
 | `FLOP_FAUCET_ENABLED` | optional | Enable the auto-cycle faucet scaffold: off (default) / `true` |
-| `FLOP_FAUCET_URL` | optional | Faucet endpoint — required (with an injected `claim_fn`) before a faucet claim will send |
+| `FLOP_FAUCET_URL` | optional | Faucet endpoint, e.g. `https://faucet.flop.network` (`/fund` is appended to a bare domain) |
+| `FLOP_FAUCET_ADDRESS` | optional | SS58 address to fund (checksum-validated). Empty ⇒ the gateway wallet (the DID); a different address triggers a one-time warning |
+| `FLOP_FAUCET_TIER` | optional | `quick` (default, 25 FLOP) · `linked` (verified human via BrightID/Self linked to the address; agent claims daily) · `manual` (you claim the verified tier by hand with MetaMask — the agent never claims, because the 24 h cooldown is shared by all tiers on one address) |
+| `FLOP_FAUCET_PROVIDER` | optional | With `linked`: `brightid` or `self` |
 | `FLOP_FAUCET_AMOUNT` | optional | Expected FLOP per faucet claim (default `100`) |
 | `FLOP_FAUCET_COOLDOWN_HOURS` | optional | Minimum hours between faucet claims (default `24`) |
 | `FLOP_FAUCET_REFILL_BELOW` | optional | Only claim when the testnet balance is below this threshold (unset = no threshold check) |
@@ -560,6 +574,14 @@ later):
 |---|---|
 | unset / `false` (default) | **simulation** — debit a MOCK balance and log `[SIMULATION] Spent 0.001 MOCK_FLOP for <memo>`. Nothing touches a chain. |
 | `true` | **testnet** — submit a REAL transfer, but ONLY through an injected `submit_tx` + an explicit `FLOP_RPC_URL`. Absent either ⇒ `skipped_unconfigured` (it never fabricates a tx hash). |
+
+**Testnet compute purchases go through FLOP's gateway** ([`flop_gateway.py`](flop_gateway.py),
+the path FLOP published): enroll the DID wallet with a signed challenge, buy inference via the
+OpenAI-compatible `/v1/chat/completions`, and book each purchase only when its receipt reports
+`settled` (`settled_spend`, de-duplicated inside the ledger) — exactly "compute purchased in
+settled sessions". Pacing spreads the day's quota with jitter, the gateway enforces a per-call
+`max_cost_flop`, and an x402 payment request is logged, never paid automatically. The
+`submit_tx` scaffold below predates the gateway and is kept for reference.
 
 Every path is a recorded, non-throwing result (`spent_simulated`, `spent_onchain`,
 `skipped_insufficient`, `skipped_unconfigured`, `error_submit`) — the same fail-loud-
