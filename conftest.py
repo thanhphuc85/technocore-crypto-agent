@@ -29,3 +29,13 @@ def _no_real_network(monkeypatch):
         return real_gai(host, *a, **k)
 
     monkeypatch.setattr(socket, "getaddrinfo", guarded_gai)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_state_files(monkeypatch, tmp_path):
+    """File trạng thái mặc định (state.json, flop_pacer.json) nằm ở thư mục làm việc = repo. Test
+    nào lỡ ghi (vd persist sổ cái -> bản sao state.json; metering -> pacer) sẽ để lại file thật
+    trong repo. Mặc định trỏ chúng vào thư mục tạm; test tự đặt đường dẫn riêng vẫn ghi đè được."""
+    monkeypatch.setenv("FLOP_PACER_FILE", str(tmp_path / "flop_pacer.json"))
+    import agent_cron
+    monkeypatch.setattr(agent_cron, "STATE_FILE", str(tmp_path / "state.json"))
