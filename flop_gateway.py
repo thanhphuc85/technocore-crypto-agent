@@ -508,7 +508,8 @@ def report_line(g: dict, now: int):
 # --- một nhịp ---------------------------------------------------------------------------
 
 def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_network: str,
-             book_fn=None, sleep=time.sleep, log=print, rng=None) -> dict:
+             book_fn=None, sleep=time.sleep, log=print, rng=None, deadline=None,
+             clock=time.time) -> dict:
     """Một nhịp mua compute. Trả {"outcome", "calls", "spent", ...}; KHÔNG ném lỗi.
 
     `book_fn(amount, ref, model)` ghi sổ (chỉ khi mạng khớp `expect_network`); None = chạy
@@ -694,6 +695,11 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
             else:
                 mt = size_cap if per_call >= preq + ptok * pp else None
             if mt is None:
+                break
+            # Ngân sách thời gian của LƯỢT (job GitHub bị giết ở 20 phút): không mở lần gọi mới
+            # nếu không kịp xong — phần đến hạn dồn sang lượt sau, không mất.
+            if deadline and clock() + (gap if calls else 0) + max_wait / 1000 + 15 > deadline:
+                log("[gateway] dừng lượt này: không đủ thời gian cho thêm một lần gọi (ngân sách lượt)")
                 break
             if calls:
                 sleep(gap)

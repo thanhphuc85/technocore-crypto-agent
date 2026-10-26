@@ -39,3 +39,5 @@ def _isolated_state_files(monkeypatch, tmp_path):
     monkeypatch.setenv("FLOP_PACER_FILE", str(tmp_path / "flop_pacer.json"))
     import agent_cron
     monkeypatch.setattr(agent_cron, "STATE_FILE", str(tmp_path / "state.json"))
+    # main() đặt mốc ngân sách thời gian của lượt vào biến toàn cục -> không để rò sang test sau.
+    monkeypatch.setattr(agent_cron, "_RUN_STARTED", None)

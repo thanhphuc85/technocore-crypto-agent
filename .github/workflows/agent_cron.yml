@@ -306,6 +306,8 @@ jobs:
           FLOP_GATEWAY_TOPUP_MIN: ${{ vars.FLOP_GATEWAY_TOPUP_MIN }}
           # % lượt nghỉ ngẫu nhiên (mặc định 10); nhiễu phần đến hạn dùng chung FLOP_PACE_JITTER_PCT.
           FLOP_GATEWAY_SKIP_PCT: ${{ vars.FLOP_GATEWAY_SKIP_PCT }}
+          # Ngân sách thời gian mỗi lượt (giây, mặc định 900) — dưới timeout-minutes 20 của job.
+          FLOP_RUN_BUDGET_SEC: ${{ vars.FLOP_RUN_BUDGET_SEC }}
           # Giá CỐ ĐỊNH mỗi lần gọi (FLOP) nếu FLOP công bố ngoài catalog; rỗng = đọc catalog.
           FLOP_GATEWAY_FIXED_PRICE: ${{ vars.FLOP_GATEWAY_FIXED_PRICE }}
           FLOP_GATEWAY_LAG_ALERT_HOURS: ${{ vars.FLOP_GATEWAY_LAG_ALERT_HOURS }}

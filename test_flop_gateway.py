@@ -631,3 +631,19 @@ def test_size_probe_runs_inside_run_step_after_twelve_admitted_calls(monkeypatch
     g.update(tok_cap=1024, tok_ok=11, tok_bad=2048, tok_bad_ts=NOW, wait_until=0)
     _run(state, fake)
     assert state[gw.KEY]["tok_cap"] == 1280 and state[gw.KEY]["tok_ok"] in (0, 1)
+
+
+def test_no_new_call_starts_past_the_run_deadline(monkeypatch):
+    # Job GitHub bị giết ở 20 phút: không mở lần gọi mới nếu không kịp xong trước hạn chót của lượt.
+    fake = FakeGateway(quota=20000.0, expires_ms=SOON)
+    logs = []
+    t = {"now": 1000.0}
+    r = gw.run_step({}, agent_key=_key("22"), http=fake, now=NOW, prompts=["a", "b"], expect_network="devnet",
+                    sleep=lambda s: t.update(now=t["now"] + s), log=logs.append, deadline=1000.0 + 100,
+                    clock=lambda: t["now"])
+    chats = [c for c in fake.calls if c[1] == "/v1/chat/completions"]
+    assert chats == [] and r["outcome"] == "pace_wait" and any("ngân sách lượt" in x for x in logs)
+    fake2 = FakeGateway(quota=20000.0, expires_ms=SOON)
+    r2 = gw.run_step({}, agent_key=_key("22"), http=fake2, now=NOW, prompts=["a", "b"], expect_network="devnet",
+                     sleep=lambda s: None, log=lambda *a: None, deadline=1000.0 + 10_000, clock=lambda: 1000.0)
+    assert r2["calls"] == 2                                              # đủ thời gian -> gọi bình thường

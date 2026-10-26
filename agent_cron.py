@@ -3435,7 +3435,7 @@ def faucet_step(state: dict, private_key, did) -> str:
             if fr.get("outcome") not in ("skipped_cooldown", "claimed_zero"):
                 break
             left = flop_faucet.seconds_until_next(faucet_state=fpath)
-            if left is None or left > wait_max:
+            if left is None or left > wait_max or time.time() + left + 3 > run_deadline():
                 break
             print(f"[faucet] lượt kế tiếp mở sau {left}s — chờ trong run này để claim đúng giờ")
             time.sleep(left + 3)
@@ -4323,7 +4323,7 @@ def gateway_session_step(state: dict, private_key, now: int):
     r = flop_gateway.run_step(
         state, agent_key=private_key, now=now, prompts=prompts, expect_network=expect,
         http=_gateway_http,
-        book_fn=book if testnet else None)
+        book_fn=book if testnet else None, deadline=run_deadline())
     if testnet and r.get("receipts_new"):
         # Lưu sổ cái NGAY: biên nhận vừa ghi đã được đánh dấu "đã ghi" trong state.json (cache lưu
         # cả khi run lỗi). Nếu chỉ đợi persist cuối run mà run chết giữa chừng thì số chi mất
@@ -4416,7 +4416,21 @@ def session_budget_plan(sess_fee, sess_flops, sess_max, now: int = None):
     return plan, due
 
 
+_RUN_STARTED = None                  # main() đặt; ngoài main (thư viện/test) -> không áp ngân sách
+
+
+def run_deadline() -> float:
+    """Hạn chót mềm của lượt: job GitHub bị GIẾT ở timeout-minutes 20 -> run đỏ + báo lỗi giả.
+    Các bước có thể chờ lâu (faucet chờ trong lượt, lần gọi gateway) không bắt đầu nếu không kịp
+    xong trước mốc này (mặc định 15 phút từ đầu lượt); việc dở dồn sang lượt sau."""
+    if _RUN_STARTED is None:
+        return float("inf")
+    return _RUN_STARTED + _env_float("FLOP_RUN_BUDGET_SEC", 900)
+
+
 def main():
+    global _RUN_STARTED
+    _RUN_STARTED = time.time()
     private_key = load_private_key()
     did = did_of(private_key)
     print(f"[agent] DID: {did}")

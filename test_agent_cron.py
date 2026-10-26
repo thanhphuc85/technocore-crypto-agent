@@ -3710,6 +3710,14 @@ def test_new_settled_receipts_persist_the_ledger_immediately(monkeypatch):
     assert persisted == []                                              # không có gì mới -> không ghi KV thừa
 
 
+def test_run_deadline_only_applies_inside_main(monkeypatch):
+    monkeypatch.setattr(ac, "_RUN_STARTED", None)
+    assert ac.run_deadline() == float("inf")
+    monkeypatch.setattr(ac, "_RUN_STARTED", 1000.0)
+    monkeypatch.setenv("FLOP_RUN_BUDGET_SEC", "900")
+    assert ac.run_deadline() == 1900.0
+
+
 def test_faucet_claim_persists_the_ledger_immediately(monkeypatch, tmp_path):
     import flop_faucet
     monkeypatch.setenv("FLOP_FAUCET_STATE", str(tmp_path / "f.json"))
