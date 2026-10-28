@@ -17,11 +17,18 @@ có cái MỚI thì báo Telegram.
 ĐỨNG TÊN AI (2026-10-28): kênh mua qua gateway do tài khoản BROKER của gateway mở -> explorer
 ghi chi tiêu cho broker, ví mình = 0; yellowpaper R8.4 chấm theo người mở kênh. Chưa có câu
 trả lời chính thức, nên radar canh 3 tín hiệu sẽ đổi quyết định:
-  · yellowpaper#172                   — người của flop-labs (OWNER/MEMBER/COLLABORATOR) trả lời,
+  · yellowpaper#172                   — người của flop-labs (OWNER/MEMBER/COLLABORATOR/CONTRIBUTOR) trả lời,
                                          hoặc issue đóng.
   · <explorer>/api/session-offers     — miner có offer công khai -> mua TRỰC TIẾP đứng tên mình
                                          (CLI `flop session run`) bắt đầu khả thi.
   · <explorer>/api/accounts/<ví>/inference-spend — ví mình có chi tiêu ghi trên chain (0 -> >0).
+  · yellowpaper#31                    — airdrop tính theo ví chủ / khoá uỷ quyền / danh tính agent
+                                         (quyết định có cần lập ví agent có trần hay không).
+
+DEVNET CÔNG KHAI (Arthur Hayes 26/10: "open up Devnet … before we graduate to Testnet"):
+  · docs.flop.network/docs/network-devnet — trạng thái devnet ("development" -> khác).
+  · api.flop.network/health genesis      — genesis đổi = mạng khởi động lại -> hạn mức gateway
+                                         có thể được cấp mới (ví DID đã dùng hết hạn mức devnet cũ).
 
 CHỈ ĐỌC: không đăng tin, không chi, không ghi KV ngoài state của chính agent.
 Thuần & test được: caller tiêm fetch_fn(url) -> str|None.
@@ -39,8 +46,13 @@ STATUS_URL = "https://docs.flop.network/docs/network-testnet"
 GATEWAY_HEALTH_URL = "https://api.flop.network/health"
 OFFICIAL_URL = "https://flop.finance/official/"
 ATTRIB_ISSUE_URL = "https://api.github.com/repos/flop-labs/yellowpaper/issues/172"
+UNIT_ISSUE_URL = "https://api.github.com/repos/flop-labs/yellowpaper/issues/31"
+DEVNET_STATUS_URL = "https://docs.flop.network/docs/network-devnet"
+BASE_DEVNET_STATUS = "development"
 EXPLORERS = ("https://explorer.devnet.flop.network", "https://explorer.testnet.flop.network")
-MAINTAINER_ROLES = frozenset(("OWNER", "MEMBER", "COLLABORATOR"))
+# CONTRIBUTOR = đã có commit trong repo. Yellowpaper chỉ do người của FLOP commit (2026-10-28: duy
+# nhất `sv`, người đồng bộ bản spec — GitHub hiện là CONTRIBUTOR, không phải MEMBER).
+MAINTAINER_ROLES = frozenset(("OWNER", "MEMBER", "COLLABORATOR", "CONTRIBUTOR"))
 
 # Mốc đã biết (2026-10-22). Cái gì NGOÀI mốc này + ngoài những gì radar đã báo = mới.
 BASE_PATHS = frozenset((
@@ -92,6 +104,17 @@ def parse_status(text):
     text = re.sub(r"<[^>]+>", " ", text)
     m = re.search(r"Status:\s*([A-Za-z][A-Za-z -]{0,40}?)[.<]", text)
     return m.group(1).strip().lower() if m else None
+
+
+def parse_genesis(text):
+    """network.observed_genesis_hash từ /health của gateway; None nếu hỏng."""
+    try:
+        d = json.loads(text) if text else None
+    except ValueError:
+        return None
+    net = d.get("network") if isinstance(d, dict) else None
+    g = net.get("observed_genesis_hash") if isinstance(net, dict) else None
+    return g.lower()[:80] if isinstance(g, str) and re.fullmatch(r"0x[0-9a-fA-F]{8,}", g) else None
 
 
 def parse_network(text):
@@ -172,26 +195,38 @@ def _host(url):
     return url.split("//", 1)[-1].split("/", 1)[0]
 
 
+def _watch_issue(r, fetch_fn, url, num, topic, state_key, seen_key) -> list:
+    """Issue yellowpaper: báo khi người của flop-labs comment hoặc issue đóng (mỗi việc 1 lần)."""
+    lines = []
+    issue = parse_issue(fetch_fn(url))
+    if not issue:
+        return lines
+    st, n = issue
+    first = state_key not in r                         # lần đầu: comment cũ chỉ ghi mốc, không báo
+    if r.get(state_key) == "open" and st != "open":
+        lines.append(f"• yellowpaper#{num} ({topic}) đã ĐÓNG — đọc kết luận: "
+                     f"github.com/flop-labs/yellowpaper/issues/{num}")
+    r[state_key] = st
+    seen = set(r.get(seen_key) or [])
+    page = max(1, -(-n // 100))                        # trang cuối = comment mới nhất
+    found = parse_maintainer_comments(fetch_fn(f"{url}/comments?per_page=100&page={page}")) if n else []
+    for cid, login, curl in found or []:
+        if cid not in seen:
+            if not first:
+                lines.append(f"• flop-labs ({login}) TRẢ LỜI yellowpaper#{num} ({topic}) — đọc ngay: {curl}")
+            seen.add(cid)
+    r[seen_key] = sorted(x for x in seen if isinstance(x, int))[-20:]
+    return lines
+
+
 def check_attribution(r: dict, fetch_fn, wallet=None, explorers=EXPLORERS) -> list:
     """3 tín hiệu ĐỨNG TÊN AI (xem docstring module). Ghi mốc vào r, trả các dòng báo động.
     Lần đầu thấy một nguồn chỉ ghi mốc (không báo). Nguồn lỗi -> bỏ qua."""
     lines = []
-    issue = parse_issue(fetch_fn(ATTRIB_ISSUE_URL))
-    if issue:
-        st, n = issue
-        if r.get("attr_issue_state") == "open" and st != "open":
-            lines.append("• yellowpaper#172 (chi tiêu qua gateway đứng tên ai) đã ĐÓNG — đọc kết luận: "
-                         "github.com/flop-labs/yellowpaper/issues/172")
-        r["attr_issue_state"] = st
-        seen = set(r.get("attr_seen") or [])
-        page = max(1, -(-n // 100))                    # trang cuối = comment mới nhất
-        found = parse_maintainer_comments(
-            fetch_fn(f"{ATTRIB_ISSUE_URL}/comments?per_page=100&page={page}")) if n else []
-        for cid, login, url in found or []:
-            if cid not in seen:
-                lines.append(f"• flop-labs ({login}) TRẢ LỜI yellowpaper#172 — đọc ngay: {url}")
-                seen.add(cid)
-        r["attr_seen"] = sorted(x for x in seen if isinstance(x, int))[-20:]
+    lines += _watch_issue(r, fetch_fn, ATTRIB_ISSUE_URL, "172", "chi tiêu qua gateway đứng tên ai",
+                          "attr_issue_state", "attr_seen")
+    lines += _watch_issue(r, fetch_fn, UNIT_ISSUE_URL, "31",
+                          "airdrop tính theo ví chủ hay khoá uỷ quyền", "attr_i31_state", "attr_i31_seen")
     offers = dict(r.get("attr_offers") or {})
     spent = dict(r.get("attr_spent") or {})
     for base in explorers:
@@ -222,6 +257,8 @@ def check(state: dict, fetch_fn, wallet=None, explorers=EXPLORERS) -> str:
     seen_docs = set(r.get("docs") or [])
     status_known = r.get("status") or BASE_STATUS
     network_known = r.get("network") or BASE_NETWORK
+    devnet_known = r.get("devnet_status") or BASE_DEVNET_STATUS
+    genesis_known = r.get("genesis")
     official_known = r.get("official")
     lines = []
 
@@ -247,10 +284,24 @@ def check(state: dict, fetch_fn, wallet=None, explorers=EXPLORERS) -> str:
         lines.append(f"• Trạng thái testnet đổi: '{status_known}' → '{status}'")
         status_known = status
 
-    network = parse_network(fetch_fn(GATEWAY_HEALTH_URL))
+    health = fetch_fn(GATEWAY_HEALTH_URL)
+    network = parse_network(health)
     if network and network != network_known:
         lines.append(f"• api.flop.network báo mạng đổi: '{network_known}' → '{network}'")
         network_known = network
+    genesis = parse_genesis(health)
+    if genesis and genesis_known and genesis != genesis_known:
+        lines.append(f"• api.flop.network đổi GENESIS ({genesis_known[:10]}… → {genesis[:10]}…): mạng "
+                     f"'{network or network_known}' khởi động lại — hạn mức gateway có thể được cấp mới. "
+                     "Muốn chạy tập (xem bản tin) thì đặt FLOP_SESSION_BACKEND=gateway, xong xoá.")
+    if genesis:
+        genesis_known = genesis            # lần đầu chỉ ghi mốc
+
+    devnet = parse_status(fetch_fn(DEVNET_STATUS_URL))
+    if devnet and devnet != devnet_known:
+        lines.append(f"• Trạng thái DEVNET đổi: '{devnet_known}' → '{devnet}' (devnet công khai KHÔNG "
+                     "tính airdrop — chỉ để chạy thử; xem docs.flop.network/docs/network-devnet)")
+        devnet_known = devnet
 
     official = parse_official(fetch_fn(OFFICIAL_URL))
     if official and official_known and official != official_known:
@@ -263,7 +314,7 @@ def check(state: dict, fetch_fn, wallet=None, explorers=EXPLORERS) -> str:
 
     state[KEY] = {"paths": sorted(seen_paths)[:60], "docs": sorted(seen_docs)[:60],
                   "status": status_known, "network": network_known, "official": official_known,
-                  **attr}
+                  "devnet_status": devnet_known, "genesis": genesis_known, **attr}
     if not lines:
         return None
     return ("🚨 FLOP TESTNET RADAR — có thay đổi:\n" + "\n".join(lines)

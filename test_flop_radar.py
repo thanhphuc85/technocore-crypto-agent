@@ -116,7 +116,7 @@ def _run(st, f):
 
 def test_attribution_first_sight_is_quiet_and_community_comments_do_not_alert():
     st = {}
-    assert _run(st, _attr(comments=[_c(1, "NONE"), _c(2, "CONTRIBUTOR")])) is None
+    assert _run(st, _attr(comments=[_c(1, "NONE"), _c(2, "FIRST_TIME_CONTRIBUTOR")])) is None
     r = st[rd.KEY]
     assert r["attr_issue_state"] == "open" and r["attr_offers"] == {"explorer.devnet.flop.network": 0}
     assert r["attr_spent"] == {"explorer.devnet.flop.network": 0}
@@ -163,3 +163,70 @@ def test_no_wallet_skips_spend_lookup():
     f = _attr()
     rd.check({}, lambda u: seen.append(u) or f(u), wallet=None, explorers=(DEV,))
     assert not any("inference-spend" in u for u in seen)
+
+
+# --- devnet công khai: genesis đổi / trạng thái devnet đổi; yellowpaper#31 -----------------------
+def _health(genesis, net="devnet"):
+    return json.dumps({"status": "ok", "network": {"network": net, "status": "live",
+                                                   "observed_genesis_hash": genesis}})
+
+
+G1, G2 = "0x99c172c095340ace", "0xabcdef0123456789"
+
+
+def _fetch3(health=_health(G1), devnet="<p>Status: development. Internal.</p>", extra=None):
+    base = _fetcher2(health=health)
+    pages = {rd.DEVNET_STATUS_URL: devnet, **(extra or {})}
+    return lambda url: pages[url] if url in pages else base(url)
+
+
+def test_genesis_change_alerts_once_but_first_sight_is_quiet():
+    st = {}
+    assert rd.check(st, _fetch3()) is None and st[rd.KEY]["genesis"] == G1
+    alert = rd.check(st, _fetch3(health=_health(G2)))
+    assert "đổi GENESIS" in alert and "FLOP_SESSION_BACKEND=gateway" in alert
+    assert rd.check(st, _fetch3(health=_health(G2))) is None
+    assert rd.check(st, _fetch3(health='{"network": {"observed_genesis_hash": "nope"}}')) is None
+    assert st[rd.KEY]["genesis"] == G2
+
+
+def test_devnet_status_change_alerts_once():
+    st = {}
+    assert rd.check(st, _fetch3()) is None and st[rd.KEY]["devnet_status"] == "development"
+    opened = "<p>Status: public. Anyone can join.</p>"
+    alert = rd.check(st, _fetch3(devnet=opened))
+    assert "'development' → 'public'" in alert and "KHÔNG" in alert
+    assert rd.check(st, _fetch3(devnet=opened)) is None
+
+
+def test_issue_31_maintainer_reply_alerts_once():
+    st = {}
+    u = rd.UNIT_ISSUE_URL
+    quiet = {u: json.dumps({"state": "open", "comments": 1}),
+             u + "/comments?per_page=100&page=1": json.dumps([_c(1, "NONE")])}
+    assert rd.check(st, _fetch3(extra=quiet)) is None
+    reply = {u: json.dumps({"state": "open", "comments": 2}),
+             u + "/comments?per_page=100&page=1": json.dumps([_c(1, "NONE"), _c(9, "OWNER")])}
+    alert = rd.check(st, _fetch3(extra=reply))
+    assert "TRẢ LỜI yellowpaper#31" in alert and "ví chủ hay khoá uỷ quyền" in alert
+    assert rd.check(st, _fetch3(extra=reply)) is None
+
+
+def test_parse_genesis():
+    assert rd.parse_genesis(_health("0xABCDEF0123")) == "0xabcdef0123"
+    assert rd.parse_genesis("<html>") is None and rd.parse_genesis(json.dumps({"network": "devnet"})) is None
+
+
+def test_spec_maintainer_shown_as_contributor_counts():
+    # yellowpaper: người sync spec (`sv`) hiện là CONTRIBUTOR, không phải MEMBER -> vẫn phải báo
+    st = {}
+    _run(st, _attr(comments=[_c(1, "NONE")]))
+    alert = _run(st, _attr(comments=[_c(1, "NONE"), _c(5, "CONTRIBUTOR")]))
+    assert alert and "TRẢ LỜI yellowpaper#172" in alert
+
+
+def test_first_sight_of_an_issue_does_not_alert_on_old_maintainer_comments():
+    st = {}
+    old = _attr(comments=[_c(3, "CONTRIBUTOR")])
+    assert _run(st, old) is None and st[rd.KEY]["attr_seen"] == [3]
+    assert _run(st, old) is None
