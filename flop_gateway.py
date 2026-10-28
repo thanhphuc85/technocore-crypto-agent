@@ -284,6 +284,17 @@ def chat(http, base: str, bearer: str, model: str, prompt: str, max_tokens: int,
 
 # --- nhịp chi: rải quota còn lại tới lúc hết hạn ----------------------------------------
 
+def answer_text(resp) -> str:
+    """Nội dung câu trả lời từ phản hồi chat/completions (dạng OpenAI); '' nếu không có."""
+    try:
+        c = (resp.get("choices") or [])[0]
+        m = c.get("message") if isinstance(c.get("message"), dict) else {}
+        t = m.get("content") if m else c.get("text")
+        return t.strip() if isinstance(t, str) else ""
+    except (AttributeError, IndexError, TypeError):
+        return ""
+
+
 def epoch_s(v):
     """Mốc thời gian -> giây. OpenAPI ghi `expires_at` là mili-giây; nếu mạng khác trả GIÂY
     mà vẫn chia 1000 thì hạn rơi về năm 1970 -> bearer luôn "sắp hết hạn" -> đăng ký lại ví
@@ -509,7 +520,7 @@ def report_line(g: dict, now: int):
 
 def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_network: str,
              book_fn=None, sleep=time.sleep, log=print, rng=None, deadline=None,
-             clock=time.time) -> dict:
+             clock=time.time, answer_fn=None) -> dict:
     """Một nhịp mua compute. Trả {"outcome", "calls", "spent", ...}; KHÔNG ném lỗi.
 
     `book_fn(amount, ref, model)` ghi sổ (chỉ khi mạng khớp `expect_network`); None = chạy
@@ -723,6 +734,13 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
                     cost, src = delta, "quota"
             calls += 1
             spent += cost
+            if answer_fn:
+                # Câu trả lời là SẢN PHẨM của lần mua (caller lưu/dùng) — lỗi ở đây không được
+                # làm hỏng việc đếm chi.
+                try:
+                    answer_fn(prompt, answer_text(r), cost)
+                except Exception as e:
+                    log(f"[gateway] bỏ qua lỗi khi lưu câu trả lời ({str(e)[:80]})")
             last = {"id": r.get("id"), "tokens": u.get("completion_tokens"), "cost": cost,
                     "src": src, "gflops": u.get("gflops_used")}
             if cost <= 0:

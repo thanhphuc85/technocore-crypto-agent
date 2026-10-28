@@ -4289,6 +4289,76 @@ def _gateway_http(method, url, headers=None, json=None, timeout=20):
                             json=json, timeout=timeout)
 
 
+# Bản tin nghiên cứu (FLOP_GATEWAY_BRIEF=on): compute mua qua gateway phải ra SẢN PHẨM có
+# người đọc, không mua để vứt. Bật thì mỗi lần gọi = một câu hỏi CỦA OPERATOR kèm số liệu thị
+# trường live; câu trả lời được lưu, cuối ngày UTC ghép thành bản tin gửi Telegram. Job kibble
+# KHÔNG gửi lại sang gateway nữa (đã trả lời bằng LLM thường + giao cho người đặt — gửi lại là
+# trả tiền hai lần cho cùng một việc mà không ai dùng kết quả).
+GATEWAY_BRIEF = os.environ.get("FLOP_GATEWAY_BRIEF", "").strip().lower() in ("1", "true", "on", "yes")
+BRIEF_KEY = "gateway_brief"
+BRIEF_KEEP = 20            # số mục giữ trong ngày (state.json)
+BRIEF_ANSWER_CHARS = 700   # cắt mỗi câu trả lời khi lưu
+BRIEF_TG_CHARS = 3900      # dưới trần 4096 ký tự của Telegram
+
+
+def _brief_question(prompt: str) -> str:
+    """Phần câu hỏi của operator (bỏ phần số liệu live/mốc giờ nối phía sau)."""
+    return re.split(r"\n\n(?:Live market context|\(Answer concretely)", prompt, maxsplit=1)[0].strip()[:160]
+
+
+def _brief_add(state: dict, now: int, prompt: str, text: str, cost: float) -> None:
+    b = state.get(BRIEF_KEY)
+    b = dict(b) if isinstance(b, dict) else {}
+    if not b.get("day"):
+        b["day"] = time.strftime("%Y-%m-%d", time.gmtime(now))
+    items = [i for i in (b.get("items") or []) if isinstance(i, dict)]
+    b["n"] = int(b.get("n") or 0) + 1
+    b["cost"] = round(float(b.get("cost") or 0) + float(cost or 0), 6)
+    if text:
+        items.append({"t": int(now), "q": _brief_question(prompt), "a": text[:BRIEF_ANSWER_CHARS],
+                      "c": round(float(cost or 0), 6)})
+    b["items"] = items[-BRIEF_KEEP:]
+    state[BRIEF_KEY] = b
+
+
+def brief_digest(b: dict, network: str = "") -> str:
+    """Bản tin của một ngày: đầu đề + các mục MỚI NHẤT vừa trong trần ký tự Telegram."""
+    items = [i for i in (b.get("items") or []) if isinstance(i, dict) and i.get("a")]
+    head = (f"📰 Bản tin nghiên cứu FLOP {b.get('day', '?')}"
+            + (f" ({network})" if network else "")
+            + f"\n{int(b.get('n') or 0)} lần gọi · {float(b.get('cost') or 0):.4g} FLOP · "
+              "nội dung do model trên mạng FLOP viết (không phải lời khuyên đầu tư)\n")
+    parts, used = [], len(head)
+    for i in reversed(items):
+        block = f"\n▸ {i.get('q', '')}\n{i.get('a', '')}\n"
+        if used + len(block) > BRIEF_TG_CHARS:
+            break
+        parts.append(block)
+        used += len(block)
+    if len(parts) < len(items):
+        head += f"(hiện {len(parts)}/{len(items)} mục mới nhất)\n"
+    return head + "".join(reversed(parts))
+
+
+def brief_flush(state: dict, now: int, network: str = "") -> str:
+    """Sang ngày UTC mới -> gửi bản tin ngày cũ. Gửi lỗi thì GIỮ, lần sau gửi lại."""
+    b = state.get(BRIEF_KEY)
+    if not isinstance(b, dict) or not b.get("day"):
+        return "empty"
+    today = time.strftime("%Y-%m-%d", time.gmtime(now))
+    if b["day"] == today:
+        return "collecting"
+    if any(isinstance(i, dict) and i.get("a") for i in (b.get("items") or [])):
+        if not _telegram_send(brief_digest(b, network)):
+            return "unsent"
+        status = "sent"
+    else:
+        status = "nothing"
+    state[BRIEF_KEY] = {"day": today, "items": [], "n": 0, "cost": 0.0}
+    save_state({BRIEF_KEY: state[BRIEF_KEY]})
+    return status
+
+
 def gateway_session_step(state: dict, private_key, now: int):
     """Mua compute qua api.flop.network (FLOP_SESSION_BACKEND=gateway). Trả
     (session_status, settled_count, last) cho dòng [session] và bộ canh chi thật.
@@ -4305,6 +4375,9 @@ def gateway_session_step(state: dict, private_key, now: int):
     # Đề ưu tiên = job kibble THẬT agent vừa làm (mỗi đề một việc khác nhau, có người đặt);
     # hết job mới dùng đề của operator. Nội dung job là UNTRUSTED -> isolate như mọi chỗ khác.
     jobs = [j for j in (state.get("gateway_jobs") or []) if isinstance(j, dict) and j.get("task")]
+    if GATEWAY_BRIEF:
+        jobs = []                                     # chế độ bản tin: chỉ đề operator + số liệu live
+        print(f"[brief] {brief_flush(state, now, expect)}")
     # Đề dự phòng của operator chỉ cần khi hàng job không đủ cho một lượt -> chỉ lúc đó mới tốn
     # một lần lấy số liệu thị trường live.
     ctx = ""
@@ -4333,10 +4406,16 @@ def gateway_session_step(state: dict, private_key, now: int):
     def book(cost, ref, model):
         return _tm.record_gateway_spend(cost, f"{flop_gateway.SESSION_MEMO} {model}", ref)
 
+    def keep(prompt, text, cost):
+        _brief_add(state, now, prompt, text, cost)
+
     r = flop_gateway.run_step(
         state, agent_key=private_key, now=now, prompts=prompts, expect_network=expect,
         http=_gateway_http,
-        book_fn=book if testnet else None, deadline=run_deadline())
+        book_fn=book if testnet else None, deadline=run_deadline(),
+        answer_fn=keep if GATEWAY_BRIEF else None)
+    if GATEWAY_BRIEF and r.get("calls"):
+        save_state({BRIEF_KEY: state.get(BRIEF_KEY)})
     if testnet and r.get("receipts_new"):
         # Lưu sổ cái NGAY: biên nhận vừa ghi đã được đánh dấu "đã ghi" trong state.json (cache lưu
         # cả khi run lỗi). Nếu chỉ đợi persist cuối run mà run chết giữa chừng thì số chi mất

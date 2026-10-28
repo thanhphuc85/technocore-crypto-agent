@@ -3769,3 +3769,68 @@ def test_gateway_parsers_survive_hostile_values():
     import flop_gateway as gw
     assert gw.epoch_s("9" * 400) is None and gw.epoch_s(float("inf")) is None and gw.epoch_s(10**20) is None
     assert gw.network_matches(-1, "testnet") is False and gw.network_matches(1.5, "testnet") is False
+
+
+# --- bản tin nghiên cứu: câu trả lời gateway được lưu + gửi cuối ngày, không gửi lại job kibble ---
+def test_brief_mode_uses_operator_prompts_keeps_answers_and_skips_kibble_jobs(monkeypatch):
+    import flop_gateway
+    seen = {}
+    def fake_step(state, **k):
+        seen.update(k)
+        for p in k["prompts"][:2]:
+            k["answer_fn"](p, "BTC giữ trên MA200; rủi ro: funding cao.", 0.9)
+        return {"outcome": "spent", "calls": 2, "spent": 1.8}
+    monkeypatch.setattr(flop_gateway, "run_step", fake_step)
+    monkeypatch.setattr(ac, "GATEWAY_BRIEF", True)
+    monkeypatch.setattr(ac, "build_market_context", lambda *a, **k: "BTC $70k")
+    monkeypatch.setattr(ac, "save_state", lambda d: None)
+    monkeypatch.setenv("FLOP_GATEWAY_PROMPTS", "Tóm tắt rủi ro BTC hôm nay|Dòng tiền ETF")
+    state = {"gateway_jobs": [{"id": "j1", "task": "translate this"}]}
+    ac.gateway_session_step(state, _real_key(), 1_800_000_000)
+    assert all("translate this" not in p for p in seen["prompts"])          # job kibble không gửi lại
+    assert seen["prompts"][0].startswith("Tóm tắt rủi ro BTC hôm nay") and "BTC $70k" in seen["prompts"][0]
+    b = state[ac.BRIEF_KEY]
+    assert b["n"] == 2 and b["cost"] == 1.8 and b["day"] == "2027-01-15"
+    assert b["items"][0]["q"] == "Tóm tắt rủi ro BTC hôm nay" and "MA200" in b["items"][0]["a"]
+    assert state["gateway_jobs"]                                             # hàng job không bị tiêu
+
+
+def test_brief_off_keeps_old_behaviour(monkeypatch):
+    import flop_gateway
+    seen = {}
+    monkeypatch.setattr(flop_gateway, "run_step", lambda state, **k: seen.update(k) or
+                        {"outcome": "spent", "calls": 1, "spent": 0.5})
+    monkeypatch.setattr(ac, "GATEWAY_BRIEF", False)
+    monkeypatch.setattr(ac, "save_state", lambda d: None)
+    monkeypatch.setenv("FLOP_GATEWAY_PROMPTS", "q")
+    state = {"gateway_jobs": [{"id": "j1", "task": "translate this"}]}
+    ac.gateway_session_step(state, _real_key(), 1_800_000_000)
+    assert "translate this" in seen["prompts"][0] and seen["answer_fn"] is None
+    assert ac.BRIEF_KEY not in state
+
+
+def test_brief_flush_sends_previous_day_once_and_retries_on_failure(monkeypatch):
+    monkeypatch.setattr(ac, "save_state", lambda d: None)
+    state = {}
+    day1 = 1_800_000_000
+    ac._brief_add(state, day1, "Q1\n\nLive market context (x): y", "Trả lời 1", 0.5)
+    ac._brief_add(state, day1 + 60, "Q2\n\n(Answer concretely; as of z.)", "", 0.4)   # rỗng: đếm, không in
+    assert ac.brief_flush(state, day1 + 120) == "collecting"
+    sent = []
+    monkeypatch.setattr(ac, "_telegram_send", lambda t: False)
+    assert ac.brief_flush(state, day1 + 86400, "testnet") == "unsent"
+    assert state[ac.BRIEF_KEY]["day"] == "2027-01-15"                          # giữ để gửi lại
+    monkeypatch.setattr(ac, "_telegram_send", lambda t: sent.append(t) or True)
+    assert ac.brief_flush(state, day1 + 86400, "testnet") == "sent"
+    msg = sent[0]
+    assert "2027-01-15 (testnet)" in msg and "2 lần gọi" in msg and "0.9 FLOP" in msg
+    assert "▸ Q1\nTrả lời 1" in msg and "Q2" not in msg and "Live market" not in msg
+    assert state[ac.BRIEF_KEY] == {"day": "2027-01-16", "items": [], "n": 0, "cost": 0.0}
+    assert ac.brief_flush(state, day1 + 86400 + 60) == "collecting"
+
+
+def test_brief_digest_fits_telegram_and_prefers_newest():
+    b = {"day": "d", "n": 30, "cost": 9,
+         "items": [{"q": f"Q{i}", "a": "x" * 690} for i in range(20)]}
+    msg = ac.brief_digest(b)
+    assert len(msg) <= 4096 and "Q19" in msg and "Q0\n" not in msg and "mục mới nhất" in msg

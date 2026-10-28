@@ -298,6 +298,7 @@ jobs:
           FLOP_GATEWAY_PROMPTS: ${{ vars.FLOP_GATEWAY_PROMPTS }}
           FLOP_GATEWAY_PURPOSE: ${{ vars.FLOP_GATEWAY_PURPOSE }}
           FLOP_GATEWAY_MAX_CALLS_PER_RUN: ${{ vars.FLOP_GATEWAY_MAX_CALLS_PER_RUN }}
+          FLOP_GATEWAY_BRIEF: ${{ vars.FLOP_GATEWAY_BRIEF }}
           FLOP_GATEWAY_MAX_TOKENS: ${{ vars.FLOP_GATEWAY_MAX_TOKENS }}
           FLOP_GATEWAY_MAX_WAIT_MS: ${{ vars.FLOP_GATEWAY_MAX_WAIT_MS }}
           # Cảnh báo chi tụt lại: >PCT% cửa sổ trong >=ALERT_HOURS giờ -> Telegram (testnet).
