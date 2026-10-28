@@ -3033,7 +3033,7 @@ def test_radar_step_keeps_alert_when_telegram_fails(monkeypatch):
     import flop_radar
     monkeypatch.setattr(ac, "TESTNET_RADAR", True)
     monkeypatch.setattr(flop_radar, "check",
-                        lambda st, f: st.update({flop_radar.KEY: {"paths": ["/faucet"]}}) or "🚨 x")
+                        lambda st, f, **k: st.update({flop_radar.KEY: {"paths": ["/faucet"]}}) or "🚨 x")
     saved = {}
     monkeypatch.setattr(ac, "save_state", lambda d: saved.update(d))
     monkeypatch.setattr(ac, "_telegram_send", lambda t: False)

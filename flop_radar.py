@@ -14,6 +14,15 @@ có cái MỚI thì báo Telegram.
   · flop.finance/official/            — mục "Current testnet and airdrop status" (FLOP Labs
                                          sửa trang này mỗi lần công bố về testnet/airdrop).
 
+ĐỨNG TÊN AI (2026-10-28): kênh mua qua gateway do tài khoản BROKER của gateway mở -> explorer
+ghi chi tiêu cho broker, ví mình = 0; yellowpaper R8.4 chấm theo người mở kênh. Chưa có câu
+trả lời chính thức, nên radar canh 3 tín hiệu sẽ đổi quyết định:
+  · yellowpaper#172                   — người của flop-labs (OWNER/MEMBER/COLLABORATOR) trả lời,
+                                         hoặc issue đóng.
+  · <explorer>/api/session-offers     — miner có offer công khai -> mua TRỰC TIẾP đứng tên mình
+                                         (CLI `flop session run`) bắt đầu khả thi.
+  · <explorer>/api/accounts/<ví>/inference-spend — ví mình có chi tiêu ghi trên chain (0 -> >0).
+
 CHỈ ĐỌC: không đăng tin, không chi, không ghi KV ngoài state của chính agent.
 Thuần & test được: caller tiêm fetch_fn(url) -> str|None.
 """
@@ -29,6 +38,9 @@ LLMS_URL = "https://docs.flop.network/llms.txt"
 STATUS_URL = "https://docs.flop.network/docs/network-testnet"
 GATEWAY_HEALTH_URL = "https://api.flop.network/health"
 OFFICIAL_URL = "https://flop.finance/official/"
+ATTRIB_ISSUE_URL = "https://api.github.com/repos/flop-labs/yellowpaper/issues/172"
+EXPLORERS = ("https://explorer.devnet.flop.network", "https://explorer.testnet.flop.network")
+MAINTAINER_ROLES = frozenset(("OWNER", "MEMBER", "COLLABORATOR"))
 
 # Mốc đã biết (2026-10-22). Cái gì NGOÀI mốc này + ngoài những gì radar đã báo = mới.
 BASE_PATHS = frozenset((
@@ -108,7 +120,100 @@ def parse_official(text):
     return hashlib.sha256(body.encode("utf-8")).hexdigest()[:12] if body else None
 
 
-def check(state: dict, fetch_fn) -> str:
+def _json(text):
+    try:
+        return json.loads(text) if text else None
+    except ValueError:
+        return None
+
+
+def parse_issue(text):
+    """(state, số comment) của issue GitHub; None nếu hỏng."""
+    d = _json(text)
+    if not isinstance(d, dict) or not isinstance(d.get("state"), str):
+        return None
+    n = d.get("comments")
+    return d["state"], (n if isinstance(n, int) and n >= 0 else 0)
+
+
+def parse_maintainer_comments(text):
+    """[(id, login, url)] các comment do người của repo viết; None nếu hỏng."""
+    d = _json(text)
+    if not isinstance(d, list):
+        return None
+    out = []
+    for c in d:
+        if (isinstance(c, dict) and c.get("author_association") in MAINTAINER_ROLES
+                and isinstance(c.get("id"), int)):
+            out.append((c["id"], str((c.get("user") or {}).get("login") or "?")[:40],
+                        str(c.get("html_url") or "")[:200]))
+    return out
+
+
+def parse_total(text):
+    """pagination.total của một danh sách explorer; None nếu hỏng."""
+    d = _json(text)
+    p = d.get("pagination") if isinstance(d, dict) else None
+    t = p.get("total") if isinstance(p, dict) else None
+    return t if isinstance(t, int) and t >= 0 else None
+
+
+def parse_spent(text):
+    """totalSpentRaw (int, đơn vị raw 1e18) của một ví trên explorer; None nếu hỏng."""
+    d = _json(text)
+    v = d.get("totalSpentRaw") if isinstance(d, dict) else None
+    try:
+        return int(v) if isinstance(v, (str, int)) else None
+    except ValueError:
+        return None
+
+
+def _host(url):
+    return url.split("//", 1)[-1].split("/", 1)[0]
+
+
+def check_attribution(r: dict, fetch_fn, wallet=None, explorers=EXPLORERS) -> list:
+    """3 tín hiệu ĐỨNG TÊN AI (xem docstring module). Ghi mốc vào r, trả các dòng báo động.
+    Lần đầu thấy một nguồn chỉ ghi mốc (không báo). Nguồn lỗi -> bỏ qua."""
+    lines = []
+    issue = parse_issue(fetch_fn(ATTRIB_ISSUE_URL))
+    if issue:
+        st, n = issue
+        if r.get("attr_issue_state") == "open" and st != "open":
+            lines.append("• yellowpaper#172 (chi tiêu qua gateway đứng tên ai) đã ĐÓNG — đọc kết luận: "
+                         "github.com/flop-labs/yellowpaper/issues/172")
+        r["attr_issue_state"] = st
+        seen = set(r.get("attr_seen") or [])
+        page = max(1, -(-n // 100))                    # trang cuối = comment mới nhất
+        found = parse_maintainer_comments(
+            fetch_fn(f"{ATTRIB_ISSUE_URL}/comments?per_page=100&page={page}")) if n else []
+        for cid, login, url in found or []:
+            if cid not in seen:
+                lines.append(f"• flop-labs ({login}) TRẢ LỜI yellowpaper#172 — đọc ngay: {url}")
+                seen.add(cid)
+        r["attr_seen"] = sorted(x for x in seen if isinstance(x, int))[-20:]
+    offers = dict(r.get("attr_offers") or {})
+    spent = dict(r.get("attr_spent") or {})
+    for base in explorers:
+        h = _host(base)
+        t = parse_total(fetch_fn(f"{base}/api/session-offers"))
+        if t is not None:
+            if offers.get(h) == 0 and t > 0:
+                lines.append(f"• {h}: miner bắt đầu có OFFER công khai ({t}) — mua trực tiếp đứng "
+                             "tên ví mình (flop session run) có thể khả thi")
+            offers[h] = t
+        if wallet:
+            v = parse_spent(fetch_fn(f"{base}/api/accounts/{wallet}/inference-spend"))
+            if v is not None:
+                if spent.get(h) == 0 and v > 0:
+                    lines.append(f"• {h}: VÍ MÌNH {wallet[:6]}…{wallet[-4:]} đã có chi tiêu ghi trên "
+                                 f"chain ({v / 1e18:.4g} FLOP) — chi tiêu đang đứng tên mình")
+                spent[h] = 0 if v == 0 else 1
+    r["attr_offers"], r["attr_spent"] = offers, spent
+    return lines
+
+
+def check(state: dict, fetch_fn, wallet=None, explorers=EXPLORERS) -> str:
     """Đọc 3 nguồn, so với mốc + những gì đã báo. Trả chuỗi báo động (đã ghi nhận vào state
     để không báo lại) hoặc None. Nguồn nào lỗi thì bỏ qua nguồn đó, không báo động giả."""
     r = state.get(KEY)
@@ -153,8 +258,12 @@ def check(state: dict, fetch_fn) -> str:
     if official:
         official_known = official          # lần đầu chỉ ghi mốc, không báo
 
+    attr = {k: v for k, v in r.items() if k.startswith("attr_")}
+    lines += check_attribution(attr, fetch_fn, wallet, explorers)
+
     state[KEY] = {"paths": sorted(seen_paths)[:60], "docs": sorted(seen_docs)[:60],
-                  "status": status_known, "network": network_known, "official": official_known}
+                  "status": status_known, "network": network_known, "official": official_known,
+                  **attr}
     if not lines:
         return None
     return ("🚨 FLOP TESTNET RADAR — có thay đổi:\n" + "\n".join(lines)

@@ -1187,6 +1187,8 @@ OUTCOME_GUARD = os.environ.get("FLOP_OUTCOME_GUARD", "").strip().lower() not in 
 # + llms.txt + trạng thái testnet, có cái mới -> Telegram. Mặc định BẬT; =off để tắt.
 TESTNET_RADAR = os.environ.get("FLOP_TESTNET_RADAR", "").strip().lower() not in ("0", "false", "off", "no")
 TESTNET_RADAR_H = max(0.25, _env_float("FLOP_TESTNET_RADAR_HOURS", 1))
+# Explorer thêm cho radar "đứng tên ai" (vd host explorer testnet nếu khác mặc định trong flop_radar).
+RADAR_EXPLORER = os.environ.get("FLOP_RADAR_EXPLORER_URL", "").strip().rstrip("/")
 
 
 def _radar_fetch(url: str):
@@ -1197,7 +1199,7 @@ def _radar_fetch(url: str):
     except requests.RequestException:
         return None
 
-def testnet_radar_step(state: dict, now: int) -> str:
+def testnet_radar_step(state: dict, now: int, private_key=None) -> str:
     """Một nhịp radar testnet (xem flop_radar). Trả trạng thái cho dòng [run]. Gửi Telegram
     thất bại thì KHÔNG ghi nhận "đã thấy" và KHÔNG đóng cổng giờ -> lần sau báo lại."""
     if not TESTNET_RADAR:
@@ -1207,7 +1209,18 @@ def testnet_radar_step(state: dict, now: int) -> str:
     try:
         import flop_radar
         prev = state.get(flop_radar.KEY)
-        alert = flop_radar.check(state, _radar_fetch)
+        wallet = None
+        if private_key is not None:
+            try:
+                import flop_gateway
+                _wk = flop_gateway.wallet_key(private_key)
+                wallet = flop_gateway.wallet_address(_wk) if _wk else None
+            except Exception:
+                wallet = None
+        explorers = flop_radar.EXPLORERS
+        if RADAR_EXPLORER.startswith("https://") and RADAR_EXPLORER not in explorers:
+            explorers = explorers + (RADAR_EXPLORER,)
+        alert = flop_radar.check(state, _radar_fetch, wallet=wallet, explorers=explorers)
         if alert:
             print(f"[radar] {alert}")
             if not _telegram_send(alert):
@@ -5053,7 +5066,7 @@ def main():
 
     # 3c0) RADAR TESTNET (chỉ đọc): có route/trang/trạng thái MỚI -> Telegram. Gửi Telegram
     #      thất bại thì KHÔNG ghi nhận "đã thấy" -> giờ sau báo lại, không nuốt mất tin.
-    radar_status = testnet_radar_step(state, now)
+    radar_status = testnet_radar_step(state, now, private_key)
 
     # 3c) Lưu model Gemini 404 học được trong run này -> run sau không thử lại (bền qua KV).
     if _gemini_404:
