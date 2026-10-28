@@ -647,3 +647,21 @@ def test_no_new_call_starts_past_the_run_deadline(monkeypatch):
     r2 = gw.run_step({}, agent_key=_key("22"), http=fake2, now=NOW, prompts=["a", "b"], expect_network="devnet",
                      sleep=lambda s: None, log=lambda *a: None, deadline=1000.0 + 10_000, clock=lambda: 1000.0)
     assert r2["calls"] == 2                                              # đủ thời gian -> gọi bình thường
+
+
+def test_answer_fn_receives_each_answer_and_its_errors_do_not_break_spend():
+    got = []
+    fake = FakeGateway(expires_ms=(NOW + 2000) * 1000)
+    r = _run({}, fake, answer_fn=lambda p, t, c: got.append((p, t, c)))
+    assert r["calls"] >= 1 and len(got) == r["calls"]
+    assert got[0][0] == "q1" and got[0][1] == "ok" and got[0][2] > 0
+    def boom(*a):
+        raise RuntimeError("disk full")
+    r2 = _run({}, FakeGateway(expires_ms=(NOW + 2000) * 1000), answer_fn=boom)
+    assert r2["outcome"] == "spent" and r2["calls"] >= 1
+
+
+def test_answer_text_shapes():
+    assert gw.answer_text({"choices": [{"message": {"content": "  hi  "}}]}) == "hi"
+    assert gw.answer_text({"choices": [{"text": "legacy"}]}) == "legacy"
+    assert gw.answer_text({"choices": []}) == "" and gw.answer_text({}) == "" and gw.answer_text(None) == ""
