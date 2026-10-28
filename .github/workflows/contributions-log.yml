@@ -34,7 +34,7 @@ jobs:
         # Job này có quyền GHI repo -> chỉ cài bản đã khoá + khớp hash (requirements-dev.lock).
         run: pip install --require-hashes --no-deps -r requirements-dev.lock
 
-      - name: Regenerate &amp; commit (race-proof)
+      - name: Regenerate & commit (race-proof)
         env:
           GH_TOKEN: ${{ github.token }}     # cho `gh pr list` đếm PR đã merge
           # Danh tính đọc từ Repo Variables (khớp agent_cron) -> FORK tự đóng dấu danh tính

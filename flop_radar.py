@@ -79,6 +79,14 @@ BASE_NETWORK = "devnet"
 HOT = re.compile(r"faucet|session|infer|mempool|wallet|claim|testnet|model|settle|escrow|agent", re.I)
 
 
+SEEN_KEEP = 60                       # trần mục "đã thấy" lưu trong state (state đi lên KV)
+
+
+def _set_fp(items) -> str:
+    """Dấu vân tay 12 hex của một tập chuỗi (không phụ thuộc thứ tự)."""
+    return hashlib.sha256("\n".join(sorted(items)).encode("utf-8")).hexdigest()[:12]
+
+
 def parse_paths(text):
     """Danh sách path từ openapi.json (bỏ phần chữ cảnh báo đứng trước '{'). None nếu hỏng."""
     if not text or "{" not in text:
@@ -262,22 +270,31 @@ def check(state: dict, fetch_fn, wallet=None, explorers=EXPLORERS) -> str:
     official_known = r.get("official")
     lines = []
 
+    # Danh sách "đã thấy" bị cắt còn SEEN_KEEP mục (state đi lên KV, trần 8192 ký tự), nên mục bị
+    # cắt sẽ lại thành "mới" mỗi giờ. Chốt bằng DẤU VÂN TAY của cả tập: tập không đổi -> không so.
+    paths_fp, docs_fp = r.get("paths_fp"), r.get("docs_fp")
     paths = parse_paths(fetch_fn(OPENAPI_URL))
     if paths is not None:
-        new = sorted(paths - BASE_PATHS - seen_paths)
-        if new:
-            hot = [p for p in new if HOT.search(p)]
-            lines.append("• technocore.chat có ROUTE MỚI: " + ", ".join(new[:12])
-                         + (f"  ← đáng chú ý: {', '.join(hot[:6])}" if hot else ""))
-            seen_paths |= set(new)
+        fp = _set_fp(paths)
+        if fp != paths_fp:
+            new = sorted(paths - BASE_PATHS - seen_paths)
+            if new:
+                hot = [p for p in new if HOT.search(p)]
+                lines.append("• technocore.chat có ROUTE MỚI: " + ", ".join(new[:12])
+                             + (f"  ← đáng chú ý: {', '.join(hot[:6])}" if hot else ""))
+            seen_paths = (seen_paths | set(new)) & paths    # route đã gỡ thì khỏi nhớ
+            paths_fp = fp
 
     docs = parse_docs(fetch_fn(LLMS_URL))
     if docs is not None:
-        new = sorted(docs - BASE_DOCS - seen_docs)
-        if new:
-            lines.append("• docs.flop.network có TRANG MỚI: "
-                         + ", ".join(f"/docs/{d}" for d in new[:12]))
-            seen_docs |= set(new)
+        fp = _set_fp(docs)
+        if fp != docs_fp:
+            new = sorted(docs - BASE_DOCS - seen_docs)
+            if new:
+                lines.append("• docs.flop.network có TRANG MỚI: "
+                             + ", ".join(f"/docs/{d}" for d in new[:12]))
+            seen_docs = (seen_docs | set(new)) & docs
+            docs_fp = fp
 
     status = parse_status(fetch_fn(STATUS_URL))
     if status and status != status_known:
@@ -312,7 +329,8 @@ def check(state: dict, fetch_fn, wallet=None, explorers=EXPLORERS) -> str:
     attr = {k: v for k, v in r.items() if k.startswith("attr_")}
     lines += check_attribution(attr, fetch_fn, wallet, explorers)
 
-    state[KEY] = {"paths": sorted(seen_paths)[:60], "docs": sorted(seen_docs)[:60],
+    state[KEY] = {"paths": sorted(seen_paths)[:SEEN_KEEP], "docs": sorted(seen_docs)[:SEEN_KEEP],
+                  "paths_fp": paths_fp, "docs_fp": docs_fp,
                   "status": status_known, "network": network_known, "official": official_known,
                   "devnet_status": devnet_known, "genesis": genesis_known, **attr}
     if not lines:

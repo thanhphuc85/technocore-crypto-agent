@@ -1273,6 +1273,14 @@ def room_capped(room: str) -> bool:
     return _gov.is_capped(_post_gov_state, room, _post_caps(), time.time())
 
 
+def room_has_quota(room: str, n: int) -> bool:
+    """Còn đủ hạn mức hôm nay để đăng `n` tin vào `room` (governor tắt -> luôn True)."""
+    if not POST_GOVERNOR:
+        return True
+    import flop_governor as _gov
+    return _gov.remaining(_post_gov_state, room, _post_caps(), time.time()) >= n
+
+
 def post_message(private_key, did, text, room=ROOM) -> bool:
     if POST_GOVERNOR:
         import flop_governor as _gov
@@ -1332,14 +1340,23 @@ def fetch_messages(since=None, room=ROOM):
     last_err = None
     for attempt in range(1 + FETCH_RETRIES):
         try:
-            data = requests.get(url, headers={"User-Agent": UA}, timeout=10).json()
-            _note_server_ok()
-            return data
+            r = requests.get(url, headers={"User-Agent": UA}, timeout=10)
+            status = getattr(r, "status_code", 200)
+            if status != 200:
+                # 503 kèm body JSON {"error": ...} KHÔNG phải tin nhắn: trước đây nó được trả về
+                # như dữ liệu VÀ đếm là "server OK" -> outage thật vẫn ra run xanh (exit 1 không bắn).
+                last_err = RuntimeError(f"HTTP {status}")
+                if status != 429 and status < 500:
+                    break                      # 4xx khác (sai room...) -> thử lại cũng vô ích
+            else:
+                data = r.json()
+                _note_server_ok()
+                return data
         except (requests.RequestException, ValueError) as e:
             last_err = e                       # rỗng/không-JSON hoặc mạng lỗi -> thử lại
-            if attempt < FETCH_RETRIES:
-                time.sleep(1.5 * (attempt + 1))    # backoff nhẹ (1.5s, 3.0s)
-    print(f"[fetch] request_failed sau {1 + FETCH_RETRIES} lần | {last_err}")
+        if attempt < FETCH_RETRIES:
+            time.sleep(1.5 * (attempt + 1))    # backoff nhẹ (1.5s, 3.0s)
+    print(f"[fetch] request_failed r/{room} | {last_err}")
     return None
 
 
@@ -1877,6 +1894,9 @@ def persist_ledger_to_kv(private_key, did) -> None:
                 "credit_by_hour": led.get("credit_by_hour", {}),
                 "first_spend_day": led.get("first_spend_day"),
                 "unlock": led.get("unlock", {}),
+                # Đặt cọc (flop_stake) đã TRỪ số dư lỏng: thiếu khoá này thì runner mới hydrate
+                # về số dư đã trừ mà mất phần delegated -> FLOP "biến mất" khỏi sổ.
+                "stake": led.get("stake", {}),
                 # Dấu băm biên nhận gateway đã ghi -> cache mất vẫn không ghi trùng.
                 "gateway_refs": (led.get("gateway_refs") or [])[-100:]}
         entries = (led.get("entries", []) or [])
@@ -2033,7 +2053,7 @@ def safe_nick(nick: str) -> str:
 def is_addressed(text: str, my_did: str, my_nick: str) -> bool:
     """Chỉ trả lời tin gọi đích danh agent (tránh spam trong room firehose)."""
     t = text.lower()
-    if (HANDLE in t) or (my_did.lower() in t):
+    if (HANDLE.lower() in t) or (my_did.lower() in t):   # t đã lower -> HANDLE cũng phải lower
         return True
     # nick chỉ tính khi đứng như 1 TOKEN riêng (tránh khớp nhầm substring)
     nick = my_nick.lower()
@@ -2889,17 +2909,18 @@ def build_digest_context() -> str:
     return " | ".join(parts)
 
 
-def generate_digest(lang: str = None):
+def generate_digest(lang: str = None, event_id: str = None):
     """(A1) Sinh 1 bản phân tích thị trường ngắn, GROUNDED bằng data live. Trả text hoặc
     None (thiếu provider / thiếu data / lỗi). Mỗi lần sinh = 1 suy luận THẬT (đo qua
-    _llm_generate). Ngôn ngữ mặc định = DIGEST_LANG."""
+    _llm_generate). Ngôn ngữ mặc định = DIGEST_LANG. `event_id`: đặt khi USER gọi `!digest`
+    (nguồn organic); None cho bản đăng theo lịch (tổng hợp)."""
     ctx = build_digest_context()
     if not ctx:
         print("[digest] không có data thị trường -> bỏ qua")
         return None
     lg = (lang or DIGEST_LANG)
     system = DIGEST_SYSTEM + ("\nReply in Vietnamese." if lg == "vi" else "\nReply in English.")
-    text = _llm_generate(ctx, system, DIGEST_TEMPERATURE, memo="daily digest")
+    text = _llm_generate(ctx, system, DIGEST_TEMPERATURE, memo="daily digest", event_id=event_id)
     return text[:DIGEST_MAX_CHARS] if text else None
 
 
@@ -2965,16 +2986,17 @@ def build_recap_context(state, now) -> str:
     return " | ".join(parts)
 
 
-def generate_recap(state, now, lang: str = None):
+def generate_recap(state, now, lang: str = None, event_id: str = None):
     """(A3) Sinh bản tổng kết tuần grounded từ mẫu đã tích. Trả text hoặc None (chưa đủ
-    mẫu / thiếu provider / lỗi). Mỗi lần = 1 suy luận THẬT (đo qua _llm_generate)."""
+    mẫu / thiếu provider / lỗi). Mỗi lần = 1 suy luận THẬT (đo qua _llm_generate).
+    `event_id` như generate_digest: chỉ đặt khi user gọi `!recap`."""
     ctx = build_recap_context(state, now)
     if not ctx:
         print("[recap] chưa đủ mẫu trong tuần -> bỏ qua")
         return None
     lg = (lang or RECAP_LANG)
     system = RECAP_SYSTEM + ("\nReply in Vietnamese." if lg == "vi" else "\nReply in English.")
-    text = _llm_generate(ctx, system, RECAP_TEMPERATURE, memo="weekly recap")
+    text = _llm_generate(ctx, system, RECAP_TEMPERATURE, memo="weekly recap", event_id=event_id)
     return text[:RECAP_MAX_CHARS] if text else None
 
 
@@ -3011,10 +3033,12 @@ def mem_add(state, key, q, a):
     if state is None or not key:
         return
     mem = state.setdefault("mem", {})
-    turns = mem.get(key, [])
+    # pop rồi gán lại -> user vừa nói chuyện chuyển xuống CUỐI dict (thứ tự = gần đây nhất).
+    # Gán đè tại chỗ giữ nguyên vị trí cũ, nên peer đang hoạt động bị xoá như "cũ nhất".
+    turns = mem.pop(key, [])
     turns.append({"q": q[:MEM_MAX_CHARS], "a": a[:MEM_MAX_CHARS]})
     mem[key] = turns[-MEM_TURNS:]                     # giữ N lượt gần nhất
-    if len(mem) > MEM_MAX_USERS:                      # chống phình: bỏ user cũ nhất
+    if len(mem) > MEM_MAX_USERS:                      # chống phình: bỏ user lâu không nói nhất
         for k in list(mem.keys())[:len(mem) - MEM_MAX_USERS]:
             mem.pop(k, None)
 
@@ -3027,7 +3051,7 @@ def prof_update(state, key, text):
     if state is None or not key:
         return
     prof = state.setdefault("prof", {})
-    p = prof.get(key, {})
+    p = prof.pop(key, {})                            # pop -> peer vừa nói chuyển xuống cuối (LRU)
     p["lang"] = detect_lang(text)
     coins = [ID_TO_SYM.get(c, c.upper()) for c in extract_coins(text)]
     if coins:
@@ -3790,12 +3814,13 @@ def build_reply(sender_nick: str, text: str, state=None, sender_id=None) -> str:
     if has("!digest"):
         # (A1) Bản phân tích thị trường AI theo YÊU CẦU (grounded). Là hành động THẬT
         # do user gọi -> luôn phục vụ (không phụ thuộc gate lịch của broadcast).
-        body = generate_digest(detect_lang(text))
+        body = generate_digest(detect_lang(text), event_id=(sender_id or sender_nick))
         return tag(f"📊 {body}") if body else tag("digest tạm chưa sẵn sàng, thử lại sau.")
     if has("!recap"):
         # (A3) Tổng kết tuần theo YÊU CẦU — cần đã tích đủ mẫu (FLOP_RECAP_ENABLED bật
         # một thời gian). Chưa đủ -> báo nhẹ nhàng thay vì lỗi.
-        body = generate_recap(state or {}, int(time.time()), detect_lang(text))
+        body = generate_recap(state or {}, int(time.time()), detect_lang(text),
+                              event_id=(sender_id or sender_nick))
         return tag(f"🗓 {body}") if body else tag("weekly recap chưa đủ dữ liệu, quay lại sau nhé.")
     # Mention không kèm lệnh → LLM: grounding data-live + trí nhớ + đúng ngôn ngữ
     smart = llm_reply(text, sender_nick=sender_nick, state=state, mem_key=sender_id)
@@ -4227,26 +4252,28 @@ def check_price_alert(private_key, did, state):
     reset mốc. Mốc lưu trong state -> chỉ báo 1 lần cho mỗi bước biến động."""
     m = get_market(["bitcoin", "ethereum"])
     base = dict(state.get("last_alert_price") or {})
-    hits = []
+    hits, moved = [], {}
     for i, sym in (("bitcoin", "BTC"), ("ethereum", "ETH")):
         p = m.get(i, {}).get("usd")
         if p is None:
             continue
         prev = base.get(i)
-        if prev is None:
-            base[i] = p                       # lần đầu thấy: đặt mốc, CHƯA cảnh báo
+        if not prev:
+            base[i] = p                       # lần đầu thấy (hoặc mốc rác 0): đặt mốc, CHƯA cảnh báo
             continue
         move = (p - prev) / prev * 100.0
         if abs(move) >= ALERT_MOVE_PCT:
             hits.append(f"{sym} {move:+.1f}% → ${p}")
-            base[i] = p                       # reset mốc sau khi cảnh báo
+            moved[i] = p
     if hits:
         ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         moves = " · ".join(hits)
         # (B1, GATED) kèm 1 câu AI giải thích bối cảnh; TẮT -> explain_move trả '' -> alert
         # y hệt như cũ. Event-driven nên không spam.
-        post_message(private_key, did,
-                     f"[{AGENT_NAME}] ⚠️ Move alert | {moves}{explain_move(moves)} | {ts}")
+        if post_message(private_key, did,
+                        f"[{AGENT_NAME}] ⚠️ Move alert | {moves}{explain_move(moves)} | {ts}"):
+            base.update(moved)                # reset mốc CHỈ khi đã đăng được: post lỗi -> giữ mốc
+            # cũ để run sau báo lại, thay vì nuốt mất cảnh báo
     state["last_alert_price"] = base
     save_state({"last_alert_price": base})
 
@@ -4735,10 +4762,13 @@ def main():
                 # Lọc gần-trùng NGAY LÚC CHỌN -> đợt job toàn một họ không đốt hết quota.
                 recent_fps=_kibble_recent_fps, dup_sim=KIBBLE_DUP_SIM,
                 now_ms=int(time.time() * 1000), ttl_ms=_kibble_dup_ttl_ms(),
+                # Đủ hạn mức cho CẢ cặp CLAIM+DELIVER mới bắt đầu job (không để CLAIM treo).
+                can_post_fn=lambda n: room_has_quota(KIBBLE_ROOM, n),
             )
             queue_gateway_jobs(state)
             save_state({"kibble_cursor": state.get("kibble_cursor"),
                         "kibble_done": state.get("kibble_done", []),
+                        "kibble_pending": state.get("kibble_pending", []),
                         "kibble_recent_fps": _kibble_recent_fps,
                         "gateway_jobs": state.get("gateway_jobs", [])})
             mode = "dry" if KIBBLE_DRY_RUN else "live"
@@ -4797,6 +4827,8 @@ def main():
         except Exception as e:
             kibble_req_status = "error"
             print(f"[kibble-req] bỏ qua ({str(e)[:100]})")
+    elif KIBBLE_REQ_ENABLED:
+        kibble_req_status = "skip"             # bật nhưng chưa tới nhịp (trước đây báo nhầm "off")
 
     # 3a3) (Tùy chọn, GATED) tclk/1 payee — PHÁT HIỆN offer trên /r/tclk-offers + dựng `accept`.
     #      Mặc định TẮT; khi bật thì DRY-RUN (chỉ log). CHỈ discover+accept, KHÔNG lock/reveal.
@@ -4940,6 +4972,12 @@ def main():
         # Testnet bật mà chưa chọn: dùng gateway — đường FLOP CÔNG BỐ. Scaffold mempool cũ không
         # có endpoint thật nên quên đặt biến = cả ngày không chi gì. Đặt "mempool" để ép đường cũ.
         _backend = "gateway" if _tmb.testnet_enabled() else "mempool"
+    if GATEWAY_BRIEF and not (_sess_on and _backend == "gateway"):
+        # Bản tin chỉ được dựng trong gateway_session_step. Testnet tắt thì backend mặc định là
+        # mempool mô phỏng -> cờ này lặng lẽ không làm gì (đã xảy ra: bật 28/10, 0 bản tin).
+        print(f"[brief] ⚠️ FLOP_GATEWAY_BRIEF bật nhưng KHÔNG chạy: backend={_backend}"
+              + ("" if _sess_on else ", FLOP_SESSION_ENABLED tắt")
+              + " — đặt FLOP_SESSION_BACKEND=gateway (và FLOP_SESSION_ENABLED=on) để có bản tin")
     if _sess_on and _backend == "gateway":
         # Đường THẬT FLOP công bố: mua compute qua gateway api.flop.network (flop_gateway).
         try:

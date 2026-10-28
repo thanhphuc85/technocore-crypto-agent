@@ -72,6 +72,17 @@ def is_capped(state: dict, room: str, caps: dict, now) -> bool:
     return n >= cap_for(caps, room)
 
 
+def remaining(state: dict, room: str, caps: dict, now) -> int:
+    """Còn đăng được bao nhiêu tin vào `room` hôm nay — CHỈ ĐỌC. Cho caller cần đăng một
+    CẶP tin (kibble CLAIM + DELIVER): đủ 1 mà thiếu 2 thì CLAIM lọt, DELIVER bị chặn."""
+    pc = state.get(KEY) if isinstance(state.get(KEY), dict) else {}
+    try:
+        n = int((pc.get("rooms") or {}).get(room, 0)) if pc.get("day") == _today(now) else 0
+    except (TypeError, ValueError):
+        n = 0
+    return max(0, cap_for(caps, room) - n)
+
+
 def check(state: dict, room: str, caps: dict, now) -> dict:
     """Được đăng thêm 1 tin vào `room` không? KHÔNG tăng đếm (chỉ tăng khi đăng thành công).
     Trả {allowed, count, cap, alert}: `alert` là chuỗi báo động khi phòng VỪA chạm trần lần

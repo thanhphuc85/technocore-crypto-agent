@@ -300,15 +300,24 @@ def _max_seq(messages, fallback=None):
     return max(seqs) if seqs else fallback
 
 
+PENDING_KEEP = 10                     # DELIVER chờ giao lại giữ tối đa
+PENDING_TTL_MS = 30 * 60 * 1000       # board cuộn nhanh: quá 30' thì job coi như đã trôi
+
+
 def run_kibble_worker(fetch_fn, answer_fn, post_fn, state, *,
                       allow_types=None, max_per_run=2, do_claim=True,
                       dry_run=True, log=print,
                       recent_fps=None, dup_sim=0.0, now_ms: int = 0,
-                      ttl_ms: int = DUP_TTL_MS):
+                      ttl_ms: int = DUP_TTL_MS, can_post_fn=None,
+                      pending_ttl_ms: int = PENDING_TTL_MS):
     """Chạy MỘT vòng worker. Phụ thuộc được TIÊM vào để test không cần mạng/LLM:
       fetch_fn(since)   -> dict {"messages":[...], "last_seq":int} (như API technocore)
       answer_fn(job)    -> str | None  (None = bỏ job, KHÔNG đăng rác)
       post_fn(text)     -> bool        (đăng 1 dòng đã ký; chỉ gọi khi dry_run=False)
+      can_post_fn(n)    -> bool        (tùy chọn) còn đăng được n tin không (vd trần governor).
+                                       Hết -> dừng TRƯỚC khi tốn inference / đăng CLAIM.
+    CLAIM đã lên board mà DELIVER lỗi (429/mạng) -> câu trả lời vào state['kibble_pending'] và
+    được giao lại ở run sau (job đã khoá cho mình; bỏ lửng = CLAIM treo + FLOP đã chi vô ích).
     Cập nhật state['kibble_cursor'] và state['kibble_done'] tại chỗ. Trả summary dict.
     """
     if state is None:
@@ -324,15 +333,55 @@ def run_kibble_worker(fetch_fn, answer_fn, post_fn, state, *,
     done = list(state.get("kibble_done", []))
     done_set = set(done)
 
-    jobs = select_jobs(messages, done_set, allow_types, max_per_run,
-                       my_did=state.get("kibble_did"),
+    delivered, committed, skipped = [], [], 0
+    delivered_items = []          # {jobid, answer} cho các DELIVER THẬT (dùng cho tracker ATTEST)
+
+    def _room_for(n: int) -> bool:
+        if not can_post_fn:
+            return True
+        try:
+            return bool(can_post_fn(n))
+        except Exception:
+            return True               # lỗi ở bộ kiểm hạn mức không được chặn worker
+
+    # (1) Giao lại DELIVER còn treo từ run trước (CLAIM đã đăng, job đang khoá cho mình).
+    keep = []
+    for p in (state.get("kibble_pending") or []):
+        if not isinstance(p, dict) or not p.get("jobid") or not p.get("answer") \
+                or p["jobid"] in done_set:
+            continue
+        if now_ms and now_ms - int(p.get("ts") or 0) > pending_ttl_ms:
+            log(f"[kibble] bỏ DELIVER treo {p['jobid']} — quá {pending_ttl_ms // 60000} phút")
+            continue
+        if dry_run or not _room_for(1):
+            keep.append(p)
+            continue
+        try:
+            ok = post_fn(format_deliver(p["jobid"], p["answer"]))
+        except Exception as e:
+            log(f"[kibble] giao lại fail {p['jobid']} | {str(e)[:80]}")
+            ok = False
+        if ok:
+            log(f"[kibble] đã giao lại DELIVER treo {p['jobid']}")
+            delivered.append(p["jobid"])
+            committed.append(p["jobid"])
+            delivered_items.append({"jobid": p["jobid"], "answer": p["answer"]})
+        else:
+            keep.append(p)
+    pending_ids = {p["jobid"] for p in keep}
+
+    jobs = select_jobs(messages, done_set | pending_ids | set(committed), allow_types,
+                       max_per_run, my_did=state.get("kibble_did"),
                        recent_fps=recent_fps, dup_sim=dup_sim,
                        now_ms=now_ms, ttl_ms=ttl_ms)
 
-    delivered, committed, skipped = [], [], 0
-    delivered_items = []          # {jobid, answer} cho các DELIVER THẬT (dùng cho tracker ATTEST)
     for job in jobs:
         jobid = job["jobid"]
+        if not dry_run and not _room_for(2 if do_claim else 1):
+            # Hết hạn mức đăng (vd trần governor): CLAIM được mà DELIVER bị chặn = job treo.
+            # Dừng TRƯỚC khi tốn inference.
+            log(f"[kibble] dừng — không đủ hạn mức đăng cho CLAIM+DELIVER ({jobid})")
+            break
         try:
             answer = answer_fn(job)
         except Exception as e:
@@ -357,9 +406,10 @@ def run_kibble_worker(fetch_fn, answer_fn, post_fn, state, *,
             delivered.append(jobid)
             continue
 
+        claimed = False
         if do_claim:
             try:
-                post_fn(claim_txt)
+                claimed = bool(post_fn(claim_txt))
             except Exception as e:            # CLAIM lỗi không chặn DELIVER
                 log(f"[kibble] claim fail {jobid} | {str(e)[:80]}")
         try:
@@ -371,8 +421,14 @@ def run_kibble_worker(fetch_fn, answer_fn, post_fn, state, *,
             delivered.append(jobid)
             committed.append(jobid)       # CHỈ deliver THẬT mới vào sổ done
             delivered_items.append({"jobid": jobid, "answer": answer})
+        elif claimed:
+            # Job đã khoá cho mình trên board -> giữ câu trả lời, giao lại ở run sau.
+            keep.append({"jobid": jobid, "answer": answer, "ts": int(now_ms)})
+            log(f"[kibble] DELIVER {jobid} lỗi sau CLAIM — giữ để giao lại run sau")
 
     # Persist: cursor luôn tiến; done chỉ ghi các deliver THẬT, chặn kích thước (giữ mới nhất).
+    if keep or state.get("kibble_pending"):
+        state["kibble_pending"] = keep[-PENDING_KEEP:]
     if new_cursor:
         state["kibble_cursor"] = new_cursor
     if committed:

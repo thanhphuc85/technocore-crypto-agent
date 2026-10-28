@@ -355,6 +355,22 @@ jobs:
           # Lượt faucet kế tiếp mở trong <= N giây thì chờ ngay trong run để claim đúng giờ (mặc định 300).
           FLOP_FAUCET_WAIT_MAX_SEC: ${{ vars.FLOP_FAUCET_WAIT_MAX_SEC }}
           FLOP_FAUCET_JITTER_MIN: ${{ vars.FLOP_FAUCET_JITTER_MIN }}
+          # Nội dung AI tuỳ chọn (mặc định TẮT). Trước đây code đọc các biến này nhưng workflow
+          # KHÔNG map -> đặt Repo Variable không có tác dụng gì.
+          FLOP_DIGEST_ENABLED: ${{ vars.FLOP_DIGEST_ENABLED }}
+          FLOP_RECAP_ENABLED: ${{ vars.FLOP_RECAP_ENABLED }}
+          FLOP_INSIGHT_ENABLED: ${{ vars.FLOP_INSIGHT_ENABLED }}
+          FLOP_ALERT_EXPLAIN_ENABLED: ${{ vars.FLOP_ALERT_EXPLAIN_ENABLED }}
+          DIGEST_LANG: ${{ vars.DIGEST_LANG }}
+          RECAP_LANG: ${{ vars.RECAP_LANG }}
+          ALERT_EXPLAIN_LANG: ${{ vars.ALERT_EXPLAIN_LANG }}
+          ALERT_MOVE_PCT: ${{ vars.ALERT_MOVE_PCT }}
+          MANIFEST_INTERVAL_HOURS: ${{ vars.MANIFEST_INTERVAL_HOURS }}
+          # Công khai tiến độ mở khoá vào KV note `unlock` (mặc định TẮT).
+          FLOP_PUBLISH_UNLOCK: ${{ vars.FLOP_PUBLISH_UNLOCK }}
+          # Đổi phòng board (rỗng -> mặc định kibble / tclk-offers).
+          FLOP_KIBBLE_ROOM: ${{ vars.FLOP_KIBBLE_ROOM }}
+          FLOP_TCLK_ROOM: ${{ vars.FLOP_TCLK_ROOM }}
           # Câu hỏi nhập tay khi Run workflow (bỏ qua khi chạy theo cron)
           ASK: ${{ github.event.inputs.ask }}
           # Chỉ ép telemetry khi TICK ô force_broadcast lúc chạy tay — KHÔNG suy từ event_name,

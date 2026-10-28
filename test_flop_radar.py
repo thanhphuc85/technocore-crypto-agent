@@ -230,3 +230,16 @@ def test_first_sight_of_an_issue_does_not_alert_on_old_maintainer_comments():
     old = _attr(comments=[_c(3, "CONTRIBUTOR")])
     assert _run(st, old) is None and st[rd.KEY]["attr_seen"] == [3]
     assert _run(st, old) is None
+
+
+def test_more_new_routes_than_the_seen_cap_alert_once_not_every_hour():
+    # Danh sách "đã thấy" chỉ giữ SEEN_KEEP mục; trước đây mục bị cắt lại thành "mới" mỗi giờ.
+    st = {}
+    f = _fetcher(openapi=_openapi([f"/x/{i:03d}" for i in range(rd.SEEN_KEEP + 15)]))
+    assert rd.check(st, f) is not None
+    assert rd.check(st, f) is None
+    assert rd.check(st, f) is None
+    # Route thật sự mới vẫn được báo.
+    f2 = _fetcher(openapi=_openapi([f"/x/{i:03d}" for i in range(rd.SEEN_KEEP + 15)] + ["/faucet"]))
+    alert = rd.check(st, f2)
+    assert alert and "/faucet" in alert

@@ -486,6 +486,32 @@ def test_fetch_messages_none_on_error(monkeypatch):
     assert calls["n"] == 1 + ac.FETCH_RETRIES               # đã thử LẠI, không bỏ cuộc sau 1 lần
 
 
+def test_fetch_messages_http_error_is_not_data_nor_server_ok(monkeypatch):
+    # 503 kèm JSON lỗi: không được trả như dữ liệu, không được đếm là server OK (che outage).
+    monkeypatch.setattr(ac.time, "sleep", lambda *_: None)
+    calls = {"n": 0}
+
+    def down(*a, **k):
+        calls["n"] += 1
+        return _Resp(status=503, data={"error": "unavailable"})
+    monkeypatch.setattr(ac.requests, "get", down)
+    before = ac._server_ok_count
+    assert ac.fetch_messages(room="x") is None
+    assert ac._server_ok_count == before
+    assert calls["n"] == 1 + ac.FETCH_RETRIES                # 5xx -> vẫn thử lại
+
+
+def test_fetch_messages_4xx_does_not_retry(monkeypatch):
+    monkeypatch.setattr(ac.time, "sleep", lambda *_: None)
+    calls = {"n": 0}
+
+    def nf(*a, **k):
+        calls["n"] += 1
+        return _Resp(status=404, data={"error": "no such room"})
+    monkeypatch.setattr(ac.requests, "get", nf)
+    assert ac.fetch_messages(room="nope") is None and calls["n"] == 1
+
+
 def test_fetch_messages_retries_empty_then_succeeds(monkeypatch):
     # Read-endpoint trả body RỖNG (json() -> ValueError) 1 lần rồi mới trả data -> phải retry.
     monkeypatch.setattr(ac.time, "sleep", lambda *_: None)
@@ -1018,6 +1044,42 @@ def test_check_price_alert_unchanged_when_explain_off(monkeypatch):
     assert "should-not-appear" not in posted["t"] and "Move alert" in posted["t"]
 
 
+@pytest.mark.parametrize("posted_ok, expect_base", [(True, 110), (False, 100)])
+def test_check_price_alert_resets_baseline_only_when_posted(monkeypatch, posted_ok, expect_base):
+    # Post lỗi -> giữ mốc cũ để run sau báo lại (trước đây mốc bị đặt lại, cảnh báo mất hẳn).
+    monkeypatch.setattr(ac, "ALERT_EXPLAIN_ENABLED", False)
+    monkeypatch.setattr(ac, "ALERT_MOVE_PCT", 5)
+    monkeypatch.setattr(ac, "get_market", lambda ids: {"bitcoin": {"usd": 110}, "ethereum": {"usd": 50}})
+    monkeypatch.setattr(ac, "save_state", lambda *a, **k: None)
+    monkeypatch.setattr(ac, "post_message", lambda *a, **k: posted_ok)
+    state = {"last_alert_price": {"bitcoin": 100, "ethereum": 50}}
+    ac.check_price_alert("pk", "did", state)
+    assert state["last_alert_price"]["bitcoin"] == expect_base
+
+
+def test_mem_and_prof_evict_least_recently_active_peer(monkeypatch):
+    st = {}
+    for i in range(ac.MEM_MAX_USERS):
+        ac.mem_add(st, f"u{i}", "q", "a")
+        ac.prof_update(st, f"u{i}", "hello btc")
+    ac.mem_add(st, "u0", "q2", "a2")                     # u0 vừa nói chuyện lại
+    ac.prof_update(st, "u0", "eth?")
+    ac.mem_add(st, "new", "q", "a")
+    ac.prof_update(st, "new", "hi")
+    assert "u0" in st["mem"] and "u1" not in st["mem"]
+    assert "u0" in st["prof"] and "u1" not in st["prof"]
+
+
+def test_user_requested_digest_is_metered_as_organic(monkeypatch):
+    # `!digest` do NGƯỜI gọi -> event_id thật (không bị skipped_synthetic dưới ORGANIC_ONLY).
+    seen = {}
+    monkeypatch.setattr(ac, "generate_digest",
+                        lambda lang=None, event_id=None: seen.setdefault("eid", event_id) and "body")
+    monkeypatch.setattr(ac, "a2a_reply", lambda *a: None)
+    ac.build_reply("alice", "@bot !digest", state={}, sender_id="did:key:zAlice")
+    assert seen["eid"] == "did:key:zAlice"
+
+
 # --- LLM provider chain: DeepSeek chính -> Gemini phụ -> OpenAI --------------------
 def _keys(monkeypatch, groq="", deepseek="", gemini="", openai="", mode="auto"):
     monkeypatch.setattr(ac, "GROQ_API_KEY", groq)
@@ -1539,6 +1601,19 @@ def test_persist_ledger_caps_entries_but_keeps_balance(tmp_path, monkeypatch):
     assert len(payload["entries"]) == ac.LEDGER_KV_ENTRY_CAP
     assert len(sent["token_ledger"]) <= ac.KV_VALUE_MAX
     assert payload["balances"] == {"FLOP": "-0.6"}               # tổng chạy KHÔNG mất khi cắt log
+
+
+def test_persist_ledger_keeps_stake_delegations(tmp_path, monkeypatch):
+    # Đặt cọc đã trừ số dư lỏng: bản KV thiếu `stake` -> runner mới mất phần delegated.
+    import token_manager as tm
+    monkeypatch.setenv("TOKEN_LEDGER_FILE", str(tmp_path / "led.json"))
+    monkeypatch.setattr(ac, "STATE_FILE", str(tmp_path / "state.json"))
+    tm.save_ledger({"balances": {"FLOP": "60"}, "entries": [],
+                    "stake": {"delegated": {"val-a": "40"}, "rewards": "0"}})
+    sent = {}
+    monkeypatch.setattr(ac, "kv_set", lambda pk, did, k, v: sent.update({k: v}) or True)
+    ac.persist_ledger_to_kv("pk", "did")
+    assert json.loads(sent["token_ledger"])["stake"]["delegated"] == {"val-a": "40"}
 
 
 def test_hydrate_ledger_takes_richer_kv(tmp_path, monkeypatch):

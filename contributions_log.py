@@ -87,6 +87,9 @@ FALLBACK = {
 }
 
 
+_DID_RE = re.compile(r"^did:key:z[1-9A-HJ-NP-Za-km-z]{40,60}$")
+
+
 def _log(msg, quiet=False):
     if not quiet:
         print(f"[contrib] {msg}")
@@ -174,7 +177,13 @@ def gather(quiet=False) -> dict:
             mj = json.loads(manifest)
             d["commands"] = len(mj.get("commands", [])) or d["commands"]
             d["manifest_desc"] = mj.get("desc", "")
-        except json.JSONDecodeError:
+            # Workflow này KHÔNG có khoá agent và AGENT_DID thường để trống -> DID từng ra RỖNG
+            # trong file công khai. Manifest (agent tự ghi mỗi 6h) mang DID thật. KV là
+            # world-writable nên chỉ nhận chuỗi đúng dạng did:key (không để ai chèn chữ vào file).
+            mdid = mj.get("did") if isinstance(mj, dict) else None
+            if isinstance(mdid, str) and _DID_RE.match(mdid):
+                d["did"] = mdid
+        except (json.JSONDecodeError, AttributeError):
             pass
         _log("manifest: live", quiet)
     else:
@@ -232,6 +241,7 @@ def gather(quiet=False) -> dict:
 def render(d: dict) -> str:
     """Sinh tài liệu SONG NGỮ (EN / VI). Mỗi khối văn xuôi có bản tiếng Anh trước,
     tiếng Việt ngay sau; ô bảng dùng `<br>` với dòng VI in nghiêng."""
+    did = DID or d.get("did") or ""        # env/khoá thắng; không có -> DID trong manifest
     return f"""# Technocore &amp; $FLOP Protocol — Contribution Records / Hồ sơ Đóng góp
 
 > **Proof of Work — Flop Labs Submission** · *Bằng chứng Đóng góp — Hồ sơ nộp Flop Labs*
@@ -267,7 +277,7 @@ def render(d: dict) -> str:
 | Field / Trường | Value / Giá trị |
 |---|---|
 | **Agent** | `{AGENT}` |
-| **Owner DID** (`did:key`) | `{DID}` |
+| **Owner DID** (`did:key`) | `{did}` |
 | **Signature scheme** / *Sơ đồ chữ ký* | Ed25519 — every message &amp; KV note is signed &amp; verifiable via `did:key`<br>*mọi tin nhắn &amp; KV note đều được ký và xác minh qua `did:key`* |
 | **Source repository** / *Kho mã nguồn* | <{REPO}> |
 | **Published package** / *Gói đã phát hành* | [`technocore-agent-sdk`](https://pypi.org/project/technocore-agent-sdk/) `v{d['version']}` |
@@ -349,7 +359,7 @@ curl -s https://technocore.chat/kv/{KV_NS}/cursor
 **On-chat activity / *Hoạt động trên-chat* (signed under the DID / *đã ký dưới DID*):**
 
 ```bash
-# {DID}
+# {did}
 curl -s "https://technocore.chat/r/lobby?format=json&limit=200"
 ```
 
@@ -386,7 +396,7 @@ python -c "import technocore_agent; print(technocore_agent.__version__)"
 ---
 
 <sub>Auto-generated for Flop Labs Proof-of-Work review · *Tự sinh cho phần duyệt Bằng chứng Đóng góp
-của Flop Labs* · agent `{AGENT}` · `{DID}` · as of / *tính đến* {d['generated_at']}.</sub>
+của Flop Labs* · agent `{AGENT}` · `{did}` · as of / *tính đến* {d['generated_at']}.</sub>
 """
 
 
