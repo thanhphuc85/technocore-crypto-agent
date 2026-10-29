@@ -317,6 +317,9 @@ jobs:
           FLOP_GATEWAY_CALL_GAP_SEC: ${{ vars.FLOP_GATEWAY_CALL_GAP_SEC }}
           FLOP_GATEWAY_RUN_INTERVAL_SEC: ${{ vars.FLOP_GATEWAY_RUN_INTERVAL_SEC }}
           FLOP_GATEWAY_MARGIN_SEC: ${{ vars.FLOP_GATEWAY_MARGIN_SEC }}
+          # Request timeout (không rõ server đã trừ tiền chưa): chờ biên nhận tối đa N giây (mặc
+          # định 1800) trước khi gọi mới — không gửi lại cùng đề.
+          FLOP_GATEWAY_INFLIGHT_TTL_SEC: ${{ vars.FLOP_GATEWAY_INFLIGHT_TTL_SEC }}
           # Trần FLOPs MỘT phiên (tùy chọn) — phiên to hơn tách thành nhiều phiên.
           FLOP_SESSION_MAX_FLOPS: ${{ vars.FLOP_SESSION_MAX_FLOPS }}
           # (testnet) Trần phiên chờ proof: đủ N thì ngừng đăng phiên mới (mặc định 3, 0 = tắt).

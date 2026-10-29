@@ -4440,7 +4440,10 @@ def gateway_session_step(state: dict, private_key, now: int):
         state, agent_key=private_key, now=now, prompts=prompts, expect_network=expect,
         http=_gateway_http,
         book_fn=book if testnet else None, deadline=run_deadline(),
-        answer_fn=keep if GATEWAY_BRIEF else None)
+        answer_fn=keep if GATEWAY_BRIEF else None,
+        # Lưu mốc "request đang treo" xuống state.json NGAY trước mỗi lần gọi: job bị giết giữa
+        # chừng (timeout 20') thì lượt sau vẫn biết để đối soát thay vì gửi lại cùng đề.
+        checkpoint=lambda: save_state({flop_gateway.KEY: state.get(flop_gateway.KEY)}))
     if GATEWAY_BRIEF and r.get("calls"):
         save_state({BRIEF_KEY: state.get(BRIEF_KEY)})
     if testnet and r.get("receipts_new"):

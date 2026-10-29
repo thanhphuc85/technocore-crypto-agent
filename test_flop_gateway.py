@@ -35,6 +35,7 @@ class FakeGateway:
         self.calls, self.override, self.challenge_addr, self.host = [], {}, None, "api.flop.network"
         self.report_cost = True                 # devnet thật (2026-10-24) KHÔNG trả usage.cost_flop
         self.receipt_state = "settled"
+        self.honor_idem = False                 # True: request_id = Idempotency-Key (như trang Connect mô tả)
         self.receipts = [{"model": "m1", "prompt_hash": "p1", "tee_quote_hash": "t", "block_number": 7,
                           "tx_hash": "0xaa", "miner": "5MinerA"}]
 
@@ -64,8 +65,9 @@ class FakeGateway:
         if path == "/v1/chat/completions":
             self.quota -= self.cost
             # Biên nhận dạng THẬT của devnet (2026-10-24), trạng thái theo receipt_state.
+            rid = ((headers or {}).get("Idempotency-Key") if self.honor_idem else None) or f"req-{len(self.calls)}"
             self.receipts.append({"channel_id": f"ch{len(self.calls)}", "created_at": NOW, "model": "m1",
-                                  "request_id": f"req-{len(self.calls)}", "reserved_spend": self.cost,
+                                  "request_id": rid, "reserved_spend": self.cost,
                                   "response_status": 200, "settled_spend": self.cost,
                                   "settled_spend_raw": str(int(self.cost * 10**18)),
                                   "state": self.receipt_state, "terminal_event": "completed"})
@@ -686,3 +688,87 @@ def test_answer_text_shapes():
     assert gw.answer_text({"choices": [{"message": {"content": "  hi  "}}]}) == "hi"
     assert gw.answer_text({"choices": [{"text": "legacy"}]}) == "legacy"
     assert gw.answer_text({"choices": []}) == "" and gw.answer_text({}) == "" and gw.answer_text(None) == ""
+
+
+# --- request TREO: timeout sau khi server đã xử lý -> không gửi lại, đối soát trước khi gọi mới ----
+
+LATER = (NOW + 5000) * 1000
+
+
+def _timeout_after_processing(fake):
+    """http giả: lần chat ĐẦU TIÊN được server xử lý (trừ quota, có biên nhận) nhưng phía ta timeout."""
+    real, n = fake.__call__, {"chat": 0}
+
+    def http(method, url, headers=None, json=None, timeout=None):
+        resp = real(method, url, headers=headers, json=json, timeout=timeout)
+        if url.endswith("/chat/completions"):
+            n["chat"] += 1
+            if n["chat"] == 1:
+                raise TimeoutError("read timed out")
+        return resp
+    return http
+
+
+def _step(state, http, now, **kw):
+    return gw.run_step(state, agent_key=_key("22"), http=http, now=now, prompts=["q1", "q2", "q3"],
+                       expect_network="devnet", sleep=lambda s: None, log=lambda *a: None, **kw)
+
+
+def _chat_prompts(fake):
+    return [c[3]["messages"][0]["content"] for c in fake.calls if c[1] == "/v1/chat/completions"]
+
+
+def test_each_chat_carries_its_own_idempotency_key(monkeypatch):
+    monkeypatch.setenv("FLOP_GATEWAY_MAX_CALLS_PER_RUN", "2")
+    fake = FakeGateway(expires_ms=SOON)
+    _step({}, fake, NOW)
+    keys = [c[2].get("Idempotency-Key") for c in fake.calls if c[1] == "/v1/chat/completions"]
+    assert len(keys) == 2 and all(keys) and len(set(keys)) == 2
+
+
+def test_timeout_after_processing_is_not_resent_and_reconciles_by_receipt(monkeypatch):
+    monkeypatch.setenv("FLOP_GATEWAY_MAX_CALLS_PER_RUN", "1")
+    fake = FakeGateway(quota=25.0, expires_ms=LATER)
+    fake.honor_idem = True
+    state, saved = {}, []
+    r = _step(state, _timeout_after_processing(fake), NOW,
+              checkpoint=lambda: saved.append(json.loads(json.dumps(state[gw.KEY]))))
+    g = state[gw.KEY]
+    assert r["outcome"] == "unknown_outcome" and r["calls"] == 0
+    assert g["inflight"]["key"] and g["prompt_idx"] == 1          # q1 coi như ĐÃ gửi
+    assert saved and saved[-1]["inflight"]["key"] == g["inflight"]["key"]   # lưu TRƯỚC khi gọi
+    # Lượt sau (hết backoff 900s): biên nhận có request_id == key -> đối soát xong, gọi đề KẾ TIẾP.
+    r2 = _step(state, fake, NOW + 1000)
+    assert "inflight" not in state[gw.KEY]
+    assert _chat_prompts(fake) == ["q1", "q2"]                     # KHÔNG gửi lại q1
+    assert r2["outcome"] == "spent"
+
+
+def test_unreconciled_inflight_blocks_new_calls_until_ttl(monkeypatch):
+    monkeypatch.setenv("FLOP_GATEWAY_MAX_CALLS_PER_RUN", "1")
+    fake = FakeGateway(quota=25.0, expires_ms=LATER)                # server BỎ QUA Idempotency-Key
+    state = {}
+    _step(state, _timeout_after_processing(fake), NOW)
+    r2 = _step(state, fake, NOW + 1000)
+    assert r2["outcome"] == "reconciling" and _chat_prompts(fake) == ["q1"]
+    r3 = _step(state, fake, NOW + gw.INFLIGHT_TTL_SEC + 1)
+    assert "inflight" not in state[gw.KEY] and _chat_prompts(fake) == ["q1", "q2"]
+    assert r3["outcome"] == "spent"
+
+
+def test_http_error_reply_is_a_known_outcome_not_inflight(monkeypatch):
+    fake = FakeGateway(expires_ms=SOON)
+    fake.override[("POST", "/v1/chat/completions")] = Resp(429, {"error": "rate_limited"}, {"Retry-After": "1"})
+    state = {}
+    assert _step(state, fake, NOW)["outcome"] == "rate_limited"
+    assert "inflight" not in state[gw.KEY]
+
+
+def test_unexplained_quota_drop_counts_as_spent_so_due_is_not_inflated():
+    hz = NOW + 86400 + 1800
+    _, win = gw.window_due(None, 24, NOW, hz, 300, 1800)
+    win["spent"] = 0.0
+    # Ta không ghi nhận gì, nhưng quota tụt 3 (request timeout mà server vẫn trừ tiền).
+    due, w2 = gw.window_due(win, 21, NOW + 300, hz, 300, 1800)
+    assert w2["spent"] == pytest.approx(3) and w2["total"] == 24
+    assert due == pytest.approx(0)                                  # đã chi vượt mục tiêu -> không chi bù
