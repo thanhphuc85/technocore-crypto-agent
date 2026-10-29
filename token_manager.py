@@ -412,6 +412,11 @@ def claim_mainnet_unlock(amount=None, token: str = None, *, path: str = None,
         tx_hash = result.get("tx_hash") or result.get("txHash")
     except Exception as e:
         return {**st, "outcome": "error_claim", "reason": f"claim mainnet thất bại: {e}"}
+    if not tx_hash:
+        # Như spend(): không tx hash = không bằng chứng -> KHÔNG tăng claimed_mainnet (nếu không,
+        # phần claimable bị trừ dù FLOP chưa về ví).
+        return {**st, "outcome": "error_claim",
+                "reason": f"claim_fn không trả tx hash (keys: {sorted(result)[:10]})"}
 
     state = load_ledger(path)
     u = _unlock_state(state)

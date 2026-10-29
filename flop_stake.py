@@ -131,6 +131,11 @@ def delegate(amount, validator: str, token: str = None, *, path: str = None,
             tx_hash = result.get("tx_hash") or result.get("txHash")
         except Exception as e:
             return {**base, "outcome": "error_submit", "reason": f"gửi delegate testnet thất bại: {e}"}
+        if not tx_hash:
+            # Không tx hash = không bằng chứng delegate đã lên chain -> KHÔNG khoá số dư trong sổ
+            # (cùng luật với token_manager.spend()).
+            return {**base, "outcome": "error_submit", "signed": signed,
+                    "reason": f"submit_fn không trả tx hash (keys: {sorted(result)[:10]})"}
 
     # Bookkeeping (cả 2 chế độ): trừ số dư lỏng -> cộng vào delegated[validator].
     s = _stake_state(state)
@@ -188,6 +193,9 @@ def undelegate(amount, validator: str, token: str = None, *, path: str = None,
             tx_hash = result.get("tx_hash") or result.get("txHash")
         except Exception as e:
             return {**base, "outcome": "error_submit", "reason": f"gửi undelegate thất bại: {e}"}
+        if not tx_hash:
+            return {**base, "outcome": "error_submit", "signed": signed,
+                    "reason": f"submit_fn không trả tx hash (keys: {sorted(result)[:10]})"}
 
     new_staked = staked - amt
     if new_staked > 0:

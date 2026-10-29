@@ -307,10 +307,15 @@ def run_faucet_cycle(claim_fn=None, token: str = None, now: int = None,
     nxt = _learned_next(result, now)
     if parsed is None or parsed <= 0:
         # Faucet trả 0/rác: KHÔNG ghi sổ, KHÔNG tính là 1 lần claim (không đốt trần ngày).
-        # Vẫn đặt mốc thời gian để không gõ lại faucet mỗi 5 phút.
-        st.setdefault(token, {})["last_claim_ts"] = now
+        # Faucet HẸN giờ ("thử lại sau 120s") -> chờ ĐÚNG tới đó. Không được đặt last_claim_ts:
+        # lần bị từ chối không phải lần claim, và mốc đó cộng cooldown (1h auto / 24h) sẽ đè lên
+        # giờ hẹn -> vòng chờ-trong-run vô tác dụng, lỡ cả chu kỳ. Không hẹn -> vẫn đặt mốc để
+        # không gõ lại faucet mỗi 5 phút.
+        rec = st.setdefault(token, {})
         if nxt:
-            st[token]["next_claim_ts"] = nxt
+            rec["next_claim_ts"] = nxt
+        else:
+            rec["last_claim_ts"] = now
         _save(st, faucet_state)
         return {"outcome": "claimed_zero", "amount": "0",
                 "reason": f"faucet trả số lượng {raw_amt!r} — không ghi sổ"}

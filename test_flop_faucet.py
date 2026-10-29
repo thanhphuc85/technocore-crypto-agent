@@ -235,6 +235,19 @@ def test_rate_limited_reply_waits_without_crediting(paths, monkeypatch):
     assert r2["outcome"] == "skipped_cooldown"                      # chờ đủ 2h faucet yêu cầu
 
 
+@pytest.mark.parametrize("cooldown", ["auto", "24"])
+def test_not_yet_reply_honours_faucet_hint_not_cooldown(paths, monkeypatch, cooldown):
+    # Faucet bảo "thử lại sau 120s": phải chờ 120s, không phải 1h/24h cooldown tính từ lần bị từ chối.
+    _enable(monkeypatch)
+    monkeypatch.setenv("FLOP_FAUCET_COOLDOWN_HOURS", cooldown)
+    r = ff.run_faucet_cycle(claim_fn=lambda req: {"amount": 0, "retry_after_s": 120},
+                            now=NOW, log=lambda m: None, **paths)
+    assert r["outcome"] == "claimed_zero"
+    assert ff.seconds_until_next(now=NOW, faucet_state=paths["faucet_state"]) == 120
+    r2 = ff.run_faucet_cycle(claim_fn=CLAIM_OK, now=NOW + 121, log=lambda m: None, **paths)
+    assert r2["outcome"] == "claimed"
+
+
 def test_merge_state_never_moves_backwards():
     a = {"FLOP": {"last_claim_ts": 100, "claims": {"2026-11-03": 2}}}
     b = {"FLOP": {"last_claim_ts": 50, "next_claim_ts": 900, "claims": {"2026-11-03": 5, "2026-11-02": 9}}}

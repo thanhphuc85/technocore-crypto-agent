@@ -104,3 +104,12 @@ def test_claim_caps_at_claimable(ledger, monkeypatch):
                                 claim_fn=lambda req: {"tx_hash": "0xC"},
                                 claim_url="https://claim.test", log=lambda m: None)
     assert r["amount"] == "3"                            # kẹp ở phần claimable
+
+
+def test_claim_without_tx_hash_is_not_booked(ledger, monkeypatch):
+    tm.credit("100", path=ledger)
+    _testnet_spend(ledger, monkeypatch, "9")            # claimable = 3
+    r = tm.claim_mainnet_unlock(path=ledger, claim_fn=lambda req: {}, claim_url="https://claim.test",
+                                log=lambda m: None)
+    assert r["outcome"] == "error_claim"
+    assert tm.unlock_status(path=ledger)["claimed_mainnet"] == "0"

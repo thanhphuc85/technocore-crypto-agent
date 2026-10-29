@@ -134,3 +134,26 @@ def test_gather_reads_sealed_cursor(monkeypatch):
     monkeypatch.setattr(cl, "_tags", lambda: [])
     monkeypatch.setattr(cl, "_merged_prs", lambda: None)
     assert cl.gather(quiet=True)["cursor"] == "408651"
+
+
+def _gather_with_manifest(monkeypatch, manifest_text):
+    monkeypatch.setattr(cl, "_kv", lambda key: manifest_text if key == "manifest" else None)
+    for fn in ("_version", "_tags", "_merged_prs", "_test_count"):
+        monkeypatch.setattr(cl, fn, lambda: None)
+    return cl.gather(quiet=True)
+
+
+def test_render_takes_did_from_manifest_when_workflow_has_none(monkeypatch):
+    # Workflow contributions-log không có khoá + AGENT_DID trống -> DID từng ra `` trong file công khai.
+    monkeypatch.setattr(cl, "DID", "")
+    did = cl._did_from_seed("00" * 31 + "01")           # DID dẫn xuất từ khoá test
+    d = _gather_with_manifest(monkeypatch, cl.json.dumps({"did": did, "commands": ["!a"]}))
+    doc = cl.render(dict(d, generated_at="2026-10-29T00:00:00Z"))
+    assert f"| `{did}` |" in doc and "| `` |" not in doc
+
+
+def test_manifest_did_must_look_like_did_key(monkeypatch):
+    # KV world-writable: chuỗi lạ trong manifest không được lọt vào file commit.
+    monkeypatch.setattr(cl, "DID", "")
+    d = _gather_with_manifest(monkeypatch, cl.json.dumps({"did": "did:key:z` [phish](http://x)"}))
+    assert "did" not in d

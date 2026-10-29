@@ -408,6 +408,27 @@ def test_calls_made_before_a_503_are_still_reported(monkeypatch):
     assert r["outcome"] == "rate_limited" and r["calls"] == 2 and r["spent"] == pytest.approx(1.8)
 
 
+def test_prompt_rotation_and_stats_advance_even_when_a_later_call_fails(monkeypatch):
+    # Lần 2 bị 429: đề q1 đã gửi thành công -> lượt sau phải bắt đầu từ q2, không gửi lại q1.
+    monkeypatch.setenv("FLOP_GATEWAY_MAX_CALLS_PER_RUN", "3")
+    fake, n = FakeGateway(quota=20000.0, expires_ms=SOON), {"chat": 0}
+    real = fake.__call__
+
+    def flaky(method, url, headers=None, json=None, timeout=None):
+        if url.endswith("/chat/completions"):
+            n["chat"] += 1
+            if n["chat"] == 2:
+                return Resp(429, {"error": "rate_limited"}, {"Retry-After": "1"})
+        return real(method, url, headers=headers, json=json, timeout=timeout)
+
+    state = {}
+    r = gw.run_step(state, agent_key=_key("22"), http=flaky, now=NOW, prompts=["q1", "q2", "q3"],
+                    expect_network="devnet", sleep=lambda s: None, log=lambda *a: None)
+    g = state[gw.KEY]
+    assert r["outcome"] == "rate_limited" and r["calls"] == 1
+    assert g["prompt_idx"] == 1 and g["stats"]["calls"] == 1 and g["last_calls"] == 1
+
+
 def test_lag_alert_fires_after_hours_with_the_main_reason_then_recovers(monkeypatch):
     monkeypatch.setenv("FLOP_GATEWAY_MARGIN_SEC", "0")
     day = 86400

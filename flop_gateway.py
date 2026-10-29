@@ -566,6 +566,17 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
     def backoff(sec, why):
         g["wait_until"], g["wait_why"] = now + int(max(60, sec)), why[:120]
 
+    def tally(n_calls: int, amount: float) -> None:
+        """Xoay đề + cộng thống kê theo số lần gọi ĐÃ THÀNH CÔNG. Gọi cả khi lượt kết thúc bằng
+        lỗi (vd lần 2 bị 429): không thì đề vừa gửi bị gửi LẠI ở lượt sau (prompt_hash trùng)
+        và thống kê hụt."""
+        g["prompt_idx"] = (int(g.get("prompt_idx") or 0) + n_calls) % max(1, len(prompts))
+        g["last_calls"] = n_calls
+        st = dict(g.get("stats") or {})
+        st["calls"] = int(st.get("calls") or 0) + n_calls
+        st["spent"] = round(float(st.get("spent") or 0) + amount, 6)
+        g["stats"] = st
+
     try:
         bearer = open_bearer(agent_key, g.get("vault"))
         exp_s = epoch_s(g.get("expires_at"))
@@ -757,19 +768,15 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
             g["window"] = {**g["window"], "spent": float(g["window"].get("spent") or 0) + cost}
             if spent >= due - 1e-9 or spent >= remaining:
                 break
-        g["prompt_idx"] = (idx + calls) % max(1, len(prompts) or 1)
-
-        g["last_calls"] = calls
-        st = dict(g.get("stats") or {})
-        st["calls"] = int(st.get("calls") or 0) + calls
-        st["spent"] = round(float(st.get("spent") or 0) + spent, 6)
-        g["stats"] = st
+        tally(calls, spent)
         g["last"] = last
         g["remaining"] = max(0.0, min(quota_now, remaining - spent))
         return done("spent" if calls else "pace_wait", calls=calls, spent=round(spent, 6),
                     due=round(due, 6), remaining=g["remaining"], model=model_id, last=last, **rs)
     except GatewayError as e:
         out.update(calls=calls, spent=round(spent, 6))   # lần gọi thành công TRƯỚC lỗi vẫn được báo
+        if calls:
+            tally(calls, spent)
         if e.status == 401:
             g.pop("vault", None)                              # bearer chết -> enroll lại run sau
             return done("auth_reset", reason=f"401 {e.code} — enroll lại ở run sau")
@@ -801,5 +808,8 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
         backoff(900, f"{e.status} {e.code}")
         return done("error", reason=str(e)[:200])
     except Exception as e:
+        if calls:
+            out.update(calls=calls, spent=round(spent, 6))
+            tally(calls, spent)
         backoff(900, type(e).__name__)
         return done("error", reason=f"{type(e).__name__}: {str(e)[:160]}")

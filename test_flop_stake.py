@@ -98,3 +98,14 @@ def test_maybe_delegate_gated(tmp_path, monkeypatch):
     assert fs.maybe_delegate("10", "val-a", path=p)["outcome"] == "skipped_off"
     monkeypatch.setenv("FLOP_STAKE_ENABLED", "true")
     assert fs.maybe_delegate("10", "val-a", path=p)["outcome"] == "delegated_simulated"
+
+
+def test_testnet_delegate_without_tx_hash_leaves_ledger_untouched(tmp_path, monkeypatch):
+    p = _ledger(tmp_path)
+    tm.credit("100", path=p)
+    monkeypatch.setenv("TESTNET_ENABLED", "true")
+    monkeypatch.setenv("FLOP_STAKE_URL", "https://stake.invalid")
+    r = fs.delegate("40", "val-a", path=p, submit_fn=lambda tx: {})
+    assert r["outcome"] == "error_submit"
+    st = fs.stake_status(path=p)
+    assert st["total_delegated"] == "0" and st["liquid_balance"] == "100"

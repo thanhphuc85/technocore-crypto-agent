@@ -88,3 +88,13 @@ def test_is_capped_is_read_only_and_resets_next_day():
     assert g.check(st, "lobby", CAPS, DAY1 + 101)["alert"]       # cảnh báo vẫn còn cho lần chặn thật
     assert g.is_capped(st, "lobby", CAPS, DAY1 + 86400) is False # sang ngày UTC mới
     assert g.is_capped({}, "flop", CAPS, DAY1) is False
+
+
+def test_remaining_counts_down_and_resets_next_day():
+    import flop_governor as g
+    st, caps, now = {}, {"kibble": 3, "*": 30}, 1_800_000_000
+    assert g.remaining(st, "kibble", caps, now) == 3
+    g.record(st, "kibble", now)
+    g.record(st, "kibble", now)
+    assert g.remaining(st, "kibble", caps, now) == 1
+    assert g.remaining(st, "kibble", caps, now + 86400) == 3
