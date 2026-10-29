@@ -3552,6 +3552,23 @@ def test_gateway_step_books_only_on_testnet(monkeypatch):
     assert settled == 2 and last["outcome"] == "spent_onchain" and st == "2✓ gateway/spent"
 
 
+def test_gateway_checkpoint_persists_inflight_before_the_call(monkeypatch):
+    # Mốc "request đang treo" phải xuống state.json TRƯỚC lần gọi (job có thể bị giết giữa chừng).
+    import flop_gateway
+    saved = []
+
+    def fake_step(state, **k):
+        state[flop_gateway.KEY] = {"inflight": {"key": "k-1", "ts": 1}}
+        k["checkpoint"]()
+        return {"outcome": "unknown_outcome", "calls": 0}
+    monkeypatch.setattr(flop_gateway, "run_step", fake_step)
+    monkeypatch.setattr(ac, "save_state", lambda d: saved.append(json.loads(json.dumps(d))))
+    monkeypatch.setenv("FLOP_GATEWAY_PROMPTS", "q")
+    monkeypatch.delenv("TESTNET_ENABLED", raising=False)
+    ac.gateway_session_step({}, _real_key(), 1_800_000_000)
+    assert saved[0] == {flop_gateway.KEY: {"inflight": {"key": "k-1", "ts": 1}}}
+
+
 def test_main_routes_sessions_to_the_gateway_backend(monkeypatch):
     monkeypatch.setattr(ac, "SEED_HEX", SEED_HEX)
     monkeypatch.setattr(ac, "RUNNER_ROLE", "primary")

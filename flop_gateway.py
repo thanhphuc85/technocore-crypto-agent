@@ -166,8 +166,8 @@ def _retry_after(headers) -> int:
 
 
 def _call(http, method: str, url: str, *, bearer: str = None, body: dict = None,
-          timeout: float = 20, ok=(200, 201)) -> dict:
-    headers = {"Accept": "application/json"}
+          timeout: float = 20, ok=(200, 201), extra_headers: dict = None) -> dict:
+    headers = {"Accept": "application/json", **(extra_headers or {})}
     if bearer:
         headers["Authorization"] = f"Bearer {bearer}"
     if body is not None:
@@ -275,8 +275,12 @@ def estimate(http, base: str, model: str, prompt: str, max_tokens: int) -> dict:
 
 
 def chat(http, base: str, bearer: str, model: str, prompt: str, max_tokens: int,
-         max_cost: float, max_wait_ms: int = 60000) -> dict:
+         max_cost: float, max_wait_ms: int = 60000, idempotency_key: str = None) -> dict:
+    """`idempotency_key` -> header `Idempotency-Key`. Trang Connect dùng nó làm `request_id` của biên
+    nhận; OpenAPI KHÔNG khai báo header này cho /chat/completions và không nói server chống trùng
+    theo nó -> chỉ dùng làm KHOÁ ĐỐI SOÁT, không coi là bảo đảm không bị tính phí hai lần."""
     return _call(http, "POST", base + "/chat/completions", bearer=bearer, timeout=max_wait_ms / 1000 + 15,
+                 extra_headers={"Idempotency-Key": idempotency_key} if idempotency_key else None,
                  body={"model": model, "max_tokens": int(max_tokens),
                        "messages": [{"role": "user", "content": prompt}],
                        "max_cost_flop": round(float(max_cost), 6), "max_wait_ms": int(max_wait_ms)})
@@ -335,6 +339,11 @@ def window_due(win, remaining: float, now: int, horizon_ts: int, interval: float
     elif remaining > expect + 1e-9:                         # hoàn tiền nhỏ -> giảm "đã chi"
         spent = max(0.0, spent - (remaining - expect))
         win["spent"] = spent
+    elif remaining < expect - 1e-9:
+        # Quota TỤT mà ta không ghi nhận (vd request timeout phía ta nhưng server đã xử lý và trừ
+        # tiền). Không cộng vào "đã chi" thì phần đến hạn bị đẩy cao -> chi bù vượt kế hoạch.
+        spent += expect - remaining
+        win["spent"] = spent
     if remaining <= 0:
         return 0.0, win
     start, end, total = int(win["start"]), horizon_ts - margin, float(win["total"])
@@ -383,6 +392,9 @@ def _completion_cap(model: dict, default: int) -> int:
 
 
 TOK_BAD_TTL = 86400                    # quên cỡ bị từ chối sau 1 ngày (miner có thể đã khoẻ hơn)
+# Request "đang treo" (đã gửi, không rõ kết quả vì timeout/mất kết nối): chờ biên nhận tối đa
+# chừng này giây rồi bỏ. /keys/me/receipts chỉ trả 20 biên nhận gần nhất nên không đợi mãi được.
+INFLIGHT_TTL_SEC = 30 * 60
 
 
 def probe_up(tok_cap: int, cap: int, tok_bad, tok_bad_ts, now: int) -> int:
@@ -444,6 +456,8 @@ _LAG_HINTS = {
     "error_network": "không đọc được /health của gateway",
     "model_unavailable": "model của key không còn trong catalog",
     "backoff": "đang chờ theo Retry-After / lỗi trước",
+    "unknown_outcome": "request timeout/mất kết nối — không rõ server đã trừ tiền chưa, đang giữ để đối soát",
+    "reconciling": "đang chờ biên nhận của request treo trước khi gọi mới (tối đa 30 phút)",
     "error": "lỗi khác — xem dòng [gateway] lý do",
 }
 
@@ -520,12 +534,20 @@ def report_line(g: dict, now: int):
 
 def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_network: str,
              book_fn=None, sleep=time.sleep, log=print, rng=None, deadline=None,
-             clock=time.time, answer_fn=None) -> dict:
+             clock=time.time, answer_fn=None, checkpoint=None, new_key=None) -> dict:
     """Một nhịp mua compute. Trả {"outcome", "calls", "spent", ...}; KHÔNG ném lỗi.
 
     `book_fn(amount, ref, model)` ghi sổ (chỉ khi mạng khớp `expect_network`); None = chạy
     tập trên devnet, không ghi sổ. Trạng thái bền trong state[KEY]: két bearer, model, quota,
-    hạn, mốc chờ (Retry-After), biên nhận đã thấy, thống kê."""
+    hạn, mốc chờ (Retry-After), biên nhận đã thấy, thống kê.
+
+    Request TREO: trước mỗi lần gọi ghi g['inflight'] = {key (Idempotency-Key), ts, max_cost} rồi
+    gọi `checkpoint()` (caller lưu state xuống đĩa) -> run bị giết giữa chừng vẫn để lại dấu vết.
+    Lỗi transport (timeout/mất kết nối) = KHÔNG RÕ server đã xử lý chưa: đề vẫn coi như đã gửi
+    (không gửi lại cùng đề) và lượt sau KHÔNG gọi mới cho tới khi thấy biên nhận có
+    request_id == key, hoặc quá INFLIGHT_TTL_SEC. `new_key()` sinh khoá (tiêm được để test)."""
+    import uuid
+    new_key = new_key or (lambda: str(uuid.uuid4()))
     g = state.get(KEY) if isinstance(state.get(KEY), dict) else {}
     g = dict(g)
     # Đổi gateway/mạng (vd tập devnet -> testnet thật): bắt đầu SẠCH. Không thì lịch nghỉ, cửa
@@ -538,6 +560,7 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
     g["profile"] = profile
     out = {"outcome": "?", "calls": 0, "spent": 0.0}
     calls, spent = 0, 0.0                    # giữ được cả khi lần gọi sau lỗi (báo đúng số đã gọi)
+    pending = None                           # Idempotency-Key của lần gọi đang chờ phản hồi
 
     def done(outcome, **kw):
         out.update(outcome=outcome, **kw)
@@ -566,11 +589,13 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
     def backoff(sec, why):
         g["wait_until"], g["wait_why"] = now + int(max(60, sec)), why[:120]
 
-    def tally(n_calls: int, amount: float) -> None:
+    def tally(n_calls: int, amount: float, n_sent: int = None) -> None:
         """Xoay đề + cộng thống kê theo số lần gọi ĐÃ THÀNH CÔNG. Gọi cả khi lượt kết thúc bằng
         lỗi (vd lần 2 bị 429): không thì đề vừa gửi bị gửi LẠI ở lượt sau (prompt_hash trùng)
-        và thống kê hụt."""
-        g["prompt_idx"] = (int(g.get("prompt_idx") or 0) + n_calls) % max(1, len(prompts))
+        và thống kê hụt. `n_sent` > n_calls khi một lần gọi KHÔNG RÕ kết quả (timeout): đề đó
+        vẫn xoay qua — gửi lại = có thể trả tiền hai lần cho cùng một việc."""
+        n_sent = n_calls if n_sent is None else n_sent
+        g["prompt_idx"] = (int(g.get("prompt_idx") or 0) + n_sent) % max(1, len(prompts))
         g["last_calls"] = n_calls
         st = dict(g.get("stats") or {})
         st["calls"] = int(st.get("calls") or 0) + n_calls
@@ -607,6 +632,7 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
             return done("model_unavailable",
                         reason=f"model {model_id} không còn trong catalog — sẽ đăng ký lại ví ở lượt sau")
         model = models[model_id]
+        rids = set()                        # request_id của các biên nhận gateway vừa trả
 
         def collect(prev_calls: int) -> dict:
             """Đọc biên nhận; ghi sổ (book_fn) MỖI biên nhận mới ĐÃ SETTLE theo settled_spend —
@@ -618,6 +644,8 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
             except GatewayError as e:
                 items, shape = [], f"HTTP {e.status} {e.code}".strip()
             live = {_receipt_key(rc) for rc in items}
+            rids.clear()
+            rids.update(str(rc.get("request_id")) for rc in items if rc.get("request_id"))
             for rc in items:
                 key = f"{rc.get('state')}/{rc.get('response_status')}"
                 hist[key] = hist.get(key, 0) + 1
@@ -653,6 +681,22 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
         # kể cả khi lần gọi run này lỗi (429/503) hay chưa tới nhịp.
         rs = collect(int(g.get("last_calls") or 0))
         g["last_calls"] = 0
+        # ĐỐI SOÁT request treo của lượt trước TRƯỚC khi gọi mới (xem docstring).
+        inf = g.get("inflight") if isinstance(g.get("inflight"), dict) else None
+        if inf:
+            key, age = str(inf.get("key") or ""), now - int(inf.get("ts") or 0)
+            ttl = _env_num("FLOP_GATEWAY_INFLIGHT_TTL_SEC", INFLIGHT_TTL_SEC)
+            if key and key in rids:
+                log(f"[gateway] đối soát xong request treo {key[:8]}… — đã có biên nhận")
+                g.pop("inflight", None)
+            elif age < ttl:
+                return done("reconciling", remaining=remaining, **rs,
+                            reason=(f"request {key[:8]}… gửi {age}s trước chưa rõ kết quả (timeout) — "
+                                    f"chờ biên nhận tối đa {int(ttl)}s trước khi gọi mới"))
+            else:
+                log(f"[gateway] bỏ request treo {key[:8]}… sau {age}s — không thấy biên nhận "
+                    "(quota tụt nếu có đã được tính vào 'đã chi')")
+                g.pop("inflight", None)
         if remaining <= 0:
             backoff(1800, "quota_exhausted")
             return done("exhausted", reason="quota gateway đã hết", **rs)
@@ -726,10 +770,23 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
             if calls:
                 sleep(gap)
             g["last_mt"] = mt
-            # Trần do gateway giữ = giá dự tính của CHÍNH lần gọi này (+10%), không phải cả phần đến hạn.
+            # Trần gửi kèm = giá dự tính của CHÍNH lần gọi này (+10%), không phải cả phần đến hạn.
+            # (OpenAPI chỉ định nghĩa kiểu của max_cost_flop; server có cưỡng chế hay không CHƯA
+            # được kiểm chứng.)
             est_cost = preq + ptok * pp + mt * pc
-            r = chat(http, base, bearer, model_id, prompt, mt, max_cost=min(per_call, est_cost) * 1.1,
-                     max_wait_ms=max_wait)
+            max_cost = min(per_call, est_cost) * 1.1
+            pending = new_key()
+            g["inflight"] = {"key": pending, "ts": now, "max_cost": round(max_cost, 6)}
+            if checkpoint:
+                state[KEY] = g
+                try:
+                    checkpoint()
+                except Exception as e:
+                    log(f"[gateway] không lưu được mốc request treo ({str(e)[:80]})")
+            r = chat(http, base, bearer, model_id, prompt, mt, max_cost=max_cost,
+                     max_wait_ms=max_wait, idempotency_key=pending)
+            pending = None
+            g.pop("inflight", None)              # có phản hồi -> kết quả rõ, không còn treo
             u = r.get("usage") or {}
             cost, src = float(u.get("cost_flop") or 0), "usage"
             # Devnet 2026-10-24: usage KHÔNG có cost_flop (chỉ token). Số đã chi thật = quota
@@ -775,6 +832,8 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
                     due=round(due, 6), remaining=g["remaining"], model=model_id, last=last, **rs)
     except GatewayError as e:
         out.update(calls=calls, spent=round(spent, 6))   # lần gọi thành công TRƯỚC lỗi vẫn được báo
+        if pending:
+            g.pop("inflight", None)              # server ĐÃ trả lời (mã lỗi) -> không còn treo
         if calls:
             tally(calls, spent)
         if e.status == 401:
@@ -808,8 +867,13 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
         backoff(900, f"{e.status} {e.code}")
         return done("error", reason=str(e)[:200])
     except Exception as e:
-        if calls:
+        unknown = 1 if pending else 0            # timeout/mất kết nối GIỮA lần gọi -> không rõ kết quả
+        if calls or unknown:
             out.update(calls=calls, spent=round(spent, 6))
-            tally(calls, spent)
+            tally(calls, spent, n_sent=calls + unknown)
         backoff(900, type(e).__name__)
+        if unknown:
+            return done("unknown_outcome",
+                        reason=(f"{type(e).__name__} khi chờ phản hồi — có thể server đã xử lý và trừ "
+                                f"tiền; giữ request {pending[:8]}… để đối soát, KHÔNG gửi lại đề này"))
         return done("error", reason=f"{type(e).__name__}: {str(e)[:160]}")
