@@ -4767,6 +4767,7 @@ def main():
                 now_ms=int(time.time() * 1000), ttl_ms=_kibble_dup_ttl_ms(),
                 # Đủ hạn mức cho CẢ cặp CLAIM+DELIVER mới bắt đầu job (không để CLAIM treo).
                 can_post_fn=lambda n: room_has_quota(KIBBLE_ROOM, n),
+                deny_dids=PROACTIVE_DENY_DIDS,   # KHÔNG làm job do DID bị chặn đăng
             )
             queue_gateway_jobs(state)
             save_state({"kibble_cursor": state.get("kibble_cursor"),

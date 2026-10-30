@@ -240,11 +240,14 @@ def format_deliver(jobid: str, answer: str) -> str:
 
 
 def select_jobs(messages, done_set, allow_types, max_n, my_did=None, *,
-                recent_fps=None, dup_sim=0.0, now_ms: int = 0, ttl_ms: int = DUP_TTL_MS):
+                recent_fps=None, dup_sim=0.0, now_ms: int = 0, ttl_ms: int = DUP_TTL_MS,
+                deny_dids=None):
     """Từ danh sách message (mỗi cái {seq, from/did, text}) chọn ra các JOB nên làm:
       - verb JOB, type nằm trong allow_types,
       - jobid CHƯA có trong done_set (chưa từng deliver),
       - KHÔNG phải job do CHÍNH mình đăng (nếu biết my_did),
+      - KHÔNG phải job do DID trong `deny_dids` (PROACTIVE_DENY_DIDS) đăng — làm việc cho
+        DID bị chặn là tương tác qua lại công khai, đúng thứ luật 'independent demand' soi,
     ưu tiên MỚI nhất (seq lớn), tối đa max_n. Trả list dict job (có thêm 'seq').
     Hàm THUẦN — không mạng, không side-effect. allow_types RỖNG -> trả [] (whitelist rỗng
     = không nhận gì), KHÔNG phải "nhận mọi type".
@@ -253,6 +256,7 @@ def select_jobs(messages, done_set, allow_types, max_n, my_did=None, *,
     if not allow:
         return []       # whitelist RỖNG = KHÔNG nhận gì (an toàn) — không phải "nhận tất cả"
     done = set(done_set or [])
+    deny = set(deny_dids or ())
     jobs = {}       # jobid -> job dict (giữ bản có seq lớn nhất)
     for m in (messages or []):
         if not isinstance(m, dict):
@@ -267,6 +271,8 @@ def select_jobs(messages, done_set, allow_types, max_n, my_did=None, *,
             continue
         sender = m.get("from") or m.get("did")
         if my_did and sender == my_did:
+            continue
+        if sender in deny:
             continue
         seq = m.get("seq", 0) or 0
         parsed = {**parsed, "seq": seq}
@@ -309,13 +315,14 @@ def run_kibble_worker(fetch_fn, answer_fn, post_fn, state, *,
                       dry_run=True, log=print,
                       recent_fps=None, dup_sim=0.0, now_ms: int = 0,
                       ttl_ms: int = DUP_TTL_MS, can_post_fn=None,
-                      pending_ttl_ms: int = PENDING_TTL_MS):
+                      pending_ttl_ms: int = PENDING_TTL_MS, deny_dids=None):
     """Chạy MỘT vòng worker. Phụ thuộc được TIÊM vào để test không cần mạng/LLM:
       fetch_fn(since)   -> dict {"messages":[...], "last_seq":int} (như API technocore)
       answer_fn(job)    -> str | None  (None = bỏ job, KHÔNG đăng rác)
       post_fn(text)     -> bool        (đăng 1 dòng đã ký; chỉ gọi khi dry_run=False)
       can_post_fn(n)    -> bool        (tùy chọn) còn đăng được n tin không (vd trần governor).
                                        Hết -> dừng TRƯỚC khi tốn inference / đăng CLAIM.
+    `deny_dids` (PROACTIVE_DENY_DIDS): KHÔNG nhận job do các DID này đăng.
     CLAIM đã lên board mà DELIVER lỗi (429/mạng) -> câu trả lời vào state['kibble_pending'] và
     được giao lại ở run sau (job đã khoá cho mình; bỏ lửng = CLAIM treo + FLOP đã chi vô ích).
     Cập nhật state['kibble_cursor'] và state['kibble_done'] tại chỗ. Trả summary dict.
@@ -373,7 +380,7 @@ def run_kibble_worker(fetch_fn, answer_fn, post_fn, state, *,
     jobs = select_jobs(messages, done_set | pending_ids | set(committed), allow_types,
                        max_per_run, my_did=state.get("kibble_did"),
                        recent_fps=recent_fps, dup_sim=dup_sim,
-                       now_ms=now_ms, ttl_ms=ttl_ms)
+                       now_ms=now_ms, ttl_ms=ttl_ms, deny_dids=deny_dids)
 
     for job in jobs:
         jobid = job["jobid"]
