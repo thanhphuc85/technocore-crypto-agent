@@ -726,13 +726,15 @@ python -m pytest test_flop_unlock.py test_flop_pacer.py test_flop_faucet.py -q
 
 ---
 
-## Buying compute: inference sessions & stake delegation (scaffold)
+## Buying compute: inference sessions (scaffold)
 
 Per the FLOP agent spec (`intro.flop.network/agent.html`), the airdrop rewards **only** two
 things: **(a) inference spend** (pay FLOP to a miner to run inference — every 3 FLOP unlocks 1
 airdropped FLOP) and **(b) stake delegation** (delegate FLOP to a miner/validator for a reward).
-Chat/telemetry do **not** earn — they're for presence, not the airdrop. Two gated, default-OFF
-modules scaffold both paths so the agent can flip on the day FLOP's testnet opens.
+Chat/telemetry do **not** earn — they're for presence, not the airdrop. Real spend goes through
+[`flop_gateway.py`](flop_gateway.py) (see the day-one checklist in [STRATEGY.md](STRATEGY.md));
+the gated, default-OFF mempool scaffold below rehearses path (a) in simulation. Stake delegation
+(b) is not implemented — FLOP has not published a staking API.
 
 **[`flop_session.py`](flop_session.py) — inference sessions (primary path, 3:1).** Models the
 5-field **session request** (model-weight hash · max latency · FLOPs · security flags · fee),
@@ -747,20 +749,11 @@ the happy path runs offline; simulation spend does **not** accrue unlock (only r
 > commitment — that needs FLOP's published spec. Real buying needs `TESTNET_ENABLED=true` +
 > `FLOP_MEMPOOL_URL` + an injected `submit_fn`/`submit_tx`. Gate: `FLOP_SESSION_ENABLED`.
 
-**[`flop_stake.py`](flop_stake.py) — stake delegation (secondary path).** `delegate()` /
-`undelegate()` move FLOP between the liquid balance and a per-validator delegated position on the
-same `token_ledger.json`; `record_reward()` books a stake reward only from a **real** on-chain
-event (no invented reward rate — FLOP hasn't published one). Testnet delegation goes through
-`FLOP_STAKE_URL` + an injected `submit_fn` (missing ⇒ `skipped_unconfigured`, never a fabricated
-tx). Gate: `FLOP_STAKE_ENABLED`; agent entry point `maybe_delegate()`.
-
-Both are **preparation** — they earn nothing until FLOP's testnet is live; then you wire the real
-endpoints and flip `TESTNET_ENABLED=true`. Try them offline:
+Try it offline:
 
 ```bash
 python flop_session.py
-python flop_stake.py
-python -m pytest test_flop_session.py test_flop_stake.py -q
+python -m pytest test_flop_session.py -q
 ```
 
 ---
@@ -819,7 +812,6 @@ lease/lock.
 ├─ flop_faucet.py                # auto-cycle faucet scaffold (gated — off/unconfigured by default)
 ├─ flop_gateway.py               # buys compute via the official api.flop.network gateway — the real spend path (gated)
 ├─ flop_session.py               # mempool inference sessions — simulation rehearsal path (gated)
-├─ flop_stake.py                 # stake delegation — the secondary earn path (gated)
 ├─ flop_kibble.py                # /r/kibble useful-work worker (gated, dry-run by default)
 ├─ flop_kibble_track.py          # measures the agent's own kibble ATTEST useful-rate (gated)
 ├─ flop_engage.py                # asks independent peers genuine questions to build reply-distance (gated, dry-run)
@@ -828,7 +820,6 @@ lease/lock.
 ├─ flop_miners.py                # how spend spreads across miners + deny-list blocks (pure)
 ├─ flop_report.py                # periodic FLOP spend report (pure)
 ├─ flop_watchdog.py              # alerts when testnet spend stops settling on-chain
-├─ flop_units.py                 # yellowpaper F_eff/G_n heuristic — sanity check only, not billed price
 ├─ flop_governor.py              # hard per-room daily cap on public chat posts
 ├─ flop_outcomes.py              # auto-pauses posting features that produce no results
 ├─ flop_radar.py                 # watches FLOP docs/endpoints for the testnet opening
@@ -836,7 +827,7 @@ lease/lock.
 ├─ contributions_log.py          # regenerates contributions-log.md from live data (proof-of-work)
 ├─ technocore_agent/             # thin public-API facade package (import technocore_agent)
 ├─ examples/                     # 01–06 runnable scripts, each self-documented
-├─ deploy/                       # optional VPS (systemd timer) runner + legacy mempool GO-LIVE runbook
+├─ deploy/                       # optional VPS (systemd timer) runner
 ├─ test_*.py                     # pytest suite — one file per module above
 └─ .github/workflows/
    ├─ agent_cron.yml             # every-5-min cron + state cache + run agent

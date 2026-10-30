@@ -911,12 +911,6 @@ def get_market(ids):
     return out
 
 
-def get_prices():
-    """Tương thích ngược: trả (btc_usd, eth_usd)."""
-    m = get_market(["bitcoin", "ethereum"])
-    return m.get("bitcoin", {}).get("usd"), m.get("ethereum", {}).get("usd")
-
-
 def get_fear_greed():
     """Chỉ số Crypto Fear & Greed (alternative.me — miễn phí, không cần key)."""
     try:
@@ -1894,8 +1888,8 @@ def persist_ledger_to_kv(private_key, did) -> None:
                 "credit_by_hour": led.get("credit_by_hour", {}),
                 "first_spend_day": led.get("first_spend_day"),
                 "unlock": led.get("unlock", {}),
-                # Đặt cọc (flop_stake) đã TRỪ số dư lỏng: thiếu khoá này thì runner mới hydrate
-                # về số dư đã trừ mà mất phần delegated -> FLOP "biến mất" khỏi sổ.
+                # Phần đặt cọc trong sổ cũ (module flop_stake đã gỡ) đã TRỪ số dư lỏng: bỏ khoá
+                # này thì runner mới hydrate về số dư đã trừ mà mất phần delegated -> FLOP "biến mất".
                 "stake": led.get("stake", {}),
                 # Dấu băm biên nhận gateway đã ghi -> cache mất vẫn không ghi trùng.
                 "gateway_refs": (led.get("gateway_refs") or [])[-100:]}
@@ -2074,7 +2068,7 @@ def _provider_chain():
     """Danh sách provider để thử LẦN LƯỢT (chính -> phụ), chỉ giữ provider còn key.
     - LLM_PROVIDER=none            -> [] (tắt LLM)
     - LLM_PROVIDER=<provider>      -> chỉ provider đó (không fallback), nếu có key
-    - LLM_PROVIDER=auto (mặc định) -> Groq -> Gemini -> DeepSeek -> OpenAI, lọc theo key có sẵn.
+    - LLM_PROVIDER=auto (mặc định) -> theo LLM_PROVIDER_ORDER, lọc theo key có sẵn.
     Provider đầu danh sách = 'chính'; các provider sau = fallback khi provider trước lỗi."""
     if LLM_PROVIDER == "none":
         return []

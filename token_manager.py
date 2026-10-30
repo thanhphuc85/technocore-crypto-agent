@@ -178,7 +178,7 @@ def _save_ledger(state: dict, path: str = None) -> None:
 
 def save_ledger(state: dict, path: str = None) -> None:
     """Ghi sổ cái ra đĩa — alias CÔNG KHAI của _save_ledger cho các module FLOP khác
-    (flop_stake…) cùng dùng một token_ledger.json làm nguồn sự thật."""
+    (flop_session…) cùng dùng một token_ledger.json làm nguồn sự thật."""
     _save_ledger(state, path)
 
 
