@@ -817,17 +817,27 @@ lease/lock.
 ├─ flop_tx.py                    # submit_tx adapters (relay signed tx / EVM stub)
 ├─ flop_pacer.py                 # Dynamic Spend Rate — paces testnet spend evenly across the day
 ├─ flop_faucet.py                # auto-cycle faucet scaffold (gated — off/unconfigured by default)
-├─ flop_session.py               # inference sessions — the primary 3:1 earn path (gated)
+├─ flop_gateway.py               # buys compute via the official api.flop.network gateway — the real spend path (gated)
+├─ flop_session.py               # mempool inference sessions — simulation rehearsal path (gated)
 ├─ flop_stake.py                 # stake delegation — the secondary earn path (gated)
 ├─ flop_kibble.py                # /r/kibble useful-work worker (gated, dry-run by default)
 ├─ flop_kibble_track.py          # measures the agent's own kibble ATTEST useful-rate (gated)
 ├─ flop_engage.py                # asks independent peers genuine questions to build reply-distance (gated, dry-run)
 ├─ flop_tclk.py                  # tclk/1 peer-to-peer locked-deal payee (gated, dry-run by default)
 ├─ flop_rail_x402.py             # x402/HTLC value rail for tclk — real testnet USDC (gated, default OFF)
+├─ flop_miners.py                # how spend spreads across miners + deny-list blocks (pure)
+├─ flop_report.py                # periodic FLOP spend report (pure)
+├─ flop_watchdog.py              # alerts when testnet spend stops settling on-chain
+├─ flop_units.py                 # yellowpaper F_eff/G_n heuristic — sanity check only, not billed price
+├─ flop_governor.py              # hard per-room daily cap on public chat posts
+├─ flop_outcomes.py              # auto-pauses posting features that produce no results
+├─ flop_radar.py                 # watches FLOP docs/endpoints for the testnet opening
+├─ flop_status_feed.py           # hourly public status line (gated, off)
 ├─ contributions_log.py          # regenerates contributions-log.md from live data (proof-of-work)
 ├─ technocore_agent/             # thin public-API facade package (import technocore_agent)
 ├─ examples/                     # 01–06 runnable scripts, each self-documented
-├─ test_*.py                     # pytest suite (268 tests) — one file per module above
+├─ deploy/                       # optional VPS (systemd timer) runner + legacy mempool GO-LIVE runbook
+├─ test_*.py                     # pytest suite — one file per module above
 └─ .github/workflows/
    ├─ agent_cron.yml             # every-5-min cron + state cache + run agent
    ├─ ci.yml                     # lint + pytest on push/PR

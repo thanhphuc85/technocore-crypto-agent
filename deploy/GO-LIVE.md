@@ -1,5 +1,11 @@
 # GO-LIVE — bật đường earn settled-inference khi FLOP mở testnet
 
+> ⚠️ **LỖI THỜI cho luồng chi thật.** Runbook này viết cho scaffold **mempool** (trước
+> 2026-10-23). FLOP bán compute qua **gateway** `api.flop.network` (`flop_gateway.py`,
+> `FLOP_SESSION_BACKEND=gateway`), không cần `FLOP_MEMPOOL_URL`/`FLOP_RPC_URL` hay fit schema.
+> Checklist ngày testnet hiện hành: **[STRATEGY.md → Day-one checklist](../STRATEGY.md#day-one-checklist-variables-only--no-code-change)**.
+> Phần dưới chỉ còn giá trị tham khảo nếu FLOP mở lại đường mempool.
+
 Runbook để chuyển agent từ simulation → **earn FLOP thật** trong ~10 phút khi FLOP công bố
 endpoint. Mọi code đã sẵn + gated OFF (PR #106/#108/#110). **Chỉ còn: nạp endpoint thật +
 fit schema + flip cờ.** KHÔNG tự động flip — đây là hành động CHI TIỀN, phải người duyệt.

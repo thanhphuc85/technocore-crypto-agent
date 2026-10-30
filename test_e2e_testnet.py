@@ -4,7 +4,6 @@ Test từng hàm không bắt được lỗi ở CHỖ NỐI (thứ tự faucet 
 giữa các lượt, cảnh báo). Kịch bản: lượt 1 nhận faucet đúng ví DID + mua; lượt 2 biên nhận settle
 -> ghi sổ; lượt 3 không ghi trùng."""
 import json
-import pytest
 import agent_cron as ac
 import flop_gateway as gw
 import token_manager as tm

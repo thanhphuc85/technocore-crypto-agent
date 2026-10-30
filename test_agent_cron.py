@@ -2978,7 +2978,6 @@ def test_telemetry_gate_respects_six_hours():
 
 # --- Phanh cứng gắn vào post_message --------------------------------------------------------
 def test_governor_blocks_post_at_cap_without_network_or_outage_signal(pk, monkeypatch):
-    import time as _t
     import flop_governor as g
     calls, alerts = [], []
     monkeypatch.setattr(ac.requests, "post", lambda *a, **k: calls.append(1) or _Resp(status=200))
@@ -3013,7 +3012,6 @@ def test_governor_can_be_switched_off(pk, monkeypatch):
 
 def test_post_counts_survive_cache_loss_via_kv(monkeypatch):
     import time as _t
-    import flop_governor as g
     today = _t.strftime("%Y-%m-%d", _t.gmtime())
     remote = {"post_counts": {"day": today, "rooms": {"flop": 33}}}
     monkeypatch.setattr(ac, "kv_get", lambda k: json.dumps(remote))
