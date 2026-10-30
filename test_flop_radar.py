@@ -244,3 +244,87 @@ def test_more_new_routes_than_the_seen_cap_alert_once_not_every_hour():
     f2 = _fetcher(openapi=_openapi([f"/x/{i:03d}" for i in range(rd.SEEN_KEEP + 15)] + ["/faucet"]))
     alert = rd.check(st, f2)
     assert alert and "/faucet" in alert
+
+
+def _pages(base, pages):
+    return lambda url: pages[url] if url in pages else base(url)
+
+
+def _net(issues=(), comments=()):
+    return {rd.NETWORK_ISSUES_URL: json.dumps(list(issues)),
+            rd.NETWORK_COMMENTS_URL: json.dumps(list(comments))}
+
+
+def test_docs_alert_has_no_day_one_checklist():
+    st = {}
+    rd.check(st, _fetcher())
+    alert = rd.check(st, _fetcher(llms=_llms(["brand-new-page"])))
+    assert alert and "TRANG MỚI" in alert and "Checklist" not in alert
+
+
+def test_testnet_status_change_carries_the_checklist():
+    st = {}
+    rd.check(st, _fetcher())
+    st[rd.KEY]["status"] = "planned"
+    pages = {rd.STATUS_URL: "<p>Status: live. Open.</p>"}
+    alert = rd.check(st, _pages(_fetcher(), pages))
+    assert alert and "Checklist" in alert
+
+
+def test_status_still_planned_has_no_checklist():
+    st = {}
+    rd.check(st, _fetcher())
+    st[rd.KEY]["status"] = "unknown-old"
+    pages = {rd.STATUS_URL: "<p>Status: planned. Unavailable.</p>"}
+    alert = rd.check(st, _pages(_fetcher(), pages))
+    assert alert and "Checklist" not in alert
+
+
+def test_network_repo_maintainer_posts_alert_once_and_community_stays_quiet():
+    r = {}
+    assert rd._watch_network(r, _pages(lambda u: None, _net([_c(1, "MEMBER")]))) == []      # lần đầu: ghi mốc
+    pages = _net([_c(1, "MEMBER"), _c(2, "NONE")], [_c(3, "MEMBER")])
+    lines = rd._watch_network(r, _pages(lambda u: None, pages))
+    assert len(lines) == 1 and "u3" in lines[0]                     # không báo cộng đồng, không báo lại
+    assert rd._watch_network(r, _pages(lambda u: None, pages)) == []
+
+
+def test_network_repo_outage_keeps_the_marks():
+    r = {}
+    rd._watch_network(r, _pages(lambda u: None, _net([_c(1, "MEMBER")], [_c(2, "MEMBER")])))
+    assert rd._watch_network(r, lambda u: None) == []               # cả hai nguồn lỗi -> không đổi
+    assert r["attr_net_seen"] == [1, 2]
+    half = {rd.NETWORK_ISSUES_URL: json.dumps([_c(1, "MEMBER")])}   # một nguồn lỗi -> không quên nguồn kia
+    assert rd._watch_network(r, _pages(lambda u: None, half)) == []
+    assert r["attr_net_seen"] == [1, 2]
+    assert rd._watch_network(r, _pages(lambda u: None, _net([_c(1, "MEMBER")], [_c(2, "MEMBER")]))) == []
+
+
+def test_network_alert_lines_are_capped():
+    r = {}
+    rd._watch_network(r, _pages(lambda u: None, _net()))
+    many = _net([_c(i, "MEMBER") for i in range(10, 30)])
+    assert len(rd._watch_network(r, _pages(lambda u: None, many))) == rd.NETWORK_ALERT_LINES
+    assert len(r["attr_net_seen"]) <= rd.NETWORK_SEEN_KEEP
+
+
+def test_credit_issue_208_is_watched():
+    st = {}
+    pages = {rd.CREDIT_ISSUE_URL: json.dumps({"state": "open", "comments": 1}),
+             rd.CREDIT_ISSUE_URL + "/comments?per_page=100&page=1": json.dumps([_c(1, "NONE")])}
+    rd.check(st, _pages(_fetcher(), pages))
+    pages[rd.CREDIT_ISSUE_URL + "/comments?per_page=100&page=1"] = json.dumps([_c(1, "NONE"), _c(2, "MEMBER")])
+    pages[rd.CREDIT_ISSUE_URL] = json.dumps({"state": "open", "comments": 2})
+    alert = rd.check(st, _pages(_fetcher(), pages))
+    assert alert and "yellowpaper#208" in alert and "Checklist" not in alert
+
+
+def test_gateway_reporting_testnet_carries_the_checklist_but_devnet_does_not():
+    health = HEALTH_DEVNET.replace("devnet", "flop-testnet-1")
+    st = {}
+    rd.check(st, _fetcher2())
+    alert = rd.check(st, _fetcher2(health=health))
+    assert alert and "Checklist" in alert
+    st[rd.KEY]["network"] = "older"
+    alert = rd.check(st, _fetcher2())
+    assert alert and "Checklist" not in alert

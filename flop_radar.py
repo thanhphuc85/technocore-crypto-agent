@@ -46,6 +46,15 @@ STATUS_URL = "https://docs.flop.network/docs/network-testnet"
 GATEWAY_HEALTH_URL = "https://api.flop.network/health"
 OFFICIAL_URL = "https://flop.finance/official/"
 ATTRIB_ISSUE_URL = "https://api.github.com/repos/flop-labs/yellowpaper/issues/172"
+CREDIT_ISSUE_URL = "https://api.github.com/repos/flop-labs/yellowpaper/issues/208"
+# flop-labs/network = kênh báo lỗi chính thức của mạng đang chạy (mở 2026-10-30): issue/comment MỚI
+# NHẤT của người flop-labs. Chỉ đọc cửa sổ gần nhất -> mốc "đã thấy" không cần giữ lâu hơn cửa sổ.
+NETWORK_ISSUES_URL = ("https://api.github.com/repos/flop-labs/network/issues"
+                      "?state=all&sort=created&direction=desc&per_page=20")
+NETWORK_COMMENTS_URL = ("https://api.github.com/repos/flop-labs/network/issues/comments"
+                        "?sort=created&direction=desc&per_page=20")
+NETWORK_SEEN_KEEP = 40
+NETWORK_ALERT_LINES = 5
 UNIT_ISSUE_URL = "https://api.github.com/repos/flop-labs/yellowpaper/issues/31"
 DEVNET_STATUS_URL = "https://docs.flop.network/docs/network-devnet"
 BASE_DEVNET_STATUS = "development"
@@ -227,6 +236,23 @@ def _watch_issue(r, fetch_fn, url, num, topic, state_key, seen_key) -> list:
     return lines
 
 
+def _watch_network(r, fetch_fn) -> list:
+    """Issue/comment mới của người flop-labs trên flop-labs/network (mỗi cái báo 1 lần). Lần đầu
+    chỉ ghi mốc. Một nguồn lỗi -> giữ mốc cũ của nó, không báo nhầm cái đã thấy."""
+    found = [parse_maintainer_comments(fetch_fn(u)) for u in (NETWORK_ISSUES_URL, NETWORK_COMMENTS_URL)]
+    if all(f is None for f in found):
+        return []
+    first = "attr_net_seen" not in r
+    seen = set(r.get("attr_net_seen") or [])
+    window = [item for f in found for item in (f or [])]
+    new = [item for item in window if item[0] not in seen]
+    lines = [] if first else [f"• flop-labs ({login}) viết trên flop-labs/network: {url}"
+                              for _, login, url in new[:NETWORK_ALERT_LINES]]
+    ids = {item[0] for item in window}
+    r["attr_net_seen"] = sorted(ids if None not in found else seen | ids)[-NETWORK_SEEN_KEEP:]
+    return lines
+
+
 def check_attribution(r: dict, fetch_fn, wallet=None, explorers=EXPLORERS) -> list:
     """3 tín hiệu ĐỨNG TÊN AI (xem docstring module). Ghi mốc vào r, trả các dòng báo động.
     Lần đầu thấy một nguồn chỉ ghi mốc (không báo). Nguồn lỗi -> bỏ qua."""
@@ -235,6 +261,9 @@ def check_attribution(r: dict, fetch_fn, wallet=None, explorers=EXPLORERS) -> li
                           "attr_issue_state", "attr_seen")
     lines += _watch_issue(r, fetch_fn, UNIT_ISSUE_URL, "31",
                           "airdrop tính theo ví chủ hay khoá uỷ quyền", "attr_i31_state", "attr_i31_seen")
+    lines += _watch_issue(r, fetch_fn, CREDIT_ISSUE_URL, "208", "cơ sở tính điểm chi tiêu của agent",
+                          "attr_i208_state", "attr_i208_seen")
+    lines += _watch_network(r, fetch_fn)
     offers = dict(r.get("attr_offers") or {})
     spent = dict(r.get("attr_spent") or {})
     spent_raw = dict(r.get("attr_spent_raw") or {})      # số raw (1e18) — so với sổ cái
@@ -271,6 +300,7 @@ def check(state: dict, fetch_fn, wallet=None, explorers=EXPLORERS) -> str:
     genesis_known = r.get("genesis")
     official_known = r.get("official")
     lines = []
+    testnet_open = False                 # CHỈ tín hiệu mạng testnet thật mới kèm checklist ngày 1
 
     # Danh sách "đã thấy" bị cắt còn SEEN_KEEP mục (state đi lên KV, trần 8192 ký tự), nên mục bị
     # cắt sẽ lại thành "mới" mỗi giờ. Chốt bằng DẤU VÂN TAY của cả tập: tập không đổi -> không so.
@@ -301,12 +331,14 @@ def check(state: dict, fetch_fn, wallet=None, explorers=EXPLORERS) -> str:
     status = parse_status(fetch_fn(STATUS_URL))
     if status and status != status_known:
         lines.append(f"• Trạng thái testnet đổi: '{status_known}' → '{status}'")
+        testnet_open = "planned" not in status.lower()
         status_known = status
 
     health = fetch_fn(GATEWAY_HEALTH_URL)
     network = parse_network(health)
     if network and network != network_known:
         lines.append(f"• api.flop.network báo mạng đổi: '{network_known}' → '{network}'")
+        testnet_open = testnet_open or "test" in network.lower()
         network_known = network
     genesis = parse_genesis(health)
     if genesis and genesis_known and genesis != genesis_known:
@@ -337,7 +369,10 @@ def check(state: dict, fetch_fn, wallet=None, explorers=EXPLORERS) -> str:
                   "devnet_status": devnet_known, "genesis": genesis_known, **attr}
     if not lines:
         return None
-    return ("🚨 FLOP TESTNET RADAR — có thay đổi:\n" + "\n".join(lines)
+    alert = "🚨 FLOP TESTNET RADAR — có thay đổi:\n" + "\n".join(lines)
+    if not testnet_open:
+        return alert
+    return (alert
             + "\n→ Checklist ngày 1 (STRATEGY.md): đặt TESTNET_ENABLED=true (agent tự mua compute qua "
               "gateway bằng ví DID); FLOP_FAUCET_ENABLED=on + FLOP_FAUCET_URL + FLOP_FAUCET_TIER "
               "(manual/linked/quick); testnet có gateway riêng thì đặt FLOP_GATEWAY_URL. Xem dòng "
