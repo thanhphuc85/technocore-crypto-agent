@@ -68,6 +68,16 @@ def test_reconcile_useful_no_rh_confirms_by_jobid():
     assert st["kibble_deliveries"][0]["matched_by"] == "jobid"    # không rh -> quy kết bằng jobid
 
 
+def test_reconcile_ignores_votes_from_deny_listed_dids():
+    st = {}
+    kt.record_deliveries(st, [{"jobid": JID, "answer": BODY}], 1000)
+    msgs = [{"from": "did:key:zDENIED", "text": f"ATTEST v1 | {JID} | useful | from a denied DID"}]
+    sm = kt.reconcile(st, msgs, 2000, deny_dids={"did:key:zDENIED"})
+    assert sm["useful"] == 0 and sm["pending"] == 1                # phiếu bị loại -> vẫn chờ
+    sm = kt.reconcile(st, msgs, 3000)                                # không có danh sách chặn -> tính
+    assert sm["useful"] == 1
+
+
 def test_reconcile_jobid_match_unknown_recipe():
     # rh có mặt nhưng không khớp tập ứng viên (recipe lạ) -> vẫn là job CỦA TA (1 worker/job),
     # chốt bằng jobid; recipe chưa lộ nên không set matched_recipe.

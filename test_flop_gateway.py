@@ -772,3 +772,54 @@ def test_unexplained_quota_drop_counts_as_spent_so_due_is_not_inflated():
     due, w2 = gw.window_due(win, 21, NOW + 300, hz, 300, 1800)
     assert w2["spent"] == pytest.approx(3) and w2["total"] == 24
     assert due == pytest.approx(0)                                  # đã chi vượt mục tiêu -> không chi bù
+
+
+def test_ambiguous_5xx_on_chat_is_held_for_reconciliation_not_resent(monkeypatch):
+    # 504 từ proxy: server phía sau có thể ĐÃ xử lý -> giữ request treo, không gửi lại cùng đề.
+    monkeypatch.setenv("FLOP_GATEWAY_MAX_CALLS_PER_RUN", "1")
+    fake = FakeGateway(expires_ms=SOON)
+    fake.override[("POST", "/v1/chat/completions")] = Resp(504, {"error": "gateway_timeout"})
+    st = {}
+    out = _step(st, fake, NOW)
+    assert out["outcome"] == "unknown_outcome"
+    assert "inflight" in st[gw.KEY]
+    fake.override.clear()
+    st[gw.KEY]["wait_until"] = 0
+    out2 = _step(st, fake, NOW + 60)                       # chưa có biên nhận, còn trong TTL
+    assert out2["outcome"] == "reconciling" and _chat_prompts(fake) == ["q1"]
+    st[gw.KEY]["inflight"]["ts"] = NOW - gw.INFLIGHT_TTL_SEC - 1
+    _step(st, fake, NOW + 120)                             # quá TTL -> gọi tiếp với đề KẾ TIẾP
+    assert _chat_prompts(fake) == ["q1", "q2"]
+
+
+def test_definite_4xx_on_chat_clears_the_inflight_marker(monkeypatch):
+    monkeypatch.setenv("FLOP_GATEWAY_MAX_CALLS_PER_RUN", "1")
+    fake = FakeGateway(expires_ms=SOON)
+    fake.override[("POST", "/v1/chat/completions")] = Resp(400, {"error": "bad_request"})
+    st = {}
+    assert _step(st, fake, NOW)["outcome"] == "error"
+    assert "inflight" not in st[gw.KEY]
+
+
+def test_quota_read_failing_after_a_paid_call_still_counts_the_call(monkeypatch):
+    import requests
+    monkeypatch.setenv("FLOP_GATEWAY_MAX_CALLS_PER_RUN", "1")
+    fake = FakeGateway(expires_ms=SOON)
+
+    def http(method, url, **k):
+        if url.endswith("/keys/me") and any(c[1] == "/v1/chat/completions" for c in fake.calls):
+            raise requests.Timeout("me timed out")
+        return fake(method, url, **k)
+    st = {}
+    out = _step(st, http, NOW)
+    assert out["outcome"] == "spent" and out["calls"] == 1
+    assert st[gw.KEY]["prompt_idx"] == 1                   # đề đã gửi được xoay qua
+    assert "inflight" not in st[gw.KEY]
+
+
+def test_estimate_endpoint_failure_does_not_block_buying(monkeypatch):
+    monkeypatch.setenv("FLOP_GATEWAY_MAX_CALLS_PER_RUN", "1")
+    fake = FakeGateway(expires_ms=SOON)
+    fake.override[("POST", "/v1/models/estimate")] = Resp(404, {"error": "not_found"})
+    out = _step({}, fake, NOW)
+    assert out["outcome"] == "spent" and _chat_prompts(fake) == ["q1"]

@@ -1118,6 +1118,40 @@ def test_provider_chain_pinned_provider_has_no_fallback(monkeypatch):
     assert ac._provider_chain() == ["gemini"]   # ghim gemini -> không lùi sang deepseek
 
 
+def _http_error(status):
+    import requests
+    r = requests.Response()
+    r.status_code = status
+    return requests.HTTPError(f"{status} error", response=r)
+
+
+def test_provider_with_dead_key_is_skipped_for_the_rest_of_the_run(monkeypatch):
+    monkeypatch.setattr(ac, "_provider_chain", lambda: ["gemini", "deepseek", "groq"])
+    calls = []
+
+    def one(provider, *a, **k):
+        calls.append(provider)
+        if provider == "gemini":
+            raise _http_error(503)                 # tạm thời -> vẫn thử lại lần sau
+        if provider == "deepseek":
+            raise _http_error(402)                 # hết tiền -> bỏ qua tới hết lượt
+        return "ok"
+    monkeypatch.setattr(ac, "_one_reply", one)
+    assert ac._provider_reply("q", "s", 0.2) == ("ok", "groq")
+    assert ac._provider_reply("q", "s", 0.2) == ("ok", "groq")
+    assert calls == ["gemini", "deepseek", "groq", "gemini", "groq"]
+
+
+def test_all_providers_dead_raises_instead_of_calling(monkeypatch):
+    monkeypatch.setattr(ac, "_provider_chain", lambda: ["deepseek"])
+    monkeypatch.setattr(ac, "_one_reply", lambda *a, **k: (_ for _ in ()).throw(_http_error(401)))
+    with pytest.raises(Exception):
+        ac._provider_reply("q", "s", 0.2)
+    monkeypatch.setattr(ac, "_one_reply", lambda *a, **k: pytest.fail("không được gọi provider đã hỏng"))
+    with pytest.raises(RuntimeError):
+        ac._provider_reply("q", "s", 0.2)
+
+
 def test_provider_chain_pinned_without_key_is_empty(monkeypatch):
     _keys(monkeypatch, deepseek="dk", mode="gemini")   # ghim gemini nhưng thiếu key
     assert ac._provider_chain() == []
@@ -3568,6 +3602,45 @@ def test_gateway_checkpoint_persists_inflight_before_the_call(monkeypatch):
     monkeypatch.delenv("TESTNET_ENABLED", raising=False)
     ac.gateway_session_step({}, _real_key(), 1_800_000_000)
     assert saved[0] == {flop_gateway.KEY: {"inflight": {"key": "k-1", "ts": 1}}}
+
+
+def test_gateway_inflight_survives_cache_loss_via_the_durable_key(monkeypatch):
+    # state.json mất (cache), KV còn bản request treo -> run_step phải thấy nó để đối soát.
+    import flop_gateway
+    seen = []
+
+    def fake_step(state, **k):
+        seen.append((state.get(flop_gateway.KEY) or {}).get("inflight"))
+        state[flop_gateway.KEY] = {**(state.get(flop_gateway.KEY) or {})}
+        state[flop_gateway.KEY].pop("inflight", None)            # đối soát xong
+        return {"outcome": "spent", "calls": 1}
+    monkeypatch.setattr(flop_gateway, "run_step", fake_step)
+    saved = []
+    monkeypatch.setattr(ac, "save_state", lambda d: saved.append(json.loads(json.dumps(d))))
+    monkeypatch.setenv("FLOP_GATEWAY_PROMPTS", "q")
+    monkeypatch.delenv("TESTNET_ENABLED", raising=False)
+    st = {"gateway_inflight": {"inflight": {"key": "k-9", "ts": 5}, "at": 5}}   # chỉ có bản từ KV
+    ac.gateway_session_step(st, _real_key(), 1_800_000_000)
+    assert seen == [{"key": "k-9", "ts": 5}]
+    assert {"gateway_inflight": {"inflight": None, "at": 1_800_000_000}} in saved
+    assert "gateway_inflight" in ac.DURABLE_STATE_KEYS
+
+
+def test_cleared_inflight_in_state_json_wins_over_a_stale_kv_copy(monkeypatch):
+    import flop_gateway
+    seen = []
+    monkeypatch.setattr(flop_gateway, "run_step",
+                        lambda state, **k: seen.append((state.get(flop_gateway.KEY) or {}).get("inflight"))
+                        or {"outcome": "spent", "calls": 1})
+    monkeypatch.setattr(ac, "save_state", lambda d: None)
+    monkeypatch.setenv("FLOP_GATEWAY_PROMPTS", "q")
+    monkeypatch.delenv("TESTNET_ENABLED", raising=False)
+    remote = {"gateway_inflight": {"inflight": {"key": "stale", "ts": 1}, "at": 1}}
+    st = {"gateway_inflight": {"inflight": None, "at": 2}}                  # state.json: đã xoá
+    monkeypatch.setattr(ac, "kv_get", lambda k: json.dumps(remote))
+    ac.hydrate_durable_from_kv(st)                                           # local khác rỗng -> giữ
+    ac.gateway_session_step(st, _real_key(), 1_800_000_000)
+    assert seen == [None]
 
 
 def test_main_routes_sessions_to_the_gateway_backend(monkeypatch):

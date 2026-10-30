@@ -183,6 +183,12 @@ def gather(quiet=False) -> dict:
             mdid = mj.get("did") if isinstance(mj, dict) else None
             if isinstance(mdid, str) and _DID_RE.match(mdid):
                 d["did"] = mdid
+                if not DID:
+                    # Chỉ kiểm được ĐỊNH DẠNG: ai cũng ghi đè được manifest, nên DID này có thể là
+                    # của người khác -> báo to để chủ repo đặt Variable AGENT_DID (nguồn tin cậy).
+                    pre = "::warning title=AGENT_DID::" if os.environ.get("GITHUB_ACTIONS") else "[contrib] ⚠️ "
+                    print(f"{pre}DID trong file lấy từ KV manifest (ai cũng ghi được, chưa xác minh) — "
+                          "đặt Variable AGENT_DID để cố định danh tính")
         except (json.JSONDecodeError, AttributeError):
             pass
         _log("manifest: live", quiet)

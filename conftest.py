@@ -41,3 +41,5 @@ def _isolated_state_files(monkeypatch, tmp_path):
     monkeypatch.setattr(agent_cron, "STATE_FILE", str(tmp_path / "state.json"))
     # main() đặt mốc ngân sách thời gian của lượt vào biến toàn cục -> không để rò sang test sau.
     monkeypatch.setattr(agent_cron, "_RUN_STARTED", None)
+    # Provider LLM bị đánh dấu hỏng (401/402) trong một test không được rò sang test sau.
+    monkeypatch.setattr(agent_cron, "_llm_dead", {})

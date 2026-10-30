@@ -1578,7 +1578,8 @@ def primary_alive(now: int, within_min: float, private_key=None) -> bool:
 _TS_DURABLE_KEYS = ("last_seq", "last_telemetry", "last_manifest", "last_digest",
                     "last_status_feed", "last_recap", "last_weekly_sample",
                     "last_daily_report", "last_radar")
-_BLOB_DURABLE_KEYS = ("weekly_samples", "last_alert_price", "testnet_radar")
+# gateway_inflight: request gateway đang treo (timeout/5xx mơ hồ) — mất Actions cache vẫn đối soát được.
+_BLOB_DURABLE_KEYS = ("weekly_samples", "last_alert_price", "testnet_radar", "gateway_inflight")
 # Khóa BỘ ĐẾM cộng dồn: hợp nhất bằng MAX từng ô (đếm chỉ tăng) — KHÔNG dùng luật blob
 # "local có thì local thắng", vì state.json rỗng sau khi cache mất sẽ nuốt số đã tích.
 _COUNTER_DURABLE_KEYS = ("kibble_lifetime", "kibble_lifetime_clean")
@@ -2102,25 +2103,37 @@ def _one_reply(provider: str, user_text: str, system: str, temperature: float,
     raise RuntimeError(f"unknown provider {provider}")
 
 
+# Provider trả 401/402 (key sai / hết tiền) = hỏng HẲN, không phải lỗi tạm: bỏ qua tới hết lượt
+# chạy này thay vì gọi lại ở MỌI lần cần LLM. Một lượt = một tiến trình, nên tự xoá ở lượt sau.
+_LLM_DEAD_STATUS = (401, 402)
+_llm_dead = {}                       # provider -> mã HTTP đã khiến nó bị bỏ qua
+
+
 def _provider_reply(user_text: str, system: str, temperature: float, max_tokens: int = 120):
-    """Thử provider theo thứ tự ưu tiên (Groq chính -> Gemini phụ -> DeepSeek -> OpenAI); provider
-    lỗi -> LÙI sang provider kế còn key. Trả (text, provider_đã_dùng). Ném lỗi cuối cùng
-    nếu MỌI provider đều fail; RuntimeError nếu không có provider nào (caller tự chặn trước).
+    """Thử provider theo thứ tự LLM_PROVIDER_ORDER; provider lỗi -> LÙI sang provider kế còn
+    key. Provider vừa trả 401/402 bị bỏ qua tới hết lượt chạy. Trả (text, provider_đã_dùng).
+    Ném lỗi cuối cùng nếu MỌI provider đều fail; RuntimeError nếu không có provider nào.
     `max_tokens` = ngân sách token đầu ra: mặc định 120 (reply lobby ngắn); việc kibble/tclk
     truyền lớn hơn để deliverable đầy đủ, không bị cắt cụt."""
-    chain = _provider_chain()
+    full = _provider_chain()
+    chain = [p for p in full if p not in _llm_dead]
     if not chain:
-        raise RuntimeError("no llm provider available")
+        raise RuntimeError("no llm provider available" if not full else
+                           f"mọi provider LLM bị bỏ qua trong lượt này (401/402): {_llm_dead}")
     last_err = None
     for provider in chain:
         try:
             text = _one_reply(provider, user_text, system, temperature, max_tokens)
-            if provider != chain[0]:
+            if provider != full[0]:
                 print(f"[llm] fallback -> {provider}")
             return text, provider
         except Exception as e:
             last_err = e
             print(f"[llm:{provider}] failed | {str(e)[:100]}")
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if status in _LLM_DEAD_STATUS:
+                _llm_dead[provider] = status
+                print(f"[llm:{provider}] HTTP {status} — bỏ qua provider này tới hết lượt chạy")
     raise last_err or RuntimeError("no llm provider available")
 
 
@@ -4430,6 +4443,15 @@ def gateway_session_step(state: dict, private_key, now: int):
     def keep(prompt, text, cost):
         _brief_add(state, now, prompt, text, cost)
 
+    # Request treo cũng được lưu lên KV (khoá bền gateway_inflight, luôn là dict KHÁC rỗng nên
+    # state.json còn thì state.json thắng): mất Actions cache thì vẫn đối soát thay vì gọi mới.
+    _g = state.get(flop_gateway.KEY) if isinstance(state.get(flop_gateway.KEY), dict) else {}
+    _gi = state.get("gateway_inflight")
+    _dur = _gi.get("inflight") if isinstance(_gi, dict) else None
+    if not _g.get("inflight") and isinstance(_dur, dict) and _dur.get("key"):
+        print(f"[gateway] khôi phục request treo {str(_dur['key'])[:8]}… từ KV (mất state.json)")
+        state[flop_gateway.KEY] = {**_g, "inflight": _dur}
+
     r = flop_gateway.run_step(
         state, agent_key=private_key, now=now, prompts=prompts, expect_network=expect,
         http=_gateway_http,
@@ -4438,6 +4460,9 @@ def gateway_session_step(state: dict, private_key, now: int):
         # Lưu mốc "request đang treo" xuống state.json NGAY trước mỗi lần gọi: job bị giết giữa
         # chừng (timeout 20') thì lượt sau vẫn biết để đối soát thay vì gửi lại cùng đề.
         checkpoint=lambda: save_state({flop_gateway.KEY: state.get(flop_gateway.KEY)}))
+    _g = state.get(flop_gateway.KEY) if isinstance(state.get(flop_gateway.KEY), dict) else {}
+    state["gateway_inflight"] = {"inflight": _g.get("inflight"), "at": now}
+    save_state({"gateway_inflight": state["gateway_inflight"]})
     if GATEWAY_BRIEF and r.get("calls"):
         save_state({BRIEF_KEY: state.get(BRIEF_KEY)})
     if testnet and r.get("receipts_new"):
@@ -4778,7 +4803,8 @@ def main():
                     import flop_kibble_track as kt
                     if not KIBBLE_DRY_RUN and ks.get("delivered_items"):
                         kt.record_deliveries(state, ks["delivered_items"], now * 1000)
-                    sm = kt.reconcile(state, ks.get("messages", []), now * 1000)
+                    sm = kt.reconcile(state, ks.get("messages", []), now * 1000,
+                                      deny_dids=PROACTIVE_DENY_DIDS)
                     save_state({"kibble_deliveries": state.get("kibble_deliveries", []),
                                 "kibble_lifetime": state.get("kibble_lifetime", {}),
                                 kt.CLEAN_KEY: state.get(kt.CLEAN_KEY, {})})

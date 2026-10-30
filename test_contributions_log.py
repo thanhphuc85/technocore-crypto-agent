@@ -152,6 +152,16 @@ def test_render_takes_did_from_manifest_when_workflow_has_none(monkeypatch):
     assert f"| `{did}` |" in doc and "| `` |" not in doc
 
 
+def test_did_taken_from_kv_manifest_warns_to_set_agent_did(monkeypatch, capsys):
+    monkeypatch.setattr(cl, "DID", "")
+    did = cl._did_from_seed("00" * 31 + "01")
+    _gather_with_manifest(monkeypatch, cl.json.dumps({"did": did}))
+    assert "AGENT_DID" in capsys.readouterr().out
+    monkeypatch.setattr(cl, "DID", did)                  # đã cấu hình -> không cảnh báo
+    _gather_with_manifest(monkeypatch, cl.json.dumps({"did": did}))
+    assert "AGENT_DID" not in capsys.readouterr().out
+
+
 def test_manifest_did_must_look_like_did_key(monkeypatch):
     # KV world-writable: chuỗi lạ trong manifest không được lọt vào file commit.
     monkeypatch.setattr(cl, "DID", "")
