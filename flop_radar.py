@@ -237,6 +237,7 @@ def check_attribution(r: dict, fetch_fn, wallet=None, explorers=EXPLORERS) -> li
                           "airdrop tính theo ví chủ hay khoá uỷ quyền", "attr_i31_state", "attr_i31_seen")
     offers = dict(r.get("attr_offers") or {})
     spent = dict(r.get("attr_spent") or {})
+    spent_raw = dict(r.get("attr_spent_raw") or {})      # số raw (1e18) — so với sổ cái
     for base in explorers:
         h = _host(base)
         t = parse_total(fetch_fn(f"{base}/api/session-offers"))
@@ -252,7 +253,8 @@ def check_attribution(r: dict, fetch_fn, wallet=None, explorers=EXPLORERS) -> li
                     lines.append(f"• {h}: VÍ MÌNH {wallet[:6]}…{wallet[-4:]} đã có chi tiêu ghi trên "
                                  f"chain ({v / 1e18:.4g} FLOP) — chi tiêu đang đứng tên mình")
                 spent[h] = 0 if v == 0 else 1
-    r["attr_offers"], r["attr_spent"] = offers, spent
+                spent_raw[h] = v
+    r["attr_offers"], r["attr_spent"], r["attr_spent_raw"] = offers, spent, spent_raw
     return lines
 
 

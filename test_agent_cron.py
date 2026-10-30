@@ -3643,6 +3643,103 @@ def test_cleared_inflight_in_state_json_wins_over_a_stale_kv_copy(monkeypatch):
     assert seen == [None]
 
 
+def _testnet_ledger(monkeypatch, tmp_path, gateway_spend=0):
+    import token_manager as tm
+    monkeypatch.setenv("TESTNET_ENABLED", "true")
+    monkeypatch.setenv("TOKEN_LEDGER_FILE", str(tmp_path / "led.json"))
+    monkeypatch.delenv("FLOP_GATEWAY_NETWORK", raising=False)
+    monkeypatch.setattr(ac, "RADAR_EXPLORER", "")
+    tm.credit("100")
+    if gateway_spend:
+        tm.record_gateway_spend(str(gateway_spend), "inference-session gateway m1", "r-1")
+    return tm
+
+
+def test_attribution_mismatch_alerts_once_a_day(monkeypatch, tmp_path):
+    import flop_radar
+    _testnet_ledger(monkeypatch, tmp_path, gateway_spend=30)
+    sent = []
+    monkeypatch.setattr(ac, "_telegram_send", lambda m: sent.append(m) or True)
+    monkeypatch.setattr(ac, "save_state", lambda d: None)
+    st = {flop_radar.KEY: {"attr_spent_raw": {"explorer.testnet.flop.network": 0}}}
+    assert ac.gateway_attribution_step(st, 1_800_000_000) == "MISMATCH"
+    assert ac.gateway_attribution_step(st, 1_800_000_600) == "ok"           # đã báo trong 24h
+    assert len(sent) == 1 and "broker" in sent[0]
+
+
+def test_attribution_confirmed_onchain_unlocks_and_stays_quiet(monkeypatch, tmp_path):
+    import flop_radar
+    tm = _testnet_ledger(monkeypatch, tmp_path, gateway_spend=30)
+    monkeypatch.setattr(ac, "_telegram_send", lambda m: pytest.fail("không được báo"))
+    st = {flop_radar.KEY: {"attr_spent_raw": {"explorer.testnet.flop.network": 12 * 10 ** 18}}}
+    assert ac.gateway_attribution_step(st, 1_800_000_000) == "ok"
+    assert tm.unlock_status()["spent_testnet"] == "12"
+
+
+def test_attribution_ignores_other_networks_and_simulation(monkeypatch, tmp_path):
+    import flop_radar
+    _testnet_ledger(monkeypatch, tmp_path, gateway_spend=30)
+    monkeypatch.setattr(ac, "_telegram_send", lambda m: pytest.fail("devnet 0 không phải bằng chứng testnet"))
+    st = {flop_radar.KEY: {"attr_spent_raw": {"explorer.devnet.flop.network": 0}}}
+    assert ac.gateway_attribution_step(st, 1_800_000_000) == "unknown"
+    monkeypatch.delenv("TESTNET_ENABLED")
+    assert ac.gateway_attribution_step(st, 1_800_000_000) == "off"
+
+
+def test_channel_info_reads_owner_and_miner_from_the_explorer(monkeypatch):
+    monkeypatch.setattr(ac, "RADAR_EXPLORER", "")
+    seen = []
+
+    class R:
+        status_code = 200
+
+        def json(self):
+            return {"data": {"agent": "5Broker", "miner": "5Miner", "status": "settled"}}
+    monkeypatch.setattr(ac.requests, "get", lambda url, **k: seen.append(url) or R())
+    assert ac.channel_info("testnet", "0xabc") == {"miner": "5Miner", "agent": "5Broker"}
+    assert seen == ["https://explorer.testnet.flop.network/api/compute-channels/0xabc"]
+    monkeypatch.setattr(ac.requests, "get", lambda url, **k: (_ for _ in ()).throw(OSError("down")))
+    assert ac.channel_info("testnet", "0xabc") == {}
+
+
+def test_foreign_channel_owner_alerts_on_testnet(monkeypatch, tmp_path):
+    import flop_gateway
+    _testnet_ledger(monkeypatch, tmp_path)
+    fns = []
+    monkeypatch.setattr(flop_gateway, "run_step", lambda state, **k: fns.append(k.get("channel_fn")) or {
+        "outcome": "spent", "calls": 1, "foreign_channels": 2, "channel_agents": {"5GsXb3TmBroker": 2}})
+    monkeypatch.setattr(ac, "save_state", lambda d: None)
+    monkeypatch.setenv("FLOP_GATEWAY_PROMPTS", "q")
+    sent = []
+    monkeypatch.setattr(ac, "_telegram_send", lambda m: sent.append(m) or True)
+    ac.gateway_session_step({}, _real_key(), 1_800_000_000)
+    assert len(sent) == 1 and "5GsXb3Tm" in sent[0]
+    assert callable(fns[0])                                         # tra kênh được nối vào run_step
+
+
+def test_radar_step_runs_the_attribution_check(monkeypatch):
+    import flop_radar
+    monkeypatch.setattr(ac, "TESTNET_RADAR", True)
+    monkeypatch.setattr(flop_radar, "check", lambda *a, **k: None)
+    monkeypatch.setattr(ac, "save_state", lambda d: None)
+    hit = []
+    monkeypatch.setattr(ac, "gateway_attribution_step", lambda st, now: hit.append(now) or "ok")
+    ac.testnet_radar_step({}, 1_800_000_000)
+    assert hit == [1_800_000_000]
+
+
+def test_ledger_persist_carries_gateway_attribution(monkeypatch, tmp_path):
+    tm = _testnet_ledger(monkeypatch, tmp_path, gateway_spend=7)
+    kv = {}
+    monkeypatch.setattr(ac, "kv_set", lambda pk, did, k, v: kv.update({k: v}) or True)
+    monkeypatch.setattr(ac, "save_state", lambda d: None)
+    ac.persist_ledger_to_kv(None, "did:key:zX")
+    body = json.loads(list(kv.values())[0])
+    body = body.get("body", body)
+    assert body["gateway_unattributed"] == {"FLOP": "7"}
+    assert tm.gateway_attribution()["unattributed"] == 7
+
+
 def test_main_routes_sessions_to_the_gateway_backend(monkeypatch):
     monkeypatch.setattr(ac, "SEED_HEX", SEED_HEX)
     monkeypatch.setattr(ac, "RUNNER_ROLE", "primary")
