@@ -276,9 +276,10 @@ def estimate(http, base: str, model: str, prompt: str, max_tokens: int) -> dict:
 
 def chat(http, base: str, bearer: str, model: str, prompt: str, max_tokens: int,
          max_cost: float, max_wait_ms: int = 60000, idempotency_key: str = None) -> dict:
-    """`idempotency_key` -> header `Idempotency-Key`. Trang Connect dùng nó làm `request_id` của biên
-    nhận; OpenAPI KHÔNG khai báo header này cho /chat/completions và không nói server chống trùng
-    theo nó -> chỉ dùng làm KHOÁ ĐỐI SOÁT, không coi là bảo đảm không bị tính phí hai lần."""
+    """`idempotency_key` -> header `Idempotency-Key` (1–128 ký tự ASCII in được). Trang Connect dùng
+    nó làm `request_id` của biên nhận; README @flop-labs/client 0.2.1: gateway LƯU phản hồi JSON đã
+    hoàn tất (stream:false) để phát lại theo khoá. Chưa kiểm chứng trên gateway thật: phát lại khi
+    request gốc còn chạy / chưa tới nơi, và có miễn phí không -> vẫn đối soát bằng biên nhận."""
     return _call(http, "POST", base + "/chat/completions", bearer=bearer, timeout=max_wait_ms / 1000 + 15,
                  extra_headers={"Idempotency-Key": idempotency_key} if idempotency_key else None,
                  body={"model": model, "max_tokens": int(max_tokens),
@@ -399,6 +400,9 @@ INFLIGHT_TTL_SEC = 30 * 60
 # (502/504, Cloudflare 522/524), 408, 500. Xử lý như timeout: giữ request treo để đối soát,
 # không gửi lại cùng đề — gửi lại có thể trả tiền hai lần cho cùng một việc.
 AMBIGUOUS_STATUS = frozenset({408, 500, 502, 504, 522, 524})
+# Phát lại request treo (cùng Idempotency-Key, cùng thân): các mã này = "chưa xong, thử lại sau";
+# mã khác = gateway từ chối hẳn -> không phát lại nữa, chỉ còn đối soát bằng biên nhận.
+REPLAY_RETRY_STATUS = AMBIGUOUS_STATUS | {409, 425, 429, 503}
 # Biên nhận thật (devnet 2026-10-24) KHÔNG có trường miner, chỉ có channel_id: tra kênh trên
 # explorer để biết miner và kênh ĐỨNG TÊN AI (agent). Tối đa ngần này lần tra mỗi lượt.
 CHANNEL_LOOKUPS_PER_RUN = 5
@@ -554,6 +558,8 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
     Lỗi transport (timeout/mất kết nối) = KHÔNG RÕ server đã xử lý chưa: đề vẫn coi như đã gửi
     (không gửi lại cùng đề) và lượt sau KHÔNG gọi mới cho tới khi thấy biên nhận có
     request_id == key, hoặc quá INFLIGHT_TTL_SEC. `new_key()` sinh khoá (tiêm được để test).
+    Trong lúc đó PHÁT LẠI đúng request với đúng khoá (tối đa FLOP_GATEWAY_REPLAY_MAX lần) để lấy
+    phản hồi gateway đã lưu -> không mất câu trả lời đã trả tiền; kết quả 'replayed'.
 
     `channel_fn(channel_id)` -> {"miner", "agent"} | None: tra kênh của biên nhận mới (biên nhận
     không có miner). Kết quả có `miners` và `foreign_channels` = số kênh KHÔNG đứng tên ví mình."""
@@ -644,6 +650,7 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
                         reason=f"model {model_id} không còn trong catalog — sẽ đăng ký lại ví ở lượt sau")
         model = models[model_id]
         rids = set()                        # request_id của các biên nhận gateway vừa trả
+        settled_rids = set()                # ... trong đó đã settle
 
         def collect(prev_calls: int) -> dict:
             """Đọc biên nhận; ghi sổ (book_fn) MỖI biên nhận mới ĐÃ SETTLE theo settled_spend —
@@ -657,6 +664,9 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
             live = {_receipt_key(rc) for rc in items}
             rids.clear()
             rids.update(str(rc.get("request_id")) for rc in items if rc.get("request_id"))
+            settled_rids.clear()
+            settled_rids.update(str(rc.get("request_id")) for rc in items
+                                if rc.get("request_id") and settled_amount(rc) is not None)
             for rc in items:
                 key = f"{rc.get('state')}/{rc.get('response_status')}"
                 hist[key] = hist.get(key, 0) + 1
@@ -714,6 +724,58 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
         if inf:
             key, age = str(inf.get("key") or ""), now - int(inf.get("ts") or 0)
             ttl = _env_num("FLOP_GATEWAY_INFLIGHT_TTL_SEC", INFLIGHT_TTL_SEC)
+            replay_max = int(_env_num("FLOP_GATEWAY_REPLAY_MAX", 2))
+            wait_s = int(inf.get("max_wait") or 0) / 1000
+
+            def try_replay():
+                """Gửi lại ĐÚNG thân request với ĐÚNG khoá. Trả phản hồi, hoặc None nếu chưa lấy được."""
+                inf["replays"] = int(inf.get("replays") or 0) + 1
+                g["inflight"] = inf
+                if checkpoint:
+                    state[KEY] = g
+                    try:
+                        checkpoint()
+                    except Exception as e:
+                        log(f"[gateway] không lưu được mốc phát lại ({str(e)[:80]})")
+                try:
+                    return chat(http, base, bearer, inf["model"], inf["prompt"], int(inf["mt"]),
+                                max_cost=float(inf["max_cost"]), max_wait_ms=int(inf["max_wait"]),
+                                idempotency_key=key)
+                except GatewayError as e:
+                    if e.status not in REPLAY_RETRY_STATUS:
+                        inf["replays"] = replay_max          # từ chối hẳn -> thôi phát lại
+                    log(f"[gateway] phát lại {key[:8]}… chưa được: HTTP {e.status} {e.code}")
+                except Exception as e:
+                    log(f"[gateway] phát lại {key[:8]}… chưa được: {type(e).__name__}")
+                return None
+
+            # Biên nhận chưa có -> phát lại để biết kết quả. Đã settle -> chỉ phát lại khi còn cần
+            # câu trả lời. Biên nhận thất bại (released...) -> không phát lại: có thể chạy lại việc.
+            if (inf.get("prompt") and inf.get("model") == model_id
+                    and int(inf.get("replays") or 0) < replay_max and age < ttl
+                    and (key not in rids or (answer_fn and key in settled_rids))
+                    and not (deadline and clock() + wait_s + 15 > deadline)):
+                r = try_replay()
+                if r is not None:
+                    g.pop("inflight", None)
+                    cost = float((r.get("usage") or {}).get("cost_flop") or 0)
+                    try:
+                        after = float(me(http, base, bearer).get("remaining_quota") or 0)
+                    except Exception:
+                        after = remaining
+                    if after < remaining - 1e-9:
+                        log(f"[gateway] ⚠️ phát lại {key[:8]}… làm quota tụt {remaining - after:.4f} FLOP")
+                        cost = cost or (remaining - after)
+                    if answer_fn:
+                        try:
+                            answer_fn(inf["prompt"], answer_text(r), cost)
+                        except Exception as e:
+                            log(f"[gateway] bỏ qua lỗi khi lưu câu trả lời ({str(e)[:80]})")
+                    log(f"[gateway] phát lại {key[:8]}… lấy được phản hồi đã lưu")
+                    tally(1, cost, n_sent=0)                 # đề đã xoay ở lượt gặp lỗi
+                    g["remaining"] = after
+                    return done("replayed", calls=1, spent=round(cost, 6), remaining=after,
+                                model=model_id, **rs)
             if key and key in rids:
                 log(f"[gateway] đối soát xong request treo {key[:8]}… — đã có biên nhận")
                 g.pop("inflight", None)
@@ -814,7 +876,9 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
             est_cost = preq + ptok * pp + mt * pc
             max_cost = min(per_call, est_cost) * 1.1
             pending = new_key()
-            g["inflight"] = {"key": pending, "ts": now, "max_cost": round(max_cost, 6)}
+            # Đủ để phát lại ĐÚNG thân request nếu không nhận được phản hồi.
+            g["inflight"] = {"key": pending, "ts": now, "max_cost": round(max_cost, 6),
+                             "model": model_id, "prompt": prompt, "mt": mt, "max_wait": max_wait}
             if checkpoint:
                 state[KEY] = g
                 try:

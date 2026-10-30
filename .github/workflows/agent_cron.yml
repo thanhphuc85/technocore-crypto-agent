@@ -320,6 +320,8 @@ jobs:
           # Request timeout (không rõ server đã trừ tiền chưa): chờ biên nhận tối đa N giây (mặc
           # định 1800) trước khi gọi mới — không gửi lại cùng đề.
           FLOP_GATEWAY_INFLIGHT_TTL_SEC: ${{ vars.FLOP_GATEWAY_INFLIGHT_TTL_SEC }}
+          # Số lần phát lại request treo với cùng Idempotency-Key (mặc định 2, 0 = tắt).
+          FLOP_GATEWAY_REPLAY_MAX: ${{ vars.FLOP_GATEWAY_REPLAY_MAX }}
           # Báo khi sổ đã ghi >= ngần này FLOP chi qua gateway mà explorer vẫn ghi ví mình 0 (mặc định 20).
           FLOP_ATTRIB_ALERT_MIN: ${{ vars.FLOP_ATTRIB_ALERT_MIN }}
           # Trần FLOPs MỘT phiên (tùy chọn) — phiên to hơn tách thành nhiều phiên.
