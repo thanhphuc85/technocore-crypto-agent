@@ -1788,15 +1788,21 @@ def test_agent_goal_desc_env_override(monkeypatch):
     assert ac.agent_desc("did:key:z6MkX") == "my custom desc"
 
 
+# DID tong hop (seed 01..01 / 01..02 / 01..03), KHONG phai DID cua agent that nao.
+_DID_A = "did:key:z6Mkon3Necd6NkkyfoGoHxid2znGc59LU3K7mubaRcFbLfLX"
+_DID_B = "did:key:z6Mkh2tVJfjhvLCuM9uXiXH6jpLLZwFYM78DmrKsZeiura16"
+_DID_C = "did:key:z6MkwgYg3fK5YVfMUrLvTFwGaYgtAdyzxJRLwX5DeDwvQzRG"
+
+
 def test_agent_goal_desc_deterministic_and_distinct(monkeypatch):
     monkeypatch.setattr(ac, "_AGENT_GOAL_ENV", "")
     monkeypatch.setattr(ac, "_AGENT_DESC_ENV", "")
-    d1 = "did:key:z6MkiCxCfTP6gHmWrJvPgF4UtxYL4upzry6hTAs6g1ni2C8g"
-    d2 = "did:key:z6MkkqC8CC6v9WeRHtnD4qP47RGHmvzKvznspa7mQrhvzYG6"
+    d1 = _DID_A
+    d2 = _DID_B
     # tat dinh: cung DID -> cung ket qua
     assert ac.agent_goal(d1) == ac.agent_goal(d1)
     assert ac.agent_desc(d1) == ac.agent_desc(d1)
-    # khac DID -> (rat co the) khac; voi 2 DID that nay phai khac
+    # khac DID -> (rat co the) khac; voi 2 DID nay phai khac
     assert ac.agent_goal(d1) != ac.agent_goal(d2)
     assert ac.agent_desc(d1) != ac.agent_desc(d2)
     # deu la phuong an hop le trong pool
@@ -1813,28 +1819,25 @@ def test_goal_desc_independent_salt(monkeypatch):
     # salt khac nhau -> goal-index va desc-index KHONG bi khoa cung nhau
     monkeypatch.setattr(ac, "_AGENT_GOAL_ENV", "")
     monkeypatch.setattr(ac, "_AGENT_DESC_ENV", "")
-    gi = ac._GOAL_VARIANTS.index(ac.agent_goal("did:key:z6MkiCxCfTP6gHmWrJvPgF4UtxYL4upzry6hTAs6g1ni2C8g"))
-    di = ac._DESC_VARIANTS.index(ac.agent_desc("did:key:z6MkiCxCfTP6gHmWrJvPgF4UtxYL4upzry6hTAs6g1ni2C8g"))
+    gi = ac._GOAL_VARIANTS.index(ac.agent_goal(_DID_A))
+    di = ac._DESC_VARIANTS.index(ac.agent_desc(_DID_A))
     assert gi != di  # neu cung hash se bang nhau; salt lam chung khac
 
 
 # --- Per-DID telemetry divergence (chong "van tay" trung giua cac fork) -----------
-_OWNER_DID = "did:key:z6MkiCxCfTP6gHmWrJvPgF4UtxYL4upzry6hTAs6g1ni2C8g"
-_LACHUTE_DID = "did:key:z6MkkqC8CC6v9WeRHtnD4qP47RGHmvzKvznspa7mQrhvzYG6"
-_HUONG_DID = "did:key:z6Mkqc7fABEewxUPe3xb4vaYYGVpYmn6jb2QwUHb5BcHzokH"
 
 
 def test_did_phase_deterministic_and_in_range():
     n = len(ac.TELEMETRY_TEMPLATES)
-    a = ac._did_phase(_OWNER_DID, n, 0)
-    b = ac._did_phase(_OWNER_DID, n, 0)
+    a = ac._did_phase(_DID_A, n, 0)
+    b = ac._did_phase(_DID_A, n, 0)
     assert a == b                      # tat dinh
     assert 0 <= a < n                  # trong khoang
 
 
 def test_did_phase_rotates_with_tick():
     n = len(ac.TELEMETRY_TEMPLATES)
-    seen = {ac._did_phase(_OWNER_DID, n, t) for t in range(n)}
+    seen = {ac._did_phase(_DID_A, n, t) for t in range(n)}
     assert seen == set(range(n))       # xoay het cac template theo thoi gian
 
 
@@ -1850,27 +1853,27 @@ def test_did_phase_diverges_across_forks_at_same_time():
     n = len(ac.TELEMETRY_TEMPLATES)
     for tick in range(0, 240, 7):      # quet nhieu moc thoi gian
         idxs = {
-            ac._did_phase(_OWNER_DID, n, tick),
-            ac._did_phase(_LACHUTE_DID, n, tick),
-            ac._did_phase(_HUONG_DID, n, tick),
+            ac._did_phase(_DID_A, n, tick),
+            ac._did_phase(_DID_B, n, tick),
+            ac._did_phase(_DID_C, n, tick),
         }
         assert len(idxs) >= 2, f"tick={tick}: 3 fork trung template"
 
 
 def test_cadence_offset_deterministic_in_range_and_distinct():
     span = 20 * 60
-    for did in (_OWNER_DID, _LACHUTE_DID, _HUONG_DID):
+    for did in (_DID_A, _DID_B, _DID_C):
         o1 = ac._did_cadence_offset(did, span)
         assert o1 == ac._did_cadence_offset(did, span)   # tat dinh
         assert 0 <= o1 < span                            # trong [0, span)
     offs = {ac._did_cadence_offset(d, span)
-            for d in (_OWNER_DID, _LACHUTE_DID, _HUONG_DID)}
+            for d in (_DID_A, _DID_B, _DID_C)}
     assert len(offs) == 3                                 # 3 fork -> 3 offset khac nhau
 
 
 def test_cadence_offset_empty_did_is_zero():
     assert ac._did_cadence_offset("", 20 * 60) == 0
-    assert ac._did_cadence_offset(_OWNER_DID, 0) == 0
+    assert ac._did_cadence_offset(_DID_A, 0) == 0
 
 
 def test_due_respects_phase_offset():

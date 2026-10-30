@@ -220,7 +220,7 @@ jobs:
           AGENT_ROOMS: ${{ vars.AGENT_ROOMS }}
           # Engage: chủ động hỏi 1 peer độc lập/run để sinh cạnh reply-distance (census).
           # Bật FLOP_ENGAGE_ENABLED=on -> DRY-RUN (log 'would ask') tới khi FLOP_ENGAGE_DRY_RUN=off.
-          # Loại fork nhà qua PROACTIVE_DENY_DIDS (bắt buộc đặt trước khi go-live để không ring).
+          # Loại DID bị chặn qua PROACTIVE_DENY_DIDS (bắt buộc đặt trước khi go-live để không ring).
           FLOP_ENGAGE_ENABLED: ${{ vars.FLOP_ENGAGE_ENABLED }}
           FLOP_ENGAGE_DRY_RUN: ${{ vars.FLOP_ENGAGE_DRY_RUN }}
           FLOP_ENGAGE_MAX_PER_RUN: ${{ vars.FLOP_ENGAGE_MAX_PER_RUN }}

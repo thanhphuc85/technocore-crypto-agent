@@ -10,8 +10,8 @@ PHẢN ỨNG (chào khi peer chào, giúp khi peer hỏi) — nó cho đi chứ 
 Module này chọn một peer độc lập vừa nói điều CÓ CHẤT, rồi đặt MỘT câu hỏi thật, đúng chủ
 đề, mời họ trả lời -> sinh một cạnh reply thật từ một key đã-ký khác.
 
-Ràng buộc anti-sybil (khớp posture fleet: KHÔNG tạo self-talking cluster):
-  • Loại fleet nhà (deny_dids) — không bao giờ ring giữa các agent của cùng operator.
+Ràng buộc anti-sybil (KHÔNG tạo self-talking cluster):
+  • Loại DID trong danh sách chặn (deny_dids) — không bao giờ ring với các DID đó.
   • BỀ RỘNG > bề sâu: 1 lần engage / peer mỗi `cooldown_h` (census cap 8/responder nên
     nhè 1 peer vừa vô ích vừa giống ring). Cơ chế ép chạm peer MỚI.
   • Chỉ nội dung THẬT: câu hỏi do LLM soạn bám đúng điều peer nói; soạn không ra -> SKIP
@@ -89,7 +89,7 @@ def select_engage_targets(messages, *, my_did, deny_dids, engaged, now,
                           cooldown_h, max_n, min_len):
     """Chọn POOL peer để engage (nhiều hơn max_n để còn thử khi 1 ứng viên SKIP).
     THUẦN. Loại: chính mình, key KHÔNG ký (nickname tự xưng — census không tính),
-    fleet nhà (deny_dids), peer còn trong cooldown, tin filler/không-có-chất. Mỗi DID
+    DID bị chặn (deny_dids), peer còn trong cooldown, tin filler/không-có-chất. Mỗi DID
     lấy TIN ĐẦU đủ-chất (theo seq tăng dần). Trả list dict {did,text,seq}."""
     deny = set(deny_dids or ())
     pool_cap = max(max_n * 5, 5)

@@ -210,7 +210,7 @@ exactly), 5 miners, an 8-line `flop-devnet-enroll/v1` challenge naming our SS58 
    buyers choose ("buyers choose their miners"; "pick a capable miner"), but no miner
    list, price, status or error history is published yet, so do not guess weights. Build
    it from the real API fields, in this priority order:
-   1. **Filter:** serves the pinned model, meets the latency bound, not a fleet miner
+   1. **Filter:** serves the pinned model, meets the latency bound, not a deny-listed miner
       (`PROACTIVE_DENY_DIDS` — "Independent demand only"), not recently failed/challenged.
    2. **Spread:** cap any one miner's share of our sessions (the `[miners]` concentration
       line already measures it; warning at `FLOP_MINER_CONC_WARN`). Prefer the eligible
@@ -225,7 +225,7 @@ exactly), 5 miners, an 8-line `flop-devnet-enroll/v1` challenge naming our SS58 
         in floating-point operations"*): a cheaper miner buys more compute for the same
         faucet FLOP, so a lower FLOP-per-FLOPs price directly raises the score. Then rank by
         price per FLOPs among the miners that pass step 1, still under the step-2 spread cap
-        and never a fleet miner.
+        and never a deny-listed miner.
       Until the spec settles it, log price per FLOPs for every settled session so the choice
       can be made from real data on day one.
    Never skip a session to "save budget": unspent faucet FLOP is lost ("If you don't use

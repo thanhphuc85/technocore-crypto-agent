@@ -98,8 +98,8 @@ def test_select_offers_filters():
     assert t.select_offers([_msg({**REAL_OFFER, "id": "0x" + "de" * 32})], set(), "zSELF", now, **A) == []
 
 
-def test_select_offers_excludes_fleet_deny_dids():
-    # Offer do FLEET NHÀ (fork) đăng -> KHÔNG nhận (chống tự-mua-bán / sybil); không deny -> nhận.
+def test_select_offers_excludes_deny_dids():
+    # Offer do DID bị chặn đăng -> KHÔNG nhận (chống tự-mua-bán / sybil); không deny -> nhận.
     now = REAL_OFFER["expiresMs"] - 5 * 60 * 1000
     A = dict(allow_rails=["paper"], min_claim_window_ms=60000, min_refund_gap_ms=60000, max_n=5)
     assert len(t.select_offers([_msg(REAL_OFFER)], set(), "zSELF", now, **A)) == 1

@@ -255,7 +255,7 @@ python agent_cron.py           # runs telemetry + auto-responder once
 | `FLOP_ENGAGE_MAX_PER_RUN` | optional | Questions asked per run (default `1` — breadth over depth) |
 | `FLOP_ENGAGE_COOLDOWN_HOURS` | optional | Min hours before engaging the same peer again (default `72`) — forces fresh peers, prevents a reciprocity ring |
 | `FLOP_ENGAGE_MIN_MSG_LEN` | optional | Min length for a peer message to count as substantive enough to engage (default `40`) |
-| `PROACTIVE_DENY_DIDS` | optional | CSV of DIDs the agent never proactively engages (your other fork DIDs) — keeps the fleet from forming a self-talking cluster. Shared by the proactive-help and peer-engage paths |
+| `PROACTIVE_DENY_DIDS` | optional | CSV of DIDs the agent never proactively engages — e.g. any agent you also operate — so it never forms a self-talking cluster. Shared by the proactive-help and peer-engage paths |
 | `KV_SIGNED` | optional | Experimental signed-KV attempt for ordinary keys — doesn't match Technocore's spec (room-ownership only), 400s and falls back. Leave off (default) |
 | `REPO_URL` | optional | Repo link embedded in the manifest (default: this repo) |
 | `TESTNET_ENABLED` | optional | `false` (default) = simulation ledger · `true` = testnet: the agent buys compute through FLOP's gateway (`api.flop.network`) with the wallet below and books **settled receipts** into a separate testnet ledger. Day-one steps: [`STRATEGY.md`](STRATEGY.md) |
@@ -394,7 +394,7 @@ It is built so it **cannot** become a farm:
 - **Breadth over depth** — one question per peer per `FLOP_ENGAGE_COOLDOWN_HOURS` (default 72).
   Census credit caps at 8 per responder, so re-pinging one peer is both useless and ring-like; the
   design mechanically favours reaching fresh peers.
-- **Never the fleet** — it reuses `PROACTIVE_DENY_DIDS`, so your own fork DIDs are never engaged (no
+- **Never a deny-listed DID** — it reuses `PROACTIVE_DENY_DIDS`, so those DIDs are never engaged (no
   self-talking cluster, the exact pattern anti-sybil radars flag).
 - **Signed peers only**, small per-run cap (default 1), paced + dedup'd, **off and dry-run by
   default**.
@@ -402,7 +402,7 @@ It is built so it **cannot** become a farm:
 ```bash
 FLOP_ENGAGE_ENABLED=on          # start (dry-run: logs "would ask @peer …")
 FLOP_ENGAGE_DRY_RUN=off         # flip to live once the dry-run questions look right
-PROACTIVE_DENY_DIDS=did:key:…,… # your other fork DIDs, so the fleet never engages itself
+PROACTIVE_DENY_DIDS=did:key:…,… # DIDs this agent never engages, trades with or buys from
 ```
 
 Honest scope: this raises the **odds** a peer replies; it can't force one, and many keys are

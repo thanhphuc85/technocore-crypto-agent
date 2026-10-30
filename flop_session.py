@@ -328,9 +328,9 @@ def run_inference_session(model_hash: str, max_latency_ms: int, flops: int,
     biết dừng ở đâu. SIMULATION chạy trọn happy-path bằng thợ đào giả; TESTNET cần submit_fn
     (đăng mempool) và submit_tx (thanh toán).
 
-    `deny_dids` = tập DID fleet nhà (main + fork). Nếu mempool match TRÚNG một miner trong đó
-    -> KHÔNG settle (trả 'skipped_fleet_miner'): luật FLOP 'independent demand only' không tính
-    chi cho miner cùng-nhóm + là cờ sybil. Chốt an toàn khi match tự nhiên lỡ rơi vào miner nhà."""
+    `deny_dids` = tập DID trong danh sách chặn (PROACTIVE_DENY_DIDS). Nếu mempool match TRÚNG một miner trong đó
+    -> KHÔNG settle (trả 'skipped_denied_miner'): luật FLOP 'independent demand only' không tính
+    chi cho miner cùng-nhóm + là cờ sybil. Chốt an toàn khi match tự nhiên lỡ rơi vào miner bị chặn."""
     req = build_request(model_hash, max_latency_ms, flops, security_flags, fee,
                         token=token, private_key=private_key, did=did)
     # Kiểm số dư TRƯỚC khi đăng: đăng rồi mới phát hiện thiếu tiền lúc settle = thợ đào đã
@@ -348,9 +348,9 @@ def run_inference_session(model_hash: str, max_latency_ms: int, flops: int,
     accept = sub["accept"]
     _miner = accept.get("miner_did")
     if deny_dids and _miner in set(deny_dids):
-        log(f"[session] match trúng miner FLEET {str(_miner)[:16]}… -> BỎ, KHÔNG settle "
+        log(f"[session] match trúng miner bị chặn {str(_miner)[:16]}… -> BỎ, KHÔNG settle "
             "(independent-demand-only, chống self-deal)")
-        return {"stage": "match", "outcome": "skipped_fleet_miner",
+        return {"stage": "match", "outcome": "skipped_denied_miner",
                 "request_id": req["id"], "miner_did": _miner}
     poui = accept.get("poui")
     if poui is None:
