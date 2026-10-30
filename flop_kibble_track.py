@@ -156,16 +156,21 @@ def record_deliveries(state: dict, items, now_ms: int) -> None:
     state["kibble_deliveries"] = merged[-DELIVERIES_CAP:]
 
 
-def reconcile(state: dict, messages, now_ms: int, expire_ms: int = 48 * 3600 * 1000) -> dict:
+def reconcile(state: dict, messages, now_ms: int, expire_ms: int = 48 * 3600 * 1000,
+              deny_dids=None) -> dict:
     """Đối chiếu deliveries đang 'pending' với ATTEST trong `messages` (tại chỗ), quy kết theo
     JOBID. /r/kibble khoá 1 job cho 1 worker (đo live: 0 job có >1 DELIVER), nên ATTEST cùng
     jobid CHẮC CHẮN nói về deliverable CỦA TA — jobid là khoá quy kết không mơ hồ. `rh` chỉ là
     tín hiệu CỘNG THÊM (xác nhận danh tính + lộ recipe), KHÔNG phải cổng: board thật BỎ `rh` ở
     verdict 'useful' (chỉ 'not' mới kèm rh), nên gate-theo-rh khiến 'useful' không bao giờ chốt
     được. Nhiều ATTEST/1 jobid -> lấy đa số phiếu (useful vs not); HOÀ phiếu -> để 'pending'
-    (chưa ngã ngũ). Pending không thấy attest quá `expire_ms` -> 'unattested'. Trả summary dict."""
+    (chưa ngã ngũ). Pending không thấy attest quá `expire_ms` -> 'unattested'. Trả summary dict.
+    Phiếu của DID trong `deny_dids` (PROACTIVE_DENY_DIDS) không được tính."""
+    deny = set(deny_dids or ())
     attests = []
     for m in (messages or []):
+        if deny and ((m or {}).get("from") or (m or {}).get("did")) in deny:
+            continue
         a = parse_attest_line(str((m or {}).get("text", "")))
         if a:
             attests.append(a)

@@ -395,6 +395,10 @@ TOK_BAD_TTL = 86400                    # quên cỡ bị từ chối sau 1 ngày
 # Request "đang treo" (đã gửi, không rõ kết quả vì timeout/mất kết nối): chờ biên nhận tối đa
 # chừng này giây rồi bỏ. /keys/me/receipts chỉ trả 20 biên nhận gần nhất nên không đợi mãi được.
 INFLIGHT_TTL_SEC = 30 * 60
+# Mã lỗi của /chat/completions mà KHÔNG chắc server phía sau chưa xử lý: proxy hết giờ chờ
+# (502/504, Cloudflare 522/524), 408, 500. Xử lý như timeout: giữ request treo để đối soát,
+# không gửi lại cùng đề — gửi lại có thể trả tiền hai lần cho cùng một việc.
+AMBIGUOUS_STATUS = frozenset({408, 500, 502, 504, 522, 524})
 
 
 def probe_up(tok_cap: int, cap: int, tok_bad, tok_bad_ts, now: int) -> int:
@@ -736,9 +740,19 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
         min_tok = int(_env_num("FLOP_GATEWAY_MIN_TOKENS", 64))
         gap = _env_num("FLOP_GATEWAY_CALL_GAP_SEC", 31)        # allowance: 2 yêu cầu/phút
         idx = int(g.get("prompt_idx") or 0)
+
+        def estimate_or_empty(prompt):
+            # /models/estimate chỉ để THAM KHẢO (đã có ước tính len//4 dự phòng): endpoint lỗi
+            # hay bị gỡ không được chặn việc mua.
+            try:
+                return estimate(http, base, model_id, prompt, cap)
+            except Exception as e:
+                log(f"[gateway] /models/estimate lỗi ({str(e)[:80]}) — dùng ước tính độ dài đề")
+                return {}
+
         # Mỗi lần gọi một đề KHÁC: ít đề hơn số lần gọi thì gọi ít lần hơn, không lặp đề.
         pick = [prompts[(idx + i) % len(prompts)] for i in range(min(max_calls, len(prompts)))]
-        est = estimate(http, base, model_id, pick[0], cap)
+        est = estimate_or_empty(pick[0])
         ptok = int(est.get("estimated_input_tokens") or len(pick[0]) // 4)
         # Giá cố định/lần gọi: số lần gọi quyết định số chi; cỡ yêu cầu không làm đổi giá nên
         # dùng cỡ lớn nhất miner còn nhận (tok_cap học được) — cùng giá, nhiều compute hơn.
@@ -751,7 +765,7 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
         spent, calls, last, quota_now = 0.0, 0, {}, remaining
         for i, prompt in enumerate(pick[:n]):
             if i:
-                est = estimate(http, base, model_id, prompt, cap)
+                est = estimate_or_empty(prompt)
                 ptok = int(est.get("estimated_input_tokens") or len(prompt) // 4)
             # Cỡ được miner nhận học dần: devnet 2026-10-24 từ chối 8192 token ("no admitted miner
             # for model and budget" — ước tính 82 block, quá max_wait), nhận 1024.
@@ -793,7 +807,7 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
             # gateway giảm bao nhiêu (/keys/me trước/sau) — sổ của CHÍNH gateway, không phải ước tính.
             try:
                 after = float(me(http, base, bearer).get("remaining_quota") or 0)
-            except GatewayError:
+            except Exception:                    # cả lỗi mạng: lần gọi ĐÃ chi, không được làm mất
                 after = None
             if after is not None:
                 delta = round(quota_now - after, 9)
@@ -832,6 +846,13 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
                     due=round(due, 6), remaining=g["remaining"], model=model_id, last=last, **rs)
     except GatewayError as e:
         out.update(calls=calls, spent=round(spent, 6))   # lần gọi thành công TRƯỚC lỗi vẫn được báo
+        if pending and e.status in AMBIGUOUS_STATUS:
+            # Giữ g['inflight'] (đã ghi trước lần gọi) -> lượt sau đối soát theo biên nhận.
+            tally(calls, spent, n_sent=calls + 1)
+            backoff(900, f"{e.status} {e.code}")
+            return done("unknown_outcome",
+                        reason=(f"HTTP {e.status} khi chờ phản hồi — có thể server đã xử lý và trừ tiền; "
+                                f"giữ request {pending[:8]}… để đối soát, KHÔNG gửi lại đề này"))
         if pending:
             g.pop("inflight", None)              # server ĐÃ trả lời (mã lỗi) -> không còn treo
         if calls:
