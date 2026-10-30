@@ -120,6 +120,7 @@ def test_attribution_first_sight_is_quiet_and_community_comments_do_not_alert():
     r = st[rd.KEY]
     assert r["attr_issue_state"] == "open" and r["attr_offers"] == {"explorer.devnet.flop.network": 0}
     assert r["attr_spent"] == {"explorer.devnet.flop.network": 0}
+    assert r["attr_spent_raw"] == {"explorer.devnet.flop.network": 0}      # số thật để so với sổ cái
 
 
 def test_maintainer_reply_alerts_once():

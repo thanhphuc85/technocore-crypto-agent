@@ -817,6 +817,38 @@ def test_quota_read_failing_after_a_paid_call_still_counts_the_call(monkeypatch)
     assert "inflight" not in st[gw.KEY]
 
 
+def test_receipt_channels_resolve_miner_and_flag_channels_not_on_our_wallet(monkeypatch):
+    monkeypatch.setenv("FLOP_GATEWAY_MAX_CALLS_PER_RUN", "1")
+    fake = FakeGateway(expires_ms=SOON)
+    fake.receipts = [{"channel_id": f"0xc{i}", "request_id": f"q{i}", "state": "settled",
+                      "settled_spend": 1.0} for i in range(7)]
+    asked = []
+
+    def channel(cid):
+        asked.append(cid)
+        if cid == "0xc1":
+            raise RuntimeError("explorer 502")                 # lỗi tra kênh không làm hỏng lượt
+        return {"miner": f"5Miner{cid}", "agent": "5Broker"}
+    out = gw.run_step({}, agent_key=_key("22"), http=fake, now=NOW, prompts=["q1"],
+                      expect_network="devnet", sleep=lambda s: None, log=lambda *a: None,
+                      channel_fn=channel)
+    assert len(asked) == gw.CHANNEL_LOOKUPS_PER_RUN              # có trần mỗi lượt
+    assert "5Miner0xc0" in out["miners"] and "5Miner0xc1" not in out["miners"]
+    assert out["foreign_channels"] == gw.CHANNEL_LOOKUPS_PER_RUN - 1
+    assert out["channel_agents"] == {"5Broker": gw.CHANNEL_LOOKUPS_PER_RUN - 1}
+
+
+def test_channels_on_our_own_wallet_are_not_foreign(monkeypatch):
+    monkeypatch.setenv("FLOP_GATEWAY_MAX_CALLS_PER_RUN", "1")
+    fake = FakeGateway(expires_ms=SOON)
+    fake.receipts = [{"channel_id": "0xc0", "request_id": "q0", "state": "settled", "settled_spend": 1.0}]
+    me_addr = gw.wallet_address(gw.wallet_key(_key("22")))
+    out = gw.run_step({}, agent_key=_key("22"), http=fake, now=NOW, prompts=["q1"],
+                      expect_network="devnet", sleep=lambda s: None, log=lambda *a: None,
+                      channel_fn=lambda cid: {"agent": me_addr})
+    assert out["foreign_channels"] == 0
+
+
 def test_estimate_endpoint_failure_does_not_block_buying(monkeypatch):
     monkeypatch.setenv("FLOP_GATEWAY_MAX_CALLS_PER_RUN", "1")
     fake = FakeGateway(expires_ms=SOON)

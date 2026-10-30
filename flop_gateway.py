@@ -399,6 +399,9 @@ INFLIGHT_TTL_SEC = 30 * 60
 # (502/504, Cloudflare 522/524), 408, 500. Xử lý như timeout: giữ request treo để đối soát,
 # không gửi lại cùng đề — gửi lại có thể trả tiền hai lần cho cùng một việc.
 AMBIGUOUS_STATUS = frozenset({408, 500, 502, 504, 522, 524})
+# Biên nhận thật (devnet 2026-10-24) KHÔNG có trường miner, chỉ có channel_id: tra kênh trên
+# explorer để biết miner và kênh ĐỨNG TÊN AI (agent). Tối đa ngần này lần tra mỗi lượt.
+CHANNEL_LOOKUPS_PER_RUN = 5
 
 
 def probe_up(tok_cap: int, cap: int, tok_bad, tok_bad_ts, now: int) -> int:
@@ -538,7 +541,8 @@ def report_line(g: dict, now: int):
 
 def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_network: str,
              book_fn=None, sleep=time.sleep, log=print, rng=None, deadline=None,
-             clock=time.time, answer_fn=None, checkpoint=None, new_key=None) -> dict:
+             clock=time.time, answer_fn=None, checkpoint=None, new_key=None,
+             channel_fn=None) -> dict:
     """Một nhịp mua compute. Trả {"outcome", "calls", "spent", ...}; KHÔNG ném lỗi.
 
     `book_fn(amount, ref, model)` ghi sổ (chỉ khi mạng khớp `expect_network`); None = chạy
@@ -549,7 +553,10 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
     gọi `checkpoint()` (caller lưu state xuống đĩa) -> run bị giết giữa chừng vẫn để lại dấu vết.
     Lỗi transport (timeout/mất kết nối) = KHÔNG RÕ server đã xử lý chưa: đề vẫn coi như đã gửi
     (không gửi lại cùng đề) và lượt sau KHÔNG gọi mới cho tới khi thấy biên nhận có
-    request_id == key, hoặc quá INFLIGHT_TTL_SEC. `new_key()` sinh khoá (tiêm được để test)."""
+    request_id == key, hoặc quá INFLIGHT_TTL_SEC. `new_key()` sinh khoá (tiêm được để test).
+
+    `channel_fn(channel_id)` -> {"miner", "agent"} | None: tra kênh của biên nhận mới (biên nhận
+    không có miner). Kết quả có `miners` và `foreign_channels` = số kênh KHÔNG đứng tên ví mình."""
     import uuid
     new_key = new_key or (lambda: str(uuid.uuid4()))
     g = state.get(KEY) if isinstance(state.get(KEY), dict) else {}
@@ -677,9 +684,26 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
             if prev_calls or new or not st["receipts"]:      # chưa từng thấy biên nhận -> luôn in hình dạng
                 log(f"[gateway] biên nhận: settled +{len(new)} ({round(amt, 6)} FLOP) | "
                     f"{', '.join(f'{k}={v}' for k, v in sorted(hist.items())) or shape}")
+            miners = [str(x.get("miner") or "") for x in new if x.get("miner")]
+            agents = {}
+            if channel_fn:
+                for rc in [x for x in new if x.get("channel_id")][:CHANNEL_LOOKUPS_PER_RUN]:
+                    try:
+                        info = channel_fn(str(rc["channel_id"])) or {}
+                    except Exception:
+                        info = {}
+                    if info.get("miner") and not rc.get("miner"):
+                        miners.append(str(info["miner"]))
+                    if info.get("agent"):
+                        agents[str(info["agent"])] = agents.get(str(info["agent"]), 0) + 1
+            foreign = {a: n for a, n in agents.items() if a != addr}
+            if foreign:
+                log(f"[gateway] ⚠️ {sum(foreign.values())} kênh vừa settle đứng tên "
+                    f"{', '.join(a[:8] + '…' for a in foreign)} — KHÔNG phải ví mình {addr[:8]}…")
             return {"receipts_new": len(new), "settled_new": round(amt, 6),
                     "receipts_total": st["receipts"], "settled_total": st["settled"],
-                    "miners": [str(x.get("miner") or "") for x in new if x.get("miner")]}
+                    "miners": miners, "channel_agents": agents,
+                    "foreign_channels": sum(foreign.values())}
 
         # Đọc biên nhận TRƯỚC khi gọi: biên nhận settle muộn (của các run trước) luôn được ghi,
         # kể cả khi lần gọi run này lỗi (429/503) hay chưa tới nhịp.

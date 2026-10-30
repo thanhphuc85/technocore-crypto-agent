@@ -612,9 +612,14 @@ def record_gateway_spend(amount, memo, ref: str, token: str = None, *, path: str
     state["entries"].append({
         "kind": "spend", "token": token, "amount": _fmt(amt), "memo": memo, "mode": "testnet",
         "balance_after": new_bal, "tx_hash": str(ref)[:80], "via": "gateway",
+        "attribution": "unverified",
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     })
-    _accrue_unlock(state, token, amt)
+    # CHƯA cộng quyền mở khoá 3:1: kênh do gateway mở có thể đứng tên BROKER của gateway chứ
+    # không phải ví mình (đo devnet 2026-10-28: inference-spend của ví = 0). Chờ chain xác nhận
+    # qua confirm_gateway_attribution() rồi mới cộng.
+    pend = state.setdefault("gateway_unattributed", {})
+    pend[token] = _fmt((_parse_amount(pend.get(token, "0")) or Decimal(0)) + amt)
     _accrue_cumulative(state, token, amt)
     _accrue_day(state, token, amt)
     if is_session_spend(memo):
@@ -622,6 +627,37 @@ def record_gateway_spend(amount, memo, ref: str, token: str = None, *, path: str
     _save_ledger(state, path)
     log(f"[ledger] gateway spent {_fmt(amt)} {token} for {memo} (ref {str(ref)[:12]}…)")
     return {"outcome": "spent_onchain", "amount": _fmt(amt), "balance_after": new_bal, "tx_hash": ref}
+
+
+def gateway_attribution(token: str = None, path: str = None) -> dict:
+    """{'unattributed', 'attributed'}: chi qua gateway CHƯA / ĐÃ được chain xác nhận đứng tên ví mình."""
+    token = (token or default_token())
+    state = load_ledger(path)
+    return {k: _parse_amount((state.get(f"gateway_{k}") or {}).get(token, "0")) or Decimal(0)
+            for k in ("unattributed", "attributed")}
+
+
+def confirm_gateway_attribution(onchain_total, token: str = None, *, path: str = None,
+                                log=print) -> dict:
+    """Chain (explorer) báo ví mình đã chi `onchain_total` FLOP: chuyển phần chi qua gateway đang
+    chờ xác nhận (tối đa phần chain mới ghi thêm) sang quyền mở khoá 3:1. Chỉ ở chế độ testnet."""
+    token = (token or default_token())
+    total = _parse_amount(onchain_total)
+    if ledger_mode() != "testnet" or total is None or total <= 0:
+        return {"outcome": "no_change"}
+    state = load_ledger(path)
+    pend_map = state.setdefault("gateway_unattributed", {})
+    done_map = state.setdefault("gateway_attributed", {})
+    pend = _parse_amount(pend_map.get(token, "0")) or Decimal(0)
+    done = _parse_amount(done_map.get(token, "0")) or Decimal(0)
+    newly = min(pend, total - done)
+    if newly <= 0:
+        return {"outcome": "no_change"}
+    _accrue_unlock(state, token, newly)
+    pend_map[token], done_map[token] = _fmt(pend - newly), _fmt(done + newly)
+    _save_ledger(state, path)
+    log(f"[ledger] chain xác nhận {_fmt(newly)} {token} chi qua gateway đứng tên ví mình -> cộng mở khoá 3:1")
+    return {"outcome": "confirmed", "amount": _fmt(newly)}
 
 
 # --- Envelope chống sybil + thống kê hoạt động (đọc từ chính sổ cái) ---------------
