@@ -4544,7 +4544,11 @@ def gateway_session_step(state: dict, private_key, now: int):
             state["last_foreign_alert"] = now
             save_state({"last_foreign_alert": now})
     _g = state.get(flop_gateway.KEY) if isinstance(state.get(flop_gateway.KEY), dict) else {}
-    state["gateway_inflight"] = {"inflight": _g.get("inflight"), "at": now}
+    # KV công khai và giới hạn 8192 ký tự: chỉ sao khoá đối soát, KHÔNG sao đề bài. Mất state.json
+    # thì đối soát theo biên nhận, không phát lại được.
+    _inf = _g.get("inflight") if isinstance(_g.get("inflight"), dict) else None
+    state["gateway_inflight"] = {"inflight": _inf and {k: _inf.get(k) for k in ("key", "ts", "max_cost")},
+                                 "at": now}
     save_state({"gateway_inflight": state["gateway_inflight"]})
     if GATEWAY_BRIEF and r.get("calls"):
         save_state({BRIEF_KEY: state.get(BRIEF_KEY)})

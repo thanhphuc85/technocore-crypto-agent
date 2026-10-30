@@ -36,6 +36,8 @@ class FakeGateway:
         self.report_cost = True                 # devnet thật (2026-10-24) KHÔNG trả usage.cost_flop
         self.receipt_state = "settled"
         self.honor_idem = False                 # True: request_id = Idempotency-Key (như trang Connect mô tả)
+        self.replay = False                     # True: phát lại phản hồi đã lưu theo khoá (README client 0.2.1)
+        self.stored = {}
         self.receipts = [{"model": "m1", "prompt_hash": "p1", "tee_quote_hash": "t", "block_number": 7,
                           "tx_hash": "0xaa", "miner": "5MinerA"}]
 
@@ -63,6 +65,9 @@ class FakeGateway:
         if path == "/v1/models/estimate":
             return Resp(data={"estimated_input_tokens": 20, "estimated_cost_flop": 1.0})
         if path == "/v1/chat/completions":
+            idem = (headers or {}).get("Idempotency-Key")
+            if self.replay and idem in self.stored:
+                return self.stored[idem]
             self.quota -= self.cost
             # Biên nhận dạng THẬT của devnet (2026-10-24), trạng thái theo receipt_state.
             rid = ((headers or {}).get("Idempotency-Key") if self.honor_idem else None) or f"req-{len(self.calls)}"
@@ -71,11 +76,14 @@ class FakeGateway:
                                   "response_status": 200, "settled_spend": self.cost,
                                   "settled_spend_raw": str(int(self.cost * 10**18)),
                                   "state": self.receipt_state, "terminal_event": "completed"})
-            return Resp(data={"id": f"chatcmpl-{len(self.calls)}", "object": "chat.completion", "created": NOW,
+            resp = Resp(data={"id": f"chatcmpl-{len(self.calls)}", "object": "chat.completion", "created": NOW,
                               "model": "m1", "choices": [{"index": 0, "finish_reason": "stop",
                                                           "message": {"role": "assistant", "content": "ok"}}],
                               "usage": {"prompt_tokens": 20, "completion_tokens": 100, "total_tokens": 120,
                                         **({"cost_flop": self.cost, "gflops_used": 3.2} if self.report_cost else {})}})
+            if idem:
+                self.stored[idem] = resp
+            return resp
         if path == "/v1/keys/me/receipts":
             return Resp(data={"receipts": self.receipts})
         return Resp(404, {"error": "not_found", "message": path})
@@ -746,6 +754,7 @@ def test_timeout_after_processing_is_not_resent_and_reconciles_by_receipt(monkey
 
 def test_unreconciled_inflight_blocks_new_calls_until_ttl(monkeypatch):
     monkeypatch.setenv("FLOP_GATEWAY_MAX_CALLS_PER_RUN", "1")
+    monkeypatch.setenv("FLOP_GATEWAY_REPLAY_MAX", "0")              # chỉ đối soát bằng biên nhận
     fake = FakeGateway(quota=25.0, expires_ms=LATER)                # server BỎ QUA Idempotency-Key
     state = {}
     _step(state, _timeout_after_processing(fake), NOW)
@@ -777,6 +786,7 @@ def test_unexplained_quota_drop_counts_as_spent_so_due_is_not_inflated():
 def test_ambiguous_5xx_on_chat_is_held_for_reconciliation_not_resent(monkeypatch):
     # 504 từ proxy: server phía sau có thể ĐÃ xử lý -> giữ request treo, không gửi lại cùng đề.
     monkeypatch.setenv("FLOP_GATEWAY_MAX_CALLS_PER_RUN", "1")
+    monkeypatch.setenv("FLOP_GATEWAY_REPLAY_MAX", "0")
     fake = FakeGateway(expires_ms=SOON)
     fake.override[("POST", "/v1/chat/completions")] = Resp(504, {"error": "gateway_timeout"})
     st = {}
@@ -790,6 +800,102 @@ def test_ambiguous_5xx_on_chat_is_held_for_reconciliation_not_resent(monkeypatch
     st[gw.KEY]["inflight"]["ts"] = NOW - gw.INFLIGHT_TTL_SEC - 1
     _step(st, fake, NOW + 120)                             # quá TTL -> gọi tiếp với đề KẾ TIẾP
     assert _chat_prompts(fake) == ["q1", "q2"]
+
+
+def _chat_calls(fake):
+    return [c for c in fake.calls if c[1] == "/v1/chat/completions"]
+
+
+def _hung(monkeypatch):
+    """Lượt 1: gateway xử lý xong và trừ tiền nhưng client timeout -> còn request treo."""
+    monkeypatch.setenv("FLOP_GATEWAY_MAX_CALLS_PER_RUN", "1")
+    fake = FakeGateway(quota=25.0, expires_ms=LATER)
+    fake.honor_idem, fake.replay = True, True
+    state = {}
+    assert _step(state, _timeout_after_processing(fake), NOW)["outcome"] == "unknown_outcome"
+    return fake, state
+
+
+def test_replay_recovers_the_stored_answer_without_a_new_charge(monkeypatch):
+    fake, state = _hung(monkeypatch)
+    quota = fake.quota
+    answers = []
+    r = _step(state, fake, NOW + 1000, answer_fn=lambda p, t, c: answers.append((p, t, c)))
+    assert r["outcome"] == "replayed" and r["calls"] == 1
+    first, again = _chat_calls(fake)
+    assert again[2]["Idempotency-Key"] == first[2]["Idempotency-Key"]    # cùng khoá
+    assert again[3] == first[3]                                          # cùng thân request
+    assert fake.quota == quota                                           # không bị trừ thêm
+    assert answers == [("q1", "ok", fake.cost)]                          # lấy lại được câu trả lời
+    assert "inflight" not in state[gw.KEY]
+    r3 = _step(state, fake, NOW + 1400)                                  # lượt sau đi tiếp đề KẾ
+    assert r3["outcome"] == "spent" and _chat_prompts(fake)[-1] == "q2"
+
+
+def test_replay_gives_up_after_the_limit_then_falls_back_to_receipts(monkeypatch):
+    fake, state = _hung(monkeypatch)
+    fake.receipts = []                                                   # biên nhận chưa tới
+    fake.override[("POST", "/v1/chat/completions")] = Resp(409, {"error": "in_progress"})
+    n = len(_chat_calls(fake))
+    for i in range(4):
+        fake.receipts = []
+        assert _step(state, fake, NOW + 1000 + i * 10)["outcome"] == "reconciling"
+    assert len(_chat_calls(fake)) - n == 2                               # mặc định tối đa 2 lần
+    assert state[gw.KEY]["inflight"]["replays"] == 2
+
+
+def test_replay_stops_at_once_on_a_definite_refusal(monkeypatch):
+    fake, state = _hung(monkeypatch)
+    fake.override[("POST", "/v1/chat/completions")] = Resp(422, {"error": "idempotency_mismatch"})
+    n = len(_chat_calls(fake))
+    fake.receipts = []
+    assert _step(state, fake, NOW + 1000)["outcome"] == "reconciling"
+    fake.receipts = []
+    _step(state, fake, NOW + 1010)
+    assert len(_chat_calls(fake)) - n == 1
+
+
+def test_replay_transport_failure_keeps_the_request_held(monkeypatch):
+    import requests
+    fake, state = _hung(monkeypatch)
+    fake.receipts = []
+
+    def http(method, url, **k):
+        if url.endswith("/chat/completions"):
+            raise requests.Timeout("still down")
+        return fake(method, url, **k)
+    assert _step(state, http, NOW + 1000)["outcome"] == "reconciling"
+    assert state[gw.KEY]["inflight"]["replays"] == 1
+
+
+def test_no_replay_when_the_receipt_says_the_request_failed(monkeypatch):
+    # Biên nhận released = không chạy xong: phát lại có thể chạy lại việc -> chỉ đóng request treo.
+    fake, state = _hung(monkeypatch)
+    fake.receipts = [{**fake.receipts[-1], "state": "released", "response_status": 503}]
+    n = len(_chat_calls(fake))
+    _step(state, fake, NOW + 1000, answer_fn=lambda p, t, c: None)
+    assert "inflight" not in state[gw.KEY]
+    assert "q1" not in _chat_prompts(fake)[n:]
+
+
+def test_settled_receipt_replays_only_when_the_answer_is_wanted(monkeypatch):
+    fake, state = _hung(monkeypatch)
+    answers = []
+    r = _step(state, fake, NOW + 1000, answer_fn=lambda p, t, c: answers.append(t))
+    assert r["outcome"] == "replayed" and answers == ["ok"]
+    fake, state = _hung(monkeypatch)
+    n = len(_chat_calls(fake))
+    _step(state, fake, NOW + 1000)                                       # không cần câu trả lời
+    assert "inflight" not in state[gw.KEY]
+    assert "q1" not in _chat_prompts(fake)[n:]
+
+
+def test_replay_is_skipped_when_the_run_budget_cannot_fit_it(monkeypatch):
+    fake, state = _hung(monkeypatch)
+    fake.receipts = []                                                   # chưa có biên nhận
+    n = len(_chat_calls(fake))
+    r = _step(state, fake, NOW + 1000, deadline=1000.0, clock=lambda: 999.0)
+    assert r["outcome"] == "reconciling" and len(_chat_calls(fake)) == n
 
 
 def test_definite_4xx_on_chat_clears_the_inflight_marker(monkeypatch):
@@ -855,3 +961,18 @@ def test_estimate_endpoint_failure_does_not_block_buying(monkeypatch):
     fake.override[("POST", "/v1/models/estimate")] = Resp(404, {"error": "not_found"})
     out = _step({}, fake, NOW)
     assert out["outcome"] == "spent" and _chat_prompts(fake) == ["q1"]
+
+
+def test_gateway_that_charges_a_replay_is_reported_and_counted(monkeypatch):
+    # README nói phản hồi được lưu để phát lại, nhưng chưa kiểm chứng trên gateway thật.
+    monkeypatch.setenv("FLOP_GATEWAY_MAX_CALLS_PER_RUN", "1")
+    fake = FakeGateway(quota=25.0, expires_ms=LATER)
+    fake.honor_idem, fake.report_cost = True, False               # KHÔNG phát lại: xử lý như request mới
+    state = {}
+    _step(state, _timeout_after_processing(fake), NOW)
+    fake.receipts = []
+    logs = []
+    r = gw.run_step(state, agent_key=_key("22"), http=fake, now=NOW + 1000, prompts=["q1", "q2", "q3"],
+                    expect_network="devnet", sleep=lambda s: None, log=logs.append)
+    assert r["outcome"] == "replayed" and r["spent"] == pytest.approx(fake.cost)
+    assert any("quota tụt" in m for m in logs)

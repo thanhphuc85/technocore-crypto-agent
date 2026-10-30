@@ -3626,6 +3626,24 @@ def test_gateway_inflight_survives_cache_loss_via_the_durable_key(monkeypatch):
     assert "gateway_inflight" in ac.DURABLE_STATE_KEYS
 
 
+def test_durable_inflight_copy_never_carries_the_prompt(monkeypatch):
+    # KV công khai, giới hạn 8192 ký tự: đề bài chỉ nằm trong state.json.
+    import flop_gateway
+    full = {"key": "k-1", "ts": 5, "max_cost": 1.0, "prompt": "x" * 9000, "model": "m", "mt": 64,
+            "max_wait": 1000}
+
+    def fake_step(state, **k):
+        state[flop_gateway.KEY] = {"inflight": full}
+        return {"outcome": "unknown_outcome", "calls": 0}
+    monkeypatch.setattr(flop_gateway, "run_step", fake_step)
+    monkeypatch.setattr(ac, "save_state", lambda d: None)
+    monkeypatch.setenv("FLOP_GATEWAY_PROMPTS", "q")
+    monkeypatch.delenv("TESTNET_ENABLED", raising=False)
+    st = {}
+    ac.gateway_session_step(st, _real_key(), 1_800_000_000)
+    assert st["gateway_inflight"]["inflight"] == {"key": "k-1", "ts": 5, "max_cost": 1.0}
+
+
 def test_cleared_inflight_in_state_json_wins_over_a_stale_kv_copy(monkeypatch):
     import flop_gateway
     seen = []
