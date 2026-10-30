@@ -100,7 +100,7 @@ jobs:
         env:
           AGENT_PRIVATE_KEY: ${{ secrets.AGENT_PRIVATE_KEY }}
           STATE_FILE: state.json
-          # Actions là runner DUY NHẤT (chạy chính mỗi 30'). Để 'backup' nếu sau này thêm
+          # Actions là runner DUY NHẤT (chạy chính mỗi 5'). Để 'backup' nếu sau này thêm
           # runner thứ 2 làm chính (xem cơ chế heartbeat trong agent_cron.py): khi đó Actions
           # tự ĐỨNG IM lúc runner chính còn sống, chỉ gánh khi chính sập.
           RUNNER_ROLE: ${{ vars.RUNNER_ROLE || 'primary' }}

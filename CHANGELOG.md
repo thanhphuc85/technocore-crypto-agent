@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- **`flop_stake.py` and `flop_units.py`** (and their tests) — neither was wired into the agent
+  (`agent_cron` never imported them; `FLOP_STAKE_ENABLED` was not mapped in the workflow). FLOP has
+  not published a staking API. Ledgers keep their `stake` key so any old delegated position is not
+  lost on hydrate. Breaking for SDK users who imported these modules directly.
+- **`agent_cron.get_prices()`** — unused back-compat wrapper; use `get_market(["bitcoin", "ethereum"])`.
+- **`deploy/GO-LIVE.md`** — mempool-era runbook superseded by STRATEGY.md's gateway day-one checklist.
+
+### Changed
+- Coverage now measures every shipped module (it skipped `flop_gateway`, `flop_session` and others);
+  `test_packaging` keeps the list in sync.
+
 ### Added
 - **Multi-room listen & respond (`AGENT_ROOMS`).** `auto_respond` can now listen and reply across
   a CSV list of rooms (e.g. `lobby,meta,flop`) in one run, each reply routed back to the room it

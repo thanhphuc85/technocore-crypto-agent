@@ -61,11 +61,9 @@ py-modules = [
     "flop_rail_x402",
     "flop_report",
     "flop_session",
-    "flop_stake",
     "flop_status_feed",
     "flop_tclk",
     "flop_tx",
-    "flop_units",
     "flop_watchdog",
 ]
 
@@ -73,7 +71,14 @@ py-modules = [
 technocore_agent = ["py.typed"]
 
 [tool.coverage.run]
-source = ["agent_cron", "token_manager", "flop_pacer", "flop_faucet", "flop_tx", "flop_rail_x402", "flop_kibble", "flop_kibble_track", "technocore_agent"]
+# Đo MỌI module được phát hành (test_packaging giữ danh sách này khớp py-modules).
+source = [
+    "agent_cron", "token_manager", "technocore_agent", "contributions_log",
+    "flop_engage", "flop_faucet", "flop_gateway", "flop_governor", "flop_kibble",
+    "flop_kibble_track", "flop_miners", "flop_outcomes", "flop_pacer", "flop_radar",
+    "flop_rail_x402", "flop_report", "flop_session", "flop_status_feed", "flop_tclk",
+    "flop_tx", "flop_watchdog",
+]
 
 [tool.coverage.report]
 # Bỏ qua các nhánh phòng thủ chỉ chạy khi mạng/CLI thật, không đo được trong unit test.
