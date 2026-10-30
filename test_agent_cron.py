@@ -3596,6 +3596,31 @@ def test_main_routes_sessions_to_the_gateway_backend(monkeypatch):
     assert hit == [1]
 
 
+def test_main_passes_the_deny_list_to_the_kibble_worker(monkeypatch):
+    # Job do DID trong PROACTIVE_DENY_DIDS đăng không được nhận: worker phải nhận danh sách chặn.
+    monkeypatch.setattr(ac, "SEED_HEX", SEED_HEX)
+    monkeypatch.setattr(ac, "RUNNER_ROLE", "primary")
+    for name in ("hydrate_durable_from_kv", "hydrate_ledger_from_kv", "write_heartbeat",
+                 "persist_durable_to_kv", "persist_ledger_to_kv", "_write_summary", "check_price_alert"):
+        monkeypatch.setattr(ac, name, lambda *a, **k: None)
+    monkeypatch.setattr(ac, "load_state", lambda: {})
+    monkeypatch.setattr(ac, "save_state", lambda d: None)
+    monkeypatch.setattr(ac, "broadcast_telemetry", lambda *a, **k: True)
+    monkeypatch.setattr(ac, "broadcast_manifest", lambda *a, **k: True)
+    monkeypatch.setattr(ac, "auto_respond", lambda *a, **k: (0, 0))
+    monkeypatch.setattr(ac, "_server_ok_count", 1)
+    monkeypatch.setattr(ac, "KIBBLE_ENABLED", True)
+    monkeypatch.setattr(ac, "PROACTIVE_DENY_DIDS", {"did:key:zDENIED"})
+    import flop_kibble
+    seen = []
+    def fake_worker(*a, **k):
+        seen.append(k.get("deny_dids"))
+        raise RuntimeError("dừng sau khi bắt tham số")
+    monkeypatch.setattr(flop_kibble, "run_kibble_worker", fake_worker)
+    ac.main()
+    assert seen == [{"did:key:zDENIED"}]
+
+
 def test_answered_kibble_jobs_become_gateway_prompts_and_are_consumed(monkeypatch):
     # Đề mua compute = job kibble THẬT agent vừa làm (không lặp đề cố định -> tránh cờ
     # "manufactured activity"); job dùng rồi ra khỏi hàng; nội dung job được isolate.

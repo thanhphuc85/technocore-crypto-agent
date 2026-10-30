@@ -89,6 +89,18 @@ def test_select_skips_own_did_and_orders_and_caps():
     assert [j["jobid"] for j in jobs] == ["k000000000c"]   # bỏ của mình, mới nhất trước, cap 1
 
 
+def test_select_skips_jobs_posted_by_deny_listed_dids():
+    msgs = [
+        _msg(50, "JOB v1 | k000000001a | explain | denied | x", frm="did:key:zDENIED"),
+        _msg(51, "JOB v1 | k000000001b | explain | ok | x"),
+    ]
+    jobs = k.select_jobs(msgs, done_set=set(), allow_types=["explain"], max_n=5,
+                         deny_dids={"did:key:zDENIED"})
+    assert [j["jobid"] for j in jobs] == ["k000000001b"]
+    # không truyền deny_dids -> hành vi cũ, nhận cả hai
+    assert len(k.select_jobs(msgs, done_set=set(), allow_types=["explain"], max_n=5)) == 2
+
+
 # --- run_kibble_worker (orchestrator, fake deps) ----------------------------------
 
 def _fetch(messages, last_seq):
@@ -109,6 +121,22 @@ def test_run_dry_run_posts_nothing_but_advances_cursor():
     assert out["delivered"] == ["k000000000d"]
     assert state["kibble_cursor"] == 30                 # cursor vẫn tiến
     assert state.get("kibble_done", []) == []           # DRY: không ghi done
+
+
+def test_run_never_claims_a_job_posted_by_a_deny_listed_did():
+    msgs = [_msg(45, "JOB v1 | k000000001c | explain | T | body", frm="did:key:zDENIED")]
+    posts, asked = [], []
+    state = {}
+    out = k.run_kibble_worker(
+        fetch_fn=_fetch(msgs, 45),
+        answer_fn=lambda job: asked.append(job) or "the answer",
+        post_fn=lambda text: posts.append(text) or True,
+        state=state, allow_types=["explain"], do_claim=True, dry_run=False,
+        log=lambda *_: None, deny_dids=["did:key:zDENIED"],
+    )
+    assert posts == [] and asked == []                  # không CLAIM, không tốn inference
+    assert out["delivered"] == []
+    assert state["kibble_cursor"] == 45                 # cursor vẫn tiến qua job đó
 
 
 def test_run_live_claims_delivers_and_records_done():
