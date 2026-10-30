@@ -2,7 +2,7 @@
 Test cho flop_engage.py — python -m pytest test_flop_engage.py -q
 
 Bao phủ phần THUẦN (phân loại filler/có-chất, cooldown bề-rộng, chọn mục tiêu loại
-fleet/không-ký/trùng) và orchestration run_engage_pass qua fn TIÊM vào — KHÔNG chạm mạng,
+DID bị chặn/không-ký/trùng) và orchestration run_engage_pass qua fn TIÊM vào — KHÔNG chạm mạng,
 KHÔNG gọi LLM thật.
 """
 import flop_engage as fe
@@ -56,12 +56,12 @@ def test_engage_due_cooldown():
 
 # --- select_engage_targets -----------------------------------------------------------
 
-def test_select_skips_self_unsigned_and_fleet():
+def test_select_skips_self_unsigned_and_denied():
     now = 1_000_000
     msgs = [
         _msg(1, ME, GOODQ),                                     # chính mình
         _msg(2, "~nickonly", GOODQ),                            # không ký (nickname) -> census không tính
-        _msg(3, D2, GOODQ),                                     # fleet (deny) -> loại
+        _msg(3, D2, GOODQ),                                     # DID bị chặn (deny) -> loại
         _msg(4, D1, GOODQ),                                     # hợp lệ
     ]
     out = fe.select_engage_targets(msgs, my_did=ME, deny_dids={D2}, engaged={}, now=now,

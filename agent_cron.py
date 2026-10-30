@@ -284,7 +284,7 @@ GREET_MAX_DIDS = 300           # trần số DID đã-chào lưu trong state (ch
 
 # --- (Engage) Chủ động ĐẶT CÂU HỎI thật cho peer độc lập để sinh cạnh reply (census) ---
 # Khác proactive_engage (chỉ phản ứng): module này GỢI peer trả lời -> tạo credit reply-
-# distance. Bề-rộng-hơn-bề-sâu + loại fleet nhà (PROACTIVE_DENY_DIDS dùng chung) -> KHÔNG
+# distance. Bề-rộng-hơn-bề-sâu + loại DID trong danh sách chặn (PROACTIVE_DENY_DIDS dùng chung) -> KHÔNG
 # tạo self-talking cluster. Logic giao thức ở flop_engage.py (thuần, test được). Default OFF.
 ENGAGE_ENABLED = os.environ.get("FLOP_ENGAGE_ENABLED", "").strip().lower() in (
     "1", "true", "on", "yes")
@@ -4072,7 +4072,7 @@ def auto_respond(private_key, did):
 
     # (Engage, GATED) Sau khi xử lý tin đến: chủ động ĐẶT 1 câu hỏi thật cho MỘT peer độc lập
     # vừa nói điều có chất -> gợi họ trả lời -> sinh cạnh reply-distance (census). Dùng tin GỘP
-    # mọi room (nhiều ứng viên hơn = bề rộng tốt hơn). Loại fleet + cooldown dài = không ring.
+    # mọi room (nhiều ứng viên hơn = bề rộng tốt hơn). Loại DID bị chặn + cooldown dài = không ring.
     if OUTCOME_GUARD:
         try:
             import flop_outcomes
@@ -4858,7 +4858,7 @@ def main():
                 dry_run=TCLK_DRY_RUN,
                 now_ms=now * 1000,
                 job_spec_fn=tclk_job_spec,       # bộ lọc chỉ-nhận-text: bỏ job media ngay ở accept
-                deny_dids=PROACTIVE_DENY_DIDS,   # KHÔNG nhận offer của fleet nhà -> chống tự-mua-bán (sybil)
+                deny_dids=PROACTIVE_DENY_DIDS,   # KHÔNG nhận offer của DID bị chặn -> chống tự-mua-bán (sybil)
             )
             save_state({"tclk_cursor": state.get("tclk_cursor"),
                         "tclk_accepted": state.get("tclk_accepted", []),
@@ -5082,12 +5082,12 @@ def main():
                         _new = _fm.record_settled(dict(_miner_stats), r.get("miner_did"))
                         _miner_stats.clear()
                         _miner_stats.update(_new)
-                    elif _oc == "skipped_fleet_miner":
-                        # Chốt chặn fleet bắn -> ĐẾM, trước đây nó chạy hoàn toàn âm thầm.
+                    elif _oc == "skipped_denied_miner":
+                        # Chốt chặn miner bị chặn bắn -> ĐẾM, trước đây nó chạy hoàn toàn âm thầm.
                         _new = _fm.record_denied(dict(_miner_stats))   # tính TRƯỚC khi clear
                         _miner_stats.clear()
                         _miner_stats.update(_new)
-                        continue   # trúng miner fleet -> bỏ phiên này, thử phiên khác (match khác)
+                        continue   # trúng miner bị chặn -> bỏ phiên này, thử phiên khác (match khác)
                     else:
                         break   # off/unconfigured/no_miner/insufficient/error -> KHÔNG spin vòng
                 session_status = f"{_settled}✓ {_last.get('stage', '-')}/{_last.get('outcome', '?')}"

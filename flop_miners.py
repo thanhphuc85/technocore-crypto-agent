@@ -11,7 +11,7 @@ Bộ chọn thợ đào: xem STRATEGY.md, checklist ngày 1, mục 7.
 
 Nếu phần lớn chi tiêu rơi vào MỘT thợ đào, nó trông giống quan hệ cặp đôi kể cả khi ta
 không hề chọn — và nếu không đo thì tới lúc bị hỏi sẽ không có gì để trả lời. Đếm số lần
-BỊ CHẶN vì trúng miner fleet cũng ở đây: chốt chặn đó hiện chạy âm thầm.
+BỊ CHẶN vì trúng miner trong danh sách chặn cũng ở đây: chốt chặn đó hiện chạy âm thầm.
 
 Thuần & test được: mọi hàm nhận/trả dict, không đọc env, không mạng, không file.
 """
@@ -58,7 +58,7 @@ def record_settled(stats, miner_did: str) -> dict:
 
 
 def record_denied(stats) -> dict:
-    """+1 lần BỊ CHẶN vì mempool ghép trúng miner fleet nhà."""
+    """+1 lần BỊ CHẶN vì mempool ghép trúng miner trong danh sách chặn."""
     s = _clean(stats)
     s["denied"] += 1
     return s
@@ -82,11 +82,11 @@ def format_line(summ: dict) -> str:
     """Một dòng gọn cho tin nhắn."""
     s = summ if isinstance(summ, dict) else {}
     if not s.get("total"):
-        return f"chưa có phiên nào · fleet bị chặn {s.get('denied', 0)}"
+        return f"chưa có phiên nào · chặn theo danh sách {s.get('denied', 0)}"
     share = s.get("top_share")
     return (f"{s['distinct']} người/{s['total']} phiên · "
             f"tập trung cao nhất {share * 100:.0f}% · "
-            f"fleet bị chặn {s.get('denied', 0)}")
+            f"chặn theo danh sách {s.get('denied', 0)}")
 
 
 def concentration_warning(summ: dict, threshold: float = 0.5, min_total: int = 10):

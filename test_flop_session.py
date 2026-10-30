@@ -135,15 +135,15 @@ def test_vary_request_produces_variety():
     assert len(flops_set) > 1                # KHÔNG phải N phiên giống hệt
 
 
-# --- Chốt chặn miner-fleet (chống self-deal khi match tự nhiên) --------------------
-def test_run_session_skips_fleet_miner(tmp_path):
+# --- Chốt chặn miner bị chặn (chống self-deal khi match tự nhiên) --------------------
+def test_run_session_skips_denied_miner(tmp_path):
     p = _ledger(tmp_path)
     tm.credit("10", path=p)
     MOCK_MINER = "did:key:zMOCKminer000000000000000000000000000000"   # thợ đào giả ở simulation
-    # miner match nằm trong deny (fleet) -> KHÔNG settle
+    # miner match nằm trong deny -> KHÔNG settle
     out = fsess.run_inference_session("a" * 16, 2000, 1000, [], "0.05", path=p,
                                       deny_dids={MOCK_MINER})
-    assert out["stage"] == "match" and out["outcome"] == "skipped_fleet_miner"
+    assert out["stage"] == "match" and out["outcome"] == "skipped_denied_miner"
     # miner match KHÔNG trong deny -> settle bình thường
     out2 = fsess.run_inference_session("a" * 16, 2000, 1000, [], "0.05", path=p,
                                        deny_dids={"did:key:zSomeoneElse"})

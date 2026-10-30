@@ -75,6 +75,6 @@ def test_tolerates_garbage_state():
 
 
 def test_denied_shows_even_with_no_settled_sessions():
-    """Chốt chặn fleet bắn mà chưa settle phiên nào -> vẫn phải thấy con số."""
+    """Chốt chặn miner bị chặn bắn mà chưa settle phiên nào -> vẫn phải thấy con số."""
     line = fm.format_line(fm.summarize(_build([], denied=3)))
-    assert "fleet bị chặn 3" in line
+    assert "chặn theo danh sách 3" in line

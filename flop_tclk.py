@@ -181,12 +181,12 @@ def encode_frame(frame: dict) -> str:
 def select_offers(messages, accepted_set, my_did, now_ms, allow_rails,
                   min_claim_window_ms, min_refund_gap_ms, max_n, deny_dids=None):
     """Lọc offer để NHẬN (payee). Điều kiện, tất cả phải đúng:
-      - frame offer hợp lệ, KHÔNG do mình đăng, KHÔNG do fleet nhà (deny_dids) đăng,
+      - frame offer hợp lệ, KHÔNG do mình đăng, KHÔNG do DID bị chặn (deny_dids) đăng,
       - chưa nhận (id chưa trong accepted_set),
       - role='payer' (bên gửi TRẢ TIỀN -> mình làm việc), lock='hash',
       - có rail giao nhau với allow_rails, còn hạn (expiresMs>now), deadline đủ margin,
       - offer_id tính lại KHỚP id trong frame (chống offer bịa id).
-    `deny_dids` = tập DID fleet nhà (main + fork) để KHÔNG tự-mua-bán nội bộ (luật FLOP
+    `deny_dids` = tập DID trong danh sách chặn để KHÔNG tự-mua-bán (luật FLOP
     'independent demand only': chi giữa ví cùng-nhóm = không tính + cờ sybil). Hàm THUẦN —
     không mạng, không side-effect. Trả list (tối đa max_n) kèm seq để tiến cursor."""
     allow = {r.strip().lower() for r in (allow_rails or []) if r and r.strip()}
