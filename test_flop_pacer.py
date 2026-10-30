@@ -116,13 +116,11 @@ def test_pacing_status_ignores_jitter(pfile, monkeypatch):
 
 # --- FLOP_DAILY_BUDGET=auto: ngân sách suy từ ví thật --------------------------------
 
-def _seed_ledger(tmp_path, balance, spends=()):
+def _seed_ledger(tmp_path, balance):
     """Dựng một sổ cái thật qua token_manager (không chế JSON bằng tay)."""
     import token_manager as tm
     led = str(tmp_path / "led.json")
     tm.credit(balance, memo="seed", path=led)
-    for amt, ts_off in spends:
-        tm.spend(amt, memo="x", path=led)
     return led
 
 
