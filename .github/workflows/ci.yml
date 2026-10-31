@@ -45,7 +45,7 @@ jobs:
         run: |
           python -m venv /tmp/rt && /tmp/rt/bin/pip install -q --require-hashes --no-deps -r requirements.lock
           /tmp/rt/bin/python -m pip check
-          /tmp/rt/bin/python -c "import agent_cron, token_manager, flop_session, flop_governor, flop_outcomes; print('runtime imports OK')"
+          /tmp/rt/bin/python -c "import agent_cron, token_manager, technocore_agent, flop_session, flop_governor, flop_outcomes; print('runtime imports OK')"
       - name: Dev lock installs and collects tests
         run: |
           python -m venv /tmp/dev && /tmp/dev/bin/pip install -q --require-hashes --no-deps -r requirements-dev.lock

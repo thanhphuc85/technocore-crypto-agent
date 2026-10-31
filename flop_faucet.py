@@ -8,7 +8,7 @@ thiếu cờ/URL/seam thì trả skipped_* và không gửi gì (đúng ethos ph
 hiện thực theo scheme thật của họ (ký DID -> POST/GET faucet -> trả {"amount":..}).
 
 Cặp đôi với flop_pacer: faucet NẠP đều token vào ví, pacer CHI đều token ra 24/7 ->
-tối đa hóa "Tổng testnet đã chi" (tử số của công thức mở khóa mainnet 3:1) một cách
+tối đa hóa tổng testnet đã chi (thứ FLOP dùng để tính phân bổ, nếu được ghi cho ví mình) một cách
 hợp lệ, không dump.
 
 Env:

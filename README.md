@@ -271,7 +271,8 @@ python agent_cron.py           # runs telemetry + auto-responder once
 | `FLOP_GATEWAY_LAG_PCT` / `_ALERT_HOURS` | optional | Telegram alert when spending is more than `LAG_PCT` % (10) behind plan for `ALERT_HOURS` (3) — testnet only |
 | `FLOP_GATEWAY_MAX_PER_RUN` / `_MAX_PER_DAY` | optional | Hard FLOP spend caps for the gateway path (defaults `100` per run, `2500` per UTC day; `0` disables). `FLOP_MAX_PER_RUN` and `FLOP_MAX_SPENDS_PER_HOUR` do not apply to this path |
 | `FLOP_GATEWAY_REPLAY_MAX` | optional | Replays of a hung request with the same `Idempotency-Key` (default `0`, off: the gateway does not document this header for chat). A quota drop after a replay disables replays |
-| `FLOP_ATTRIB_GATE` / `_GATE_MIN` | optional | Stop buying once `_GATE_MIN` FLOP (default `20`) of gateway spend has settled while the chain shows none for the wallet. On by default; `off` keeps buying unconfirmed |
+| `FLOP_ATTRIB_GATE` / `_GATE_MIN` | optional | Limit unconfirmed gateway spend to `max(_GATE_MIN, confirmed on chain)` FLOP (default minimum `20`), counting pending receipts and hung requests. On by default; `off` keeps buying unconfirmed |
+| `FLOP_LLM_PAID_MAX_PER_DAY` | optional | Daily call cap for paid LLM providers, `deepseek` and `openai` (default `300`; `0` disables) |
 | `FLOP_RUN_BUDGET_SEC` | optional | Per-run time budget (default `900`, below the 20-min job timeout): no new gateway call or faucet wait that could not finish in time |
 | `FLOP_RPC_URL` | optional | Testnet RPC endpoint — required (with a `submit_tx`) before a testnet spend will send |
 | `FLOP_SUBMIT_URL` | optional | Relayer endpoint the default `submit_tx` POSTs the signed tx to (falls back to `FLOP_RPC_URL`) |

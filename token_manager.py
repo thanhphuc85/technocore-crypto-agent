@@ -239,7 +239,7 @@ def is_session_spend(memo) -> bool:
     return str(memo or "").startswith(SESSION_MEMO_PREFIX)
 
 
-def _accrue_session(state: dict, token: str, amount: Decimal, now: int = None) -> None:
+def _accrue_session(state: dict, token: str, amount: Decimal, now: int = None, count: int = 1) -> None:
     """Tổng chạy RIÊNG cho chi tiêu phiên — thước đo thật, tách khỏi metering."""
     now = int(now if now is not None else time.time())
     day = time.strftime("%Y-%m-%d", time.gmtime(now))
@@ -247,9 +247,9 @@ def _accrue_session(state: dict, token: str, amount: Decimal, now: int = None) -
     cm[token] = _fmt((_parse_amount(cm.get(token, "0")) or Decimal(0)) + amount)
     cc = state.setdefault("session_count_cumulative", {})
     try:
-        cc[token] = int(cc.get(token, 0)) + 1
+        cc[token] = int(cc.get(token, 0)) + count
     except (TypeError, ValueError):
-        cc[token] = 1
+        cc[token] = count
     by = state.setdefault("session_by_day", {}).setdefault(token, {})
     by[day] = _fmt((_parse_amount(by.get(day, "0")) or Decimal(0)) + amount)
     for d in sorted(by)[:-DAY_KEEP]:
@@ -494,7 +494,7 @@ def spend(amount, memo, token: str = None, *, path: str = None,
             "mode": mode, "balance_after": new_bal, "tx_hash": tx_hash,
             "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         })
-        _accrue_unlock(state, token, amt)     # chi testnet THẬT -> tăng quyền mở khóa 3:1
+        _accrue_unlock(state, token, amt)     # chi testnet THẬT -> vào số đã xác nhận
         _accrue_cumulative(state, token, amt)  # mốc CHỈ TĂNG -> hydrate chọn đúng bản
         _accrue_day(state, token, amt)         # tổng theo ngày -> pacer không cần entries
         if is_session_spend(memo):             # thước đo airdrop THẬT
@@ -563,6 +563,8 @@ def record_gateway_spend(amount, memo, ref: str, token: str = None, *, path: str
     pend[token] = _fmt((_parse_amount(pend.get(token, "0")) or Decimal(0)) + amt)
     _accrue_cumulative(state, token, amt)
     _accrue_day(state, token, amt)
+    gc = state.setdefault("gateway_count", {})
+    gc[token] = int(gc.get(token, 0)) + 1
     _save_ledger(state, path)
     log(f"[ledger] gateway settled {_fmt(amt)} {token} for {memo} (ref {str(ref)[:12]}…, chain chưa xác nhận)")
     return {"outcome": "gateway_settled_unverified", "amount": _fmt(amt), "ref": ref}
@@ -594,7 +596,14 @@ def confirm_gateway_attribution(onchain_total, token: str = None, *, path: str =
     if newly <= 0:
         return {"outcome": "no_change"}
     _accrue_unlock(state, token, newly)
-    _accrue_session(state, token, newly)
+    # Chain chỉ cho TỔNG tiền, không cho số phiên: quy đổi theo tỉ lệ để số phiên khớp với tiền.
+    gm = state.setdefault("gateway_counted", {})
+    moved = int(gm.get(token, 0))
+    share = (done + newly) / (done + pend)
+    target = int(Decimal(int((state.get("gateway_count") or {}).get(token, 0))) * share)
+    n = max(0, target - moved)
+    gm[token] = moved + n
+    _accrue_session(state, token, newly, count=n)
     cur = _parse_amount(state["balances"].get(token, "0")) or Decimal(0)
     state["balances"][token] = _fmt(max(Decimal(0), cur - newly))
     pend_map[token], done_map[token] = _fmt(pend - newly), _fmt(done + newly)

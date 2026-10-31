@@ -21,6 +21,13 @@ def test_every_flop_module_is_packaged():
     assert shipped - needed == set(), f"py-modules trỏ tới file không tồn tại: {sorted(shipped - needed)}"
 
 
+def test_public_package_imports_and_exports_exist():
+    # #230 gỡ một hàm khỏi token_manager nhưng package vẫn import nó -> `import technocore_agent`
+    # crash mà không test nào thấy, vì mọi test đều import module phẳng.
+    import technocore_agent
+    assert [n for n in technocore_agent.__all__ if not hasattr(technocore_agent, n)] == []
+
+
 def test_coverage_measures_every_shipped_module():
     with open(os.path.join(HERE, "pyproject.toml"), encoding="utf-8") as f:
         text = f.read()
