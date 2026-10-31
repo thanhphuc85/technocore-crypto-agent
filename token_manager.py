@@ -93,15 +93,12 @@ def endpoint_url() -> str:
 
 
 def unlock_ratio() -> Decimal:
-    """Tỉ lệ mở khóa mainnet: mỗi `ratio` FLOP chi THẬT trên testnet mở khóa 1 FLOP
-    mainnet (mainnet = tổng_testnet_đã_chi / ratio). Mặc định 3 (FLOP_UNLOCK_RATIO);
-    giá trị sai/không dương -> 3.
+    """Tỉ lệ dùng cho SỐ THAM KHẢO `unlock_estimate`. Mặc định 3 (FLOP_UNLOCK_RATIO); giá trị
+    sai/không dương -> 3.
 
-    NGUỒN / TRUNG THỰC: con số 3:1 lấy từ TEASER + bản nháp agent.html (intro.flop.network,
-    27/08/2026). Yellow Paper (flop.finance/intro/yellowpaper/) KHÔNG xác nhận cơ chế này —
-    Appendix E còn để ngỏ "liệu spend-to-unlock có ship" và "dạng sublinear của điểm quy đổi".
-    Vì vậy ĐỪNG coi 3 là luật đã chốt; nó chỉ là mặc định có thể chỉnh, giữ ở đây để khi FLOP
-    công bố công thức thật thì đổi 1 env (hoặc bỏ hẳn) mà không phải sửa logic."""
+    Theo Yellow Paper R8.7 và FAQ testnet: 3:1 là cách MỞ KHOÁ phần airdrop agent SAU genesis, khi
+    chi số dư bị khoá vào phiên đã settle trên mainnet. Chi tiêu testnet không mở khoá gì; nó chỉ
+    quyết định phần phân bổ (chia theo tổng toàn mạng, công thức còn mở ở E.38)."""
     raw = os.environ.get("FLOP_UNLOCK_RATIO", "").strip()
     d = _parse_amount(raw) if raw else None
     return d if (d is not None and d > 0) else Decimal(3)
@@ -216,18 +213,13 @@ def credit(amount, token: str = None, memo: str = "faucet credit", path: str = N
             "balance_after": new_bal, "reason": "credited"}
 
 
-# --- Kế toán MỞ KHÓA MAINNET (mặc định 3:1 — GIẢ ĐỊNH TỪ TEASER, CHƯA CHỐT) --------
-# Mỗi `unlock_ratio` FLOP chi THẬT trên testnet (spent_onchain) mở khóa 1 FLOP mainnet.
-# LƯU Ý: tỉ lệ 3:1 là giả định từ teaser/agent.html; Yellow Paper chưa xác nhận (Appendix E
-# để ngỏ). Xem docstring unlock_ratio(). Đây là hạch toán nội bộ, không phải cam kết của FLOP.
-# Chi MÔ PHỎNG (spent_simulated) KHÔNG tính -> chống "farm" mở khóa bằng tiền giả.
-# Đây chỉ là HẠCH TOÁN quyền; claim FLOP thật là hành động tài chính, đi qua seam
-# gated claim_mainnet_unlock() (từ chối cho tới khi có cơ chế + endpoint thật).
+# --- Theo dõi chi tiêu testnet đã xác nhận (số tham khảo, KHÔNG phải quyền nhận token) -----
+# `spent_testnet` cộng khi chi on-chain thật hoặc khi chain xác nhận chi qua gateway đứng tên ví
+# mình. Chi MÔ PHỎNG không tính. Phân bổ airdrop do FLOP tính từ snapshot, không có bước claim ở đây.
 
 def _unlock_state(state: dict) -> dict:
     u = state.setdefault("unlock", {})
     u.setdefault("spent_testnet", {})
-    u.setdefault("claimed_mainnet", {})
     return u
 
 
@@ -362,70 +354,19 @@ def _accrue_unlock(state: dict, token: str, amount: Decimal) -> None:
 
 
 def unlock_status(token: str = None, path: str = None) -> dict:
-    """Tiến độ mở khóa mainnet cho token:
-       spent_testnet    — tổng FLOP đã chi THẬT trên testnet
-       unlocked_mainnet — = spent_testnet / ratio (quyền đã kiếm được)
-       claimed_mainnet  — đã claim
-       claimable        — còn claim được = max(unlocked - claimed, 0)."""
+    """Chi tiêu testnet đã xác nhận + số THAM KHẢO:
+       spent_testnet   — tổng FLOP chi thật, đã xác nhận trên testnet
+       unlock_estimate — spent_testnet / ratio: lượng sẽ mở khoá NẾU phân bổ bằng đúng số đã chi và
+                         số đó được chi lại trên mainnet. Không phải số đã mở khoá hay nhận được.
+       basis           — nhắc rõ tính chất của con số khi nó được công khai ở KV."""
     token = (token or default_token())
     u = _unlock_state(load_ledger(path))
     ratio = unlock_ratio()
     spent = _parse_amount(u["spent_testnet"].get(token, "0")) or Decimal(0)
-    claimed = _parse_amount(u["claimed_mainnet"].get(token, "0")) or Decimal(0)
-    unlocked = spent / ratio
-    claimable = unlocked - claimed
     return {
-        "token": token, "ratio": _fmt(ratio),
-        "spent_testnet": _fmt(spent), "unlocked_mainnet": _fmt(unlocked),
-        "claimed_mainnet": _fmt(claimed),
-        "claimable": _fmt(claimable if claimable > 0 else Decimal(0)),
+        "token": token, "ratio": _fmt(ratio), "spent_testnet": _fmt(spent),
+        "unlock_estimate": _fmt(spent / ratio), "basis": "estimate-not-entitlement",
     }
-
-
-def claim_mainnet_unlock(amount=None, token: str = None, *, path: str = None,
-                         claim_fn=None, claim_url: str = None,
-                         private_key=None, did: str = None, log=print) -> dict:
-    """CLAIM phần FLOP mainnet đã mở khóa. Đây là HÀNH ĐỘNG TÀI CHÍNH THẬT -> chỉ đi
-    qua seam được tiêm `claim_fn` + endpoint tường minh (FLOP_MAINNET_CLAIM_URL).
-    Thiếu một trong hai -> skipped_unconfigured (KHÔNG bao giờ bịa claim). Không có gì
-    để claim -> skipped_nothing. Thành công -> tăng claimed_mainnet. `amount` None =
-    claim toàn bộ phần claimable."""
-    token = (token or default_token())
-    st = unlock_status(token, path=path)
-    claimable = _parse_amount(st["claimable"]) or Decimal(0)
-    want = _parse_amount(amount) if amount is not None else claimable
-    if want is None or want <= 0:
-        return {**st, "outcome": "skipped_nothing", "reason": "không có phần mở khóa để claim"}
-    if want > claimable:
-        want = claimable
-
-    url = (claim_url or os.environ.get("FLOP_MAINNET_CLAIM_URL", "").strip())
-    if not url or claim_fn is None:
-        return {**st, "outcome": "skipped_unconfigured",
-                "reason": ("FLOP_MAINNET_CLAIM_URL trống — từ chối claim tới endpoint đoán mò"
-                           if not url else
-                           "chưa tiêm claim_fn — từ chối bịa giao dịch claim mainnet")}
-
-    signed = sign_transaction(private_key, did, token, _fmt(want), "mainnet-unlock-claim")
-    try:
-        result = claim_fn({"token": token, "amount": _fmt(want), "claim_url": url, "signed": signed}) or {}
-        tx_hash = result.get("tx_hash") or result.get("txHash")
-    except Exception as e:
-        return {**st, "outcome": "error_claim", "reason": f"claim mainnet thất bại: {e}"}
-    if not tx_hash:
-        # Như spend(): không tx hash = không bằng chứng -> KHÔNG tăng claimed_mainnet (nếu không,
-        # phần claimable bị trừ dù FLOP chưa về ví).
-        return {**st, "outcome": "error_claim",
-                "reason": f"claim_fn không trả tx hash (keys: {sorted(result)[:10]})"}
-
-    state = load_ledger(path)
-    u = _unlock_state(state)
-    prev = _parse_amount(u["claimed_mainnet"].get(token, "0")) or Decimal(0)
-    u["claimed_mainnet"][token] = _fmt(prev + want)
-    _save_ledger(state, path)
-    log(f"[unlock] claimed {_fmt(want)} {token} mainnet (tx {(tx_hash or '')[:12]}…)")
-    return {**unlock_status(token, path=path), "outcome": "claimed_mainnet",
-            "amount": _fmt(want), "tx_hash": tx_hash, "reason": "đã claim phần mở khóa mainnet"}
 
 
 # --- Nối submit_tx + nạp khóa agent (lazy, có cache) ------------------------------
@@ -588,9 +529,11 @@ GATEWAY_REFS_KEEP = 100      # gateway trả tối đa ~20 biên nhận/lần ->
 def record_gateway_spend(amount, memo, ref: str, token: str = None, *, path: str = None,
                          log=print) -> dict:
     """Ghi sổ một lần chi ĐÃ XẢY RA ở gateway FLOP (api.flop.network trừ quota; `ref` = id
-    phản hồi làm bằng chứng). Khác spend(): agent không tự gửi giao dịch — gateway đã chi —
-    nên chỉ ghi nhận. CHỈ ở chế độ testnet: devnet/mô phỏng không bao giờ vào sổ thật.
-    Số dư kẹp ở 0 (quota gateway có thể không trùng số dư faucet trong sổ)."""
+    biên nhận gateway, KHÔNG phải tx hash). Khác spend(): agent không tự gửi giao dịch — gateway
+    đã chi — nên chỉ ghi nhận. CHỈ ở chế độ testnet: devnet/mô phỏng không bao giờ vào sổ thật.
+
+    Đây là số CHƯA XÁC NHẬN: không trừ số dư ví (quota gateway không rút từ ví, đo devnet 2026-10-28)
+    và không vào thước đo airdrop. confirm_gateway_attribution() làm hai việc đó khi chain xác nhận."""
     token = (token or default_token())
     amt = _parse_amount(amount)
     if ledger_mode() != "testnet":
@@ -606,12 +549,10 @@ def record_gateway_spend(amount, memo, ref: str, token: str = None, *, path: str
     if h in refs:
         return {"outcome": "duplicate", "reason": f"ref {str(ref)[:24]} đã ghi sổ trước đó"}
     state["gateway_refs"] = (refs + [h])[-GATEWAY_REFS_KEEP:]
-    cur = _parse_amount(state["balances"].get(token, "0")) or Decimal(0)
-    new_bal = _fmt(max(Decimal(0), cur - amt))
-    state["balances"][token] = new_bal
+    bal = state["balances"].get(token, "0")
     state["entries"].append({
         "kind": "spend", "token": token, "amount": _fmt(amt), "memo": memo, "mode": "testnet",
-        "balance_after": new_bal, "tx_hash": str(ref)[:80], "via": "gateway",
+        "balance_after": bal, "ref": str(ref)[:80], "via": "gateway",
         "attribution": "unverified",
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     })
@@ -622,11 +563,9 @@ def record_gateway_spend(amount, memo, ref: str, token: str = None, *, path: str
     pend[token] = _fmt((_parse_amount(pend.get(token, "0")) or Decimal(0)) + amt)
     _accrue_cumulative(state, token, amt)
     _accrue_day(state, token, amt)
-    if is_session_spend(memo):
-        _accrue_session(state, token, amt)
     _save_ledger(state, path)
-    log(f"[ledger] gateway spent {_fmt(amt)} {token} for {memo} (ref {str(ref)[:12]}…)")
-    return {"outcome": "spent_onchain", "amount": _fmt(amt), "balance_after": new_bal, "tx_hash": ref}
+    log(f"[ledger] gateway settled {_fmt(amt)} {token} for {memo} (ref {str(ref)[:12]}…, chain chưa xác nhận)")
+    return {"outcome": "gateway_settled_unverified", "amount": _fmt(amt), "ref": ref}
 
 
 def gateway_attribution(token: str = None, path: str = None) -> dict:
@@ -639,8 +578,9 @@ def gateway_attribution(token: str = None, path: str = None) -> dict:
 
 def confirm_gateway_attribution(onchain_total, token: str = None, *, path: str = None,
                                 log=print) -> dict:
-    """Chain (explorer) báo ví mình đã chi `onchain_total` FLOP: chuyển phần chi qua gateway đang
-    chờ xác nhận (tối đa phần chain mới ghi thêm) sang quyền mở khoá 3:1. Chỉ ở chế độ testnet."""
+    """Chain (explorer) báo ví mình đã chi `onchain_total` FLOP: phần chi qua gateway đang chờ (tối đa
+    phần chain mới ghi thêm) trở thành chi tiêu đã xác nhận: vào thước đo airdrop và trừ số dư ví.
+    Chỉ ở chế độ testnet."""
     token = (token or default_token())
     total = _parse_amount(onchain_total)
     if ledger_mode() != "testnet" or total is None or total <= 0:
@@ -654,9 +594,12 @@ def confirm_gateway_attribution(onchain_total, token: str = None, *, path: str =
     if newly <= 0:
         return {"outcome": "no_change"}
     _accrue_unlock(state, token, newly)
+    _accrue_session(state, token, newly)
+    cur = _parse_amount(state["balances"].get(token, "0")) or Decimal(0)
+    state["balances"][token] = _fmt(max(Decimal(0), cur - newly))
     pend_map[token], done_map[token] = _fmt(pend - newly), _fmt(done + newly)
     _save_ledger(state, path)
-    log(f"[ledger] chain xác nhận {_fmt(newly)} {token} chi qua gateway đứng tên ví mình -> cộng mở khoá 3:1")
+    log(f"[ledger] chain xác nhận {_fmt(newly)} {token} chi qua gateway đứng tên ví mình")
     return {"outcome": "confirmed", "amount": _fmt(newly)}
 
 
@@ -969,11 +912,11 @@ def _demo() -> None:
         os.environ["TESTNET_ENABLED"] = prev
     us = unlock_status(path=path)
     print(f"unlock: sau chi 9 FLOP testnet thật -> spent={us['spent_testnet']} "
-          f"· unlocked_mainnet={us['unlocked_mainnet']} · claimable={us['claimable']}")
+          f"· ước tính tham khảo {us['unlock_estimate']} (không phải số đã mở khoá)")
 
     print("\nPhạm vi trung thực: simulation KHÔNG lên chain và KHÔNG tích lũy mở khóa. "
           "Chỉ TESTNET_ENABLED=true + FLOP_RPC_URL + submit_tx thật mới chi thật & tích lũy. "
-          "Claim FLOP mainnet là hành động tài chính -> qua seam gated claim_mainnet_unlock().")
+          "Phân bổ airdrop do FLOP tính từ snapshot testnet.")
 
 
 if __name__ == "__main__":

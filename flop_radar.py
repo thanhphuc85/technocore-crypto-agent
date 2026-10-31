@@ -38,6 +38,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 
 KEY = "testnet_radar"
 OPENAPI_URL = "https://technocore.chat/openapi.json"
@@ -208,6 +209,16 @@ def parse_spent(text):
         return None
 
 
+def parse_balance(text):
+    """balance (int, đơn vị raw 1e18) của một ví trên explorer; None nếu hỏng."""
+    d = _json(text)
+    v = d.get("balance") if isinstance(d, dict) else None
+    try:
+        return int(v) if isinstance(v, (str, int)) else None
+    except ValueError:
+        return None
+
+
 def _host(url):
     return url.split("//", 1)[-1].split("/", 1)[0]
 
@@ -267,6 +278,8 @@ def check_attribution(r: dict, fetch_fn, wallet=None, explorers=EXPLORERS) -> li
     offers = dict(r.get("attr_offers") or {})
     spent = dict(r.get("attr_spent") or {})
     spent_raw = dict(r.get("attr_spent_raw") or {})      # số raw (1e18) — so với sổ cái
+    spent_at = dict(r.get("attr_spent_at") or {})        # lúc đọc được: số cũ không còn là bằng chứng
+    balance_raw = dict(r.get("attr_balance_raw") or {})  # số dư ví thật, đối chiếu với sổ
     for base in explorers:
         h = _host(base)
         t = parse_total(fetch_fn(f"{base}/api/session-offers"))
@@ -282,8 +295,12 @@ def check_attribution(r: dict, fetch_fn, wallet=None, explorers=EXPLORERS) -> li
                     lines.append(f"• {h}: VÍ MÌNH {wallet[:6]}…{wallet[-4:]} đã có chi tiêu ghi trên "
                                  f"chain ({v / 1e18:.4g} FLOP) — chi tiêu đang đứng tên mình")
                 spent[h] = 0 if v == 0 else 1
-                spent_raw[h] = v
+                spent_raw[h], spent_at[h] = v, int(time.time())
+            b = parse_balance(fetch_fn(f"{base}/api/accounts/{wallet}"))
+            if b is not None:
+                balance_raw[h] = b
     r["attr_offers"], r["attr_spent"], r["attr_spent_raw"] = offers, spent, spent_raw
+    r["attr_spent_at"], r["attr_balance_raw"] = spent_at, balance_raw
     return lines
 
 

@@ -1,12 +1,13 @@
 """
-04 — 3:1 mainnet-unlock accounting with a fake ``submit_tx``.
+04 — confirmed testnet spend tracking with a fake ``submit_tx``.
 
-Shows how real testnet spend accrues toward the mainnet unlock. Only
-``spent_onchain`` spends count — simulated spends never do, so unlock credit
-can't be farmed with mock spend. Here we flip ``TESTNET_ENABLED=true`` and inject
+Shows how real testnet spend is tracked. Only ``spent_onchain`` spends count —
+simulated spends never do. FLOP's 3:1 unlock applies to the locked airdrop grant
+after genesis, so the figure below is a reference estimate, not an entitlement.
+Here we flip ``TESTNET_ENABLED=true`` and inject
 a **fake** ``submit_tx`` lambda that returns a canned tx hash, so ``spend``
 takes the on-chain path without any network. ``unlock_status`` then reports
-``unlocked_mainnet = spent_testnet / FLOP_UNLOCK_RATIO`` (default ratio 3).
+``unlock_estimate = spent_testnet / FLOP_UNLOCK_RATIO`` (default ratio 3).
 
 No private key and no network are required. Writes to a throwaway temp ledger.
 
@@ -58,10 +59,9 @@ def main() -> int:
     st = tm.unlock_status(path=ledger)
     print(
         f"unlock: spent_testnet={st['spent_testnet']}  ratio=1/{st['ratio']}  "
-        f"unlocked_mainnet={st['unlocked_mainnet']}  claimable={st['claimable']}"
+        f"unlock_estimate={st['unlock_estimate']} ({st['basis']})"
     )
-    # 9 testnet FLOP spent / 3 == 3 FLOP unlocked on mainnet
-    return 0 if st["unlocked_mainnet"] == "3" else 1
+    return 0 if st["unlock_estimate"] == "3" else 1
 
 
 if __name__ == "__main__":

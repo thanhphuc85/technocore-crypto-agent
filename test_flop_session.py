@@ -77,7 +77,7 @@ def test_settle_accrues_unlock_3to1_on_testnet(tmp_path, monkeypatch):
     paid = fsess.settle(req, path=p, submit_tx=lambda tx: {"tx_hash": "0xSESS01"})
     assert paid["outcome"] == "spent_onchain"
     us = tm.unlock_status(path=p)
-    assert us["spent_testnet"] == "9" and us["unlocked_mainnet"] == "3"   # 9/3 = 3
+    assert us["spent_testnet"] == "9" and us["unlock_estimate"] == "3"    # 9/3 = 3, chỉ tham khảo
 
 
 def test_submit_request_testnet_unconfigured(tmp_path, monkeypatch):

@@ -74,7 +74,9 @@ def observe(state: dict, *, settled_onchain: int, status: str, spent_today_oncha
     # dưới) không khớp "pace-wait" -> mỗi lượt chờ bị đếm là "không chi" -> báo động GIẢ sau 6
     # lượt, lặp mỗi 6h. Coi là TRUNG TÍNH: không đếm lỗi, cũng KHÔNG xoá đếm — nếu settlement hỏng
     # thật, các lượt mua (chưa settle) xen giữa lượt chờ vẫn tích lại và báo động được.
-    if settled_onchain <= 0 and re.search(r"gateway/(pace_wait|exhausted)$", str(status)):
+    # daily_cap (phanh operator đặt) và attribution_hold (có Telegram riêng) cũng là trung tính.
+    if settled_onchain <= 0 and re.search(r"gateway/(pace_wait|exhausted|daily_cap|attribution_hold)$",
+                                          str(status)):
         return out
     if settled_onchain > 0 or healthy_wait:
         if w.get("alerted_ts") and settled_onchain > 0:

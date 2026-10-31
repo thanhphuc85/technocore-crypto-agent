@@ -7,7 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Spend-path audit.** Gateway spend is no longer reported as on-chain or counted in the airdrop
+  metric until the explorer confirms it under the wallet (`gateway_settled_unverified`), and buying
+  stops after `FLOP_ATTRIB_GATE_MIN` FLOP unconfirmed. Failed runs keep their receipt results, so
+  miner stats and foreign-channel alerts are not lost and booked spend is persisted at once. A hung
+  request restored from KV is reconciled instead of dropped, a hung kibble job is not sent again,
+  and an empty catalog keeps the bearer. Malformed `usage` no longer loses a paid response; receipts
+  with only `settled_spend_raw` are booked; receipts that leave the response unsettled are counted.
+- Gemini empty replies fall back to the next provider; brief answers pass `guard_output`.
+- `TESTNET_ENABLED` with a non-testnet `FLOP_GATEWAY_NETWORK` refuses to buy.
+
+### Changed
+- `FLOP_GATEWAY_REPLAY_MAX` defaults to `0`. New hard caps `FLOP_GATEWAY_MAX_PER_RUN` (100) and
+  `FLOP_GATEWAY_MAX_PER_DAY` (2500). The mempool backend is refused on testnet.
+- `unlock_status()` returns `unlock_estimate` (reference only) instead of `unlocked_mainnet`,
+  `claimed_mainnet` and `claimable`: 3:1 unlocks the locked grant after genesis, not testnet spend.
+
 ### Removed
+- **`token_manager.claim_mainnet_unlock()`** and `FLOP_MAINNET_CLAIM_URL`: nothing called them, and
+  the published design credits allocations at genesis with no claim step.
 - **`flop_stake.py` and `flop_units.py`** (and their tests) — neither was wired into the agent
   (`agent_cron` never imported them; `FLOP_STAKE_ENABLED` was not mapped in the workflow). FLOP has
   not published a staking API. Ledgers keep their `stake` key so any old delegated position is not
