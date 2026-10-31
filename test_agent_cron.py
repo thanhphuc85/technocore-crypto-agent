@@ -117,6 +117,64 @@ def test_save_state_merges_independent_keys(tmp_path, monkeypatch):
     assert st == {"last_seq": 5, "last_manifest": 99}
 
 
+def test_save_state_failure_keeps_the_previous_file(tmp_path, monkeypatch):
+    p = tmp_path / "state.json"
+    monkeypatch.setattr(ac, "STATE_FILE", str(p))
+    ac.save_state({"a": 1})
+    ac.save_state({"bad": object()})                     # json.dump vỡ giữa chừng
+    assert ac.load_state() == {"a": 1}
+    assert ac.state_file_status() == "ok"
+
+
+def test_state_file_status_tells_missing_from_corrupt(tmp_path, monkeypatch):
+    p = tmp_path / "state.json"
+    monkeypatch.setattr(ac, "STATE_FILE", str(p))
+    assert ac.state_file_status() == "missing"
+    p.write_text('{"a": 1', encoding="utf-8")
+    assert ac.state_file_status() == "corrupt" and ac.load_state() == {}
+    p.write_text("[1]", encoding="utf-8")
+    assert ac.state_file_status() == "corrupt" and ac.load_state() == {}
+
+
+def test_state_loss_alerts_with_a_durable_rate_limit(monkeypatch):
+    sent = []
+    saved = []
+    monkeypatch.setattr(ac, "_telegram_send", lambda m: sent.append(m) or True)
+    monkeypatch.setattr(ac, "save_state", lambda d: saved.append(d))
+    st = {"last_seq": 5}                                 # KV cho thấy agent đã có lịch sử
+    assert ac.state_loss_check(st, "missing", 1_800_000_000) is True
+    assert ac.state_loss_check(st, "missing", 1_800_000_300) is True
+    assert len(sent) == 1 and "Restore agent state" in sent[0]
+    assert saved == [{"last_state_loss_alert": 1_800_000_000}]
+    assert "last_state_loss_alert" in ac.DURABLE_STATE_KEYS
+    ac.state_loss_check(st, "corrupt", 1_800_000_000 + 7 * 3600)
+    assert len(sent) == 2 and "bị hỏng" in sent[1]
+
+
+def test_state_loss_stays_quiet_when_ok_or_brand_new(monkeypatch):
+    monkeypatch.setattr(ac, "_telegram_send", lambda m: pytest.fail("không được báo"))
+    assert ac.state_loss_check({"last_seq": 5}, "ok", 1_800_000_000) is False
+    assert ac.state_loss_check({}, "missing", 1_800_000_000) is False      # agent mới, chưa có lịch sử
+
+
+def test_main_checks_for_state_loss_after_hydrating(tmp_path, monkeypatch):
+    monkeypatch.setattr(ac, "SEED_HEX", SEED_HEX)
+    monkeypatch.setattr(ac, "RUNNER_ROLE", "primary")
+    monkeypatch.setattr(ac, "STATE_FILE", str(tmp_path / "gone.json"))
+    monkeypatch.setattr(ac, "hydrate_durable_from_kv", lambda st, *a, **k: st.update(last_seq=7))
+    for name in ("hydrate_ledger_from_kv", "write_heartbeat", "persist_durable_to_kv",
+                 "persist_ledger_to_kv", "_write_summary", "check_price_alert"):
+        monkeypatch.setattr(ac, name, lambda *a, **k: None)
+    monkeypatch.setattr(ac, "broadcast_telemetry", lambda *a, **k: True)
+    monkeypatch.setattr(ac, "broadcast_manifest", lambda *a, **k: True)
+    monkeypatch.setattr(ac, "auto_respond", lambda *a, **k: (0, 0))
+    monkeypatch.setattr(ac, "_server_ok_count", 1)
+    seen = []
+    monkeypatch.setattr(ac, "state_loss_check", lambda st, status, now: seen.append((status, st.get("last_seq"))))
+    ac.main()
+    assert seen == [("missing", 7)]
+
+
 def test_load_state_missing_file_is_empty(tmp_path, monkeypatch):
     monkeypatch.setattr(ac, "STATE_FILE", str(tmp_path / "nope.json"))
     assert ac.load_state() == {}

@@ -771,9 +771,23 @@ def short_nick(did: str) -> str:
 def load_state() -> dict:
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
     except Exception:
         return {}
+
+
+def state_file_status() -> str:
+    """'ok' / 'missing' / 'corrupt' của state.json đầu lượt. Runner Actions luôn sạch nên 'missing'
+    = không khôi phục được cache (đo 2026-10-30: "Egress is over the account limit") — bước
+    restore chỉ cảnh báo, run vẫn xanh, nên agent phải tự nhận ra."""
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            return "ok" if isinstance(json.load(f), dict) else "corrupt"
+    except FileNotFoundError:
+        return "missing"
+    except Exception:
+        return "corrupt"
 
 
 def save_state(state: dict) -> None:
@@ -782,8 +796,12 @@ def save_state(state: dict) -> None:
     try:
         merged = load_state()
         merged.update(state)
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
+        # Ghi file tạm rồi đổi tên: lỗi giữa chừng hoặc run bị giết không để lại state.json dở dang
+        # (load_state sẽ coi là rỗng và lần ghi kế tiếp xoá sạch các khóa còn lại).
+        tmp = f"{STATE_FILE}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(merged, f)
+        os.replace(tmp, STATE_FILE)
     except Exception as e:
         print(f"[state] không lưu được: {e}")
 
@@ -1580,7 +1598,7 @@ def primary_alive(now: int, within_min: float, private_key=None) -> bool:
 # runner chính lẫn phụ) rồi hydrate lúc khởi động -> cooldown được tôn trọng ở mọi nơi.
 _TS_DURABLE_KEYS = ("last_seq", "last_telemetry", "last_manifest", "last_digest",
                     "last_status_feed", "last_recap", "last_weekly_sample",
-                    "last_daily_report", "last_radar")
+                    "last_daily_report", "last_radar", "last_state_loss_alert")
 # gateway_inflight: request gateway đang treo (timeout/5xx mơ hồ) — mất Actions cache vẫn đối soát được.
 _BLOB_DURABLE_KEYS = ("weekly_samples", "last_alert_price", "testnet_radar", "gateway_inflight")
 # Khóa BỘ ĐẾM cộng dồn: hợp nhất bằng MAX từng ô (đếm chỉ tăng) — KHÔNG dùng luật blob
@@ -1683,6 +1701,24 @@ def hydrate_durable_from_kv(state: dict, private_key=None) -> None:
                 kt.merge_lifetime(state, remote[k], key=k)
             except Exception:
                 pass
+
+
+STATE_LOSS_REALERT_H = 6
+
+
+def state_loss_check(state: dict, status: str, now: int) -> bool:
+    """state.json mất/hỏng đầu lượt mà KV cho thấy agent đã có lịch sử -> báo Telegram (tối đa 1 lần
+    mỗi STATE_LOSS_REALERT_H giờ, mốc bền trên KV). Agent mới chạy lần đầu không báo. Không ném lỗi."""
+    if status == "ok" or not any(state.get(k) for k in _TS_DURABLE_KEYS):
+        return False
+    msg = (f"⚠️ state.json {'không khôi phục được' if status == 'missing' else 'bị hỏng'} đầu lượt chạy "
+           "(xem bước Restore agent state). Sổ cái và các mốc thời gian vẫn lấy từ KV. Mất: danh sách job "
+           "kibble đã làm, tỷ lệ useful gần đây, thống kê miner, tclk, trạng thái gateway (bearer).")
+    print(f"[state] {msg}")
+    if _due(state, "last_state_loss_alert", STATE_LOSS_REALERT_H, now) and _telegram_send(msg):
+        state["last_state_loss_alert"] = now
+        save_state({"last_state_loss_alert": now})
+    return True
 
 
 def persist_durable_to_kv(private_key, did) -> None:
@@ -4674,11 +4710,13 @@ def main():
         print(f"[jitter] ngủ {_jit:.0f}s trước khi chạy (chống lockstep)")
         time.sleep(_jit)
 
+    _state_status = state_file_status()
     state = load_state()
     # Hydrate mốc cooldown/cursor BỀN từ KV -> chống re-post khi state cục bộ mất/lệch giữa runner
     # và đồng bộ cooldown giữa 2 runner. Đặt TRƯỚC mọi kiểm tra _due bên dưới.
     hydrate_durable_from_kv(state, private_key)
     hydrate_ledger_from_kv(state, private_key)   # sổ cái BỀN (KV ký + bản sao state.json)
+    state_loss_check(state, _state_status, int(time.time()))
     # Nạp danh sách model Gemini đã 404 (vĩnh viễn) -> run này khỏi thử lại, không phí call.
     _gemini_404.update(state.get("gemini_404") or [])
     # Model chạy được lần trước + model đang né 429 -> run này gọi thẳng, không dò lại.
