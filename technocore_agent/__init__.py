@@ -56,10 +56,9 @@ from flop_tx import (
     relay_submit_tx,
 )
 
-# --- FLOP token ledger + 3:1 mainnet-unlock accounting (token_manager) ------
+# --- FLOP token ledger + confirmed spend tracking (token_manager) ------------
 from token_manager import (
     check_balance,
-    claim_mainnet_unlock,
     credit,
     default_token,
     ledger_mode,
@@ -90,7 +89,6 @@ __all__ = [
     "check_balance",
     "sign_transaction",
     "unlock_status",
-    "claim_mainnet_unlock",
     "meter_inference",
     "load_ledger",
     "ledger_mode",

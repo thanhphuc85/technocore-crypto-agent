@@ -322,7 +322,8 @@ def test_hold_stops_buying_but_keeps_reading_receipts(monkeypatch, telegram):
 
 def test_hold_lifts_when_the_chain_shows_our_spend(monkeypatch, telegram):
     _pending()
-    st = {flop_radar.KEY: {"attr_spent_raw": {"explorer.testnet.flop.network": 5 * 10 ** 18}}}
+    st = {flop_radar.KEY: {"attr_spent_raw": {"explorer.testnet.flop.network": 30 * 10 ** 18}}}
+    ac.gateway_attribution_step(st, NOW)
     assert ac.attribution_hold(st, NOW) is None
 
 
@@ -379,7 +380,7 @@ def test_radar_records_wallet_balance_and_reading_time():
     flop_radar.check_attribution(r, fetch, wallet=wallet, explorers=("https://explorer.testnet.flop.network",))
     h = "explorer.testnet.flop.network"
     assert r["attr_balance_raw"][h] == 25 * 10 ** 18 and r["attr_spent_at"][h] > 0
-    assert ac.chain_balance({flop_radar.KEY: r}) == 25
+    assert ac.chain_balance({flop_radar.KEY: r}, r["attr_balance_at"][h]) == 25
 
 
 # --- cấu hình và đường cấm --------------------------------------------------------------
@@ -445,3 +446,194 @@ def test_brief_answer_passes_the_output_guard():
     ac._brief_add(st, NOW, "q", "see https://evil.example now", 1.0)
     items = st[ac.BRIEF_KEY]["items"]
     assert st[ac.BRIEF_KEY]["n"] == 2 and len(items) == 1 and "evil.example" not in items[0]["a"]
+
+
+# --- audit vòng 2: lỗ hổng trong chính bản sửa ------------------------------------------
+
+def test_run_cancelled_mid_call_cannot_lose_booked_spend(monkeypatch, telegram):
+    class Killed(BaseException):
+        """Như SIGTERM khi huỷ job: không đi qua `except Exception`."""
+
+    def kill(body, headers):
+        raise Killed()
+    st = fresh()
+    srv = Srv()
+    srv.receipts = [rc("r1")]
+    srv.chat_fn = kill
+    monkeypatch.setattr(ac, "_gateway_http", srv)
+    pin_now(monkeypatch, NOW)
+    with pytest.raises(Killed):
+        ac.gateway_session_step(st, KEY, NOW)
+    disk = ac.load_state()
+    assert disk[fg.KEY]["receipts_seen"] == ["r1"]
+    snap = disk["ledger_snapshot_testnet"]              # sổ phải đi trước "đã thấy"
+    assert snap["gateway_unattributed"]["FLOP"] == "6.5"
+
+
+def test_daily_cap_and_replay_stop_survive_state_loss(monkeypatch, telegram):
+    import time
+    day = time.strftime("%Y-%m-%d", time.gmtime(NOW))
+    st = {"gateway_inflight": {"inflight": None, "profile": fg.profile_of("testnet"), "at": NOW,
+                               "day_spent": {"day": day, "spent": fg.DEFAULT_MAX_PER_DAY},
+                               "replay_unsafe": NOW - 5}}
+    srv = Srv()
+    monkeypatch.setattr(ac, "_gateway_http", srv)
+    pin_now(monkeypatch, NOW)
+    status = ac.gateway_session_step(st, KEY, NOW)[0]
+    assert status.endswith("gateway/daily_cap") and srv.chats == [] and st[fg.KEY]["replay_unsafe"]
+    durable = st["gateway_inflight"]
+    assert durable["day_spent"]["spent"] == fg.DEFAULT_MAX_PER_DAY and durable["replay_unsafe"]
+
+
+def test_foreign_channel_marker_is_durable():
+    assert ac.FOREIGN_SEEN_KEY in ac.DURABLE_STATE_KEYS and "llm_paid" in ac.DURABLE_STATE_KEYS
+
+
+def test_tiny_confirmed_amount_does_not_open_the_gate(monkeypatch, telegram):
+    _pending("500")
+    monkeypatch.setattr(ac, "save_state", lambda d: None)
+    st = {flop_radar.KEY: {"attr_spent_raw": {"explorer.testnet.flop.network": 10 ** 16}}}
+    assert ac.gateway_attribution_step(st, NOW) == "MISMATCH" and len(telegram) == 1
+    assert "0.01" in ac.attribution_hold(st, NOW)
+
+
+def test_large_confirmed_history_tolerates_explorer_lag():
+    _pending("1000")
+    tm.confirm_gateway_attribution("1000")
+    tm.record_gateway_spend("50", "inference-session gateway m", "r-2")
+    st = {flop_radar.KEY: {"attr_spent_raw": {"explorer.testnet.flop.network": 1000 * 10 ** 18}}}
+    assert ac.attribution_hold(st, NOW) is None and ac.attribution_room(st, NOW) == pytest.approx(950)
+
+
+def test_exposure_counts_pending_receipts_and_hung_requests():
+    _pending("5")
+    st = {fg.KEY: {"receipts_open": {"a": [NOW, 6.5], "old-format": NOW}, "inflight": {"max_cost": 3.5},
+                   "stats": {"receipts_lost_flop": 1}}}
+    assert ac.attribution_room(st, NOW) == pytest.approx(20 - 5 - 6.5 - 3.5 - 1)
+
+
+def test_room_caps_the_buy_within_the_run(monkeypatch, telegram):
+    _pending("15")
+    st = fresh()
+    srv = Srv(quota=500000.0)
+    monkeypatch.setattr(ac, "_gateway_http", srv)
+    pin_now(monkeypatch, NOW)
+    ac.gateway_session_step(st, KEY, NOW)
+    assert srv.chats and sum(c["body"]["max_cost_flop"] for c in srv.chats) <= 5 * 1.1
+
+
+def test_room_below_one_call_holds_instead_of_waiting_silently(monkeypatch, telegram):
+    _pending("19.9")
+    st = fresh()
+    srv = Srv()
+    monkeypatch.setattr(ac, "_gateway_http", srv)
+    pin_now(monkeypatch, NOW)
+    assert ac.gateway_session_step(st, KEY, NOW)[0].endswith("gateway/attribution_hold")
+    assert srv.chats == [] and sum("DỪNG mua" in m for m in telegram) == 1
+
+
+def test_gate_sees_receipts_from_the_previous_run(monkeypatch, telegram):
+    # Biên nhận 'estimated' chỉ đọc được SAU khi vào run_step: gate phải chạy sau bước đó.
+    _pending("5")
+    st = fresh()
+    srv = Srv()
+    srv.receipts = [rc("e1", state="estimated", spend=0, reserved_spend=16)]
+    monkeypatch.setattr(ac, "_gateway_http", srv)
+    pin_now(monkeypatch, NOW)
+    assert ac.gateway_session_step(st, KEY, NOW)[0].endswith("gateway/attribution_hold")
+
+
+def test_named_testnet_uses_the_testnet_explorer(monkeypatch):
+    monkeypatch.setenv("FLOP_GATEWAY_NETWORK", "flop-testnet-1")
+    assert ac._explorer_base("flop-testnet-1") == "https://explorer.testnet.flop.network"
+    _pending()
+    st = {flop_radar.KEY: {"attr_spent_raw": {"explorer.testnet.flop.network": 30 * 10 ** 18}}}
+    assert ac.onchain_spent(st, NOW) == 30
+
+
+def test_report_does_not_count_gateway_calls_as_metering():
+    tm.credit("100")
+    for i in range(4):
+        tm.record_gateway_spend("5", "inference-session gateway m", f"r{i}")
+    s = flop_report.summarize(tm.load_ledger(), NOW, token="FLOP", mode="testnet")
+    assert s["meter_count"] == 0
+    tm.confirm_gateway_attribution("10")                # 2/4 phiên về tiền
+    s = flop_report.summarize(tm.load_ledger(), NOW, token="FLOP", mode="testnet")
+    assert s["session_count"] == 2 and s["meter_count"] == 0
+
+
+def test_hydrate_keeps_the_ledger_with_more_confirmed_spend():
+    _pending()
+    stale = {**tm.load_ledger(), "mode": "testnet"}
+    tm.confirm_gateway_attribution("30")
+    newer = {**tm.load_ledger(), "mode": "testnet"}
+    assert ac._ledger_progress(newer) > ac._ledger_progress(stale)
+
+
+def test_stale_chain_balance_is_ignored():
+    host = "explorer.testnet.flop.network"
+    r = {"attr_balance_raw": {host: 25 * 10 ** 18}, "attr_balance_at": {host: NOW - 7 * 3600}}
+    assert ac.chain_balance({flop_radar.KEY: r}, NOW) is None
+    r["attr_balance_at"][host] = NOW - 60
+    assert ac.chain_balance({flop_radar.KEY: r}, NOW) == 25
+
+
+def test_watchdog_recovery_does_not_claim_real_spend():
+    st = {}
+    flop_watchdog.observe(st, settled_onchain=0, status="0✓ gateway/error", spent_today_onchain=0, now=NOW,
+                          alert_runs=1)
+    out = flop_watchdog.observe(st, settled_onchain=1, status="1✓ gateway/spent", spent_today_onchain=0, now=NOW + 60)
+    assert "CHI THẬT" not in out["recovered"] and "chưa phải bằng chứng" in out["recovered"]
+
+
+def _gemini_only(monkeypatch):
+    monkeypatch.setattr(ac, "GEMINI_API_KEY", "x")
+    for name in ("DEEPSEEK_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY"):
+        monkeypatch.setattr(ac, name, "")
+    monkeypatch.setattr(ac, "LLM_PROVIDER_ORDER", ["gemini"])
+    monkeypatch.setattr(ac, "LLM_PROVIDER", "auto")
+    monkeypatch.setattr(ac, "GEMINI_MODEL", "gm")
+    monkeypatch.setattr(ac, "_gemini_model_cache", None)
+    monkeypatch.setattr(ac, "_gemini_list_models", lambda: [f"gemini-{i}-flash" for i in range(30)])
+    calls = []
+
+    def post(url, json=None, headers=None, timeout=None):
+        calls.append(url)
+        raise ac.requests.ReadTimeout("t")
+    monkeypatch.setattr(ac.requests, "post", post)
+    return calls
+
+
+def test_gemini_hang_is_bounded_per_reply(monkeypatch):
+    calls = _gemini_only(monkeypatch)
+    with pytest.raises(Exception):
+        ac._provider_reply("q", "s", 0.2)
+    assert len(calls) == ac.GEMINI_MAX_TRIES
+
+
+def test_gemini_stops_when_the_run_budget_is_gone(monkeypatch):
+    import time
+    calls = _gemini_only(monkeypatch)
+    monkeypatch.setattr(ac, "_RUN_STARTED", time.time() - 100000)
+    with pytest.raises(Exception):
+        ac._provider_reply("q", "s", 0.2)
+    assert calls == []
+
+
+def test_paid_llm_calls_stop_at_the_daily_cap(monkeypatch):
+    monkeypatch.setattr(ac, "DEEPSEEK_API_KEY", "y")
+    for name in ("GEMINI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY"):
+        monkeypatch.setattr(ac, name, "")
+    monkeypatch.setattr(ac, "LLM_PROVIDER_ORDER", ["deepseek"])
+    monkeypatch.setattr(ac, "LLM_PROVIDER", "auto")
+    monkeypatch.setenv("FLOP_LLM_PAID_MAX_PER_DAY", "1")
+    posts = []
+
+    def post(url, json=None, headers=None, timeout=None):
+        posts.append(url)
+        return R(200, {"choices": [{"message": {"content": "ds"}}]})
+    monkeypatch.setattr(ac.requests, "post", post)
+    assert ac._provider_reply("q", "s", 0.2) == ("ds", "deepseek")
+    with pytest.raises(RuntimeError):
+        ac._provider_reply("q", "s", 0.2)
+    assert len(posts) == 1

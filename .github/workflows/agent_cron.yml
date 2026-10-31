@@ -129,6 +129,8 @@ jobs:
           # groq,gemini,openrouter,deepseek,openai. Vd dồn sang Gemini/OpenRouter:
           #   LLM_PROVIDER_ORDER=gemini,openrouter,groq
           LLM_PROVIDER_ORDER: ${{ vars.LLM_PROVIDER_ORDER }}
+          # Trần số lần gọi provider trả phí (deepseek/openai) mỗi ngày UTC (mặc định 300, 0 = tắt).
+          FLOP_LLM_PAID_MAX_PER_DAY: ${{ vars.FLOP_LLM_PAID_MAX_PER_DAY }}
           # Model OpenRouter (gateway nhiều model, có bản :free). Rỗng -> dùng mặc định trong code.
           OPENROUTER_MODEL: ${{ vars.OPENROUTER_MODEL }}
           # Để trống -> tự dò model Groq hợp lệ trên key (Groq hay đổi/deprecate model).

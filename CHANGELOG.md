@@ -16,6 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and an empty catalog keeps the bearer. Malformed `usage` no longer loses a paid response; receipts
   with only `settled_spend_raw` are booked; receipts that leave the response unsettled are counted.
 - Gemini empty replies fall back to the next provider; brief answers pass `guard_output`.
+- `import technocore_agent` crashed after `claim_mainnet_unlock` was removed; CI now imports the package.
+- Booked spend is saved before receipts are marked seen, so a run cancelled mid-call cannot lose it.
+- The attribution gate counts pending receipts and hung requests, caps each run by the room left, and
+  a small confirmed amount no longer opens it. The daily cap and the replay stop survive `state.json`
+  loss. A named network such as `flop-testnet-1` maps to the right explorer.
+- Gemini tries at most `GEMINI_MAX_TRIES` models per reply and respects the run budget; paid LLM calls
+  are capped by `FLOP_LLM_PAID_MAX_PER_DAY`.
+- The report no longer counts gateway calls as LLM metering and flags a ledger/chain balance gap; a
+  stale explorer balance is ignored; hydrate keeps the ledger with the most confirmed spend.
 - `TESTNET_ENABLED` with a non-testnet `FLOP_GATEWAY_NETWORK` refuses to buy.
 
 ### Changed

@@ -4068,15 +4068,16 @@ def test_new_settled_receipts_persist_the_ledger_immediately(monkeypatch):
     monkeypatch.setattr(ac, "save_state", lambda d: None)
     monkeypatch.setenv("FLOP_GATEWAY_PROMPTS", "q")
     monkeypatch.setenv("TESTNET_ENABLED", "true")
-    monkeypatch.setattr(flop_gateway, "run_step", lambda st, **k: {"outcome": "pace_wait", "calls": 0,
-                                                                   "receipts_new": 2, "settled_new": 13.0})
+    hooks = []
+    monkeypatch.setattr(flop_gateway, "run_step", lambda st, **k: hooks.append(k["after_book"]) or
+                        {"outcome": "pace_wait", "calls": 0, "receipts_new": 0})
     ac.gateway_session_step({}, _real_key(), 1_800_000_000)
+    assert persisted == []
+    hooks[0]()                                       # run_step gọi hook này khi có biên nhận mới
     assert persisted == [ac.did_of(_real_key())]
-    persisted.clear()
-    monkeypatch.setattr(flop_gateway, "run_step", lambda st, **k: {"outcome": "pace_wait", "calls": 0,
-                                                                   "receipts_new": 0})
+    monkeypatch.delenv("TESTNET_ENABLED")
     ac.gateway_session_step({}, _real_key(), 1_800_000_000)
-    assert persisted == []                                              # không có gì mới -> không ghi KV thừa
+    assert hooks[1] is None                          # buổi tập devnet không có sổ để lưu
 
 
 def test_run_deadline_only_applies_inside_main(monkeypatch):

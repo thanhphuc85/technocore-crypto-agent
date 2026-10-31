@@ -280,6 +280,7 @@ def check_attribution(r: dict, fetch_fn, wallet=None, explorers=EXPLORERS) -> li
     spent_raw = dict(r.get("attr_spent_raw") or {})      # số raw (1e18) — so với sổ cái
     spent_at = dict(r.get("attr_spent_at") or {})        # lúc đọc được: số cũ không còn là bằng chứng
     balance_raw = dict(r.get("attr_balance_raw") or {})  # số dư ví thật, đối chiếu với sổ
+    balance_at = dict(r.get("attr_balance_at") or {})
     for base in explorers:
         h = _host(base)
         t = parse_total(fetch_fn(f"{base}/api/session-offers"))
@@ -298,9 +299,9 @@ def check_attribution(r: dict, fetch_fn, wallet=None, explorers=EXPLORERS) -> li
                 spent_raw[h], spent_at[h] = v, int(time.time())
             b = parse_balance(fetch_fn(f"{base}/api/accounts/{wallet}"))
             if b is not None:
-                balance_raw[h] = b
+                balance_raw[h], balance_at[h] = b, int(time.time())
     r["attr_offers"], r["attr_spent"], r["attr_spent_raw"] = offers, spent, spent_raw
-    r["attr_spent_at"], r["attr_balance_raw"] = spent_at, balance_raw
+    r["attr_spent_at"], r["attr_balance_raw"], r["attr_balance_at"] = spent_at, balance_raw, balance_at
     return lines
 
 

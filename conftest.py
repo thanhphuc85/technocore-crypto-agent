@@ -43,3 +43,4 @@ def _isolated_state_files(monkeypatch, tmp_path):
     monkeypatch.setattr(agent_cron, "_RUN_STARTED", None)
     # Provider LLM bị đánh dấu hỏng (401/402) trong một test không được rò sang test sau.
     monkeypatch.setattr(agent_cron, "_llm_dead", {})
+    monkeypatch.setattr(agent_cron, "_llm_paid", {})

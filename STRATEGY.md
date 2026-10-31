@@ -147,8 +147,10 @@ exactly), 5 miners, an 8-line `flop-devnet-enroll/v1` challenge naming our SS58 
 Yellow Paper R8.4 scores "settled compute-channel spend", and channels opened through the gateway
 were measured under the gateway's broker account, not the enrolled wallet (`yellowpaper#172` has no
 maintainer answer). So gateway spend is booked as `gateway_unattributed`: it stays out of the airdrop
-metric and the wallet balance until the explorer shows spend under the wallet. Once `FLOP_ATTRIB_GATE_MIN`
-FLOP (default 20) is unconfirmed, or a settled channel names another account, the agent stops buying
+metric and the wallet balance until the explorer shows spend under the wallet. Unconfirmed exposure,
+including pending receipts and hung requests, is limited to `max(FLOP_ATTRIB_GATE_MIN, confirmed on
+chain)` FLOP (default minimum 20), so a tiny confirmed amount cannot open the gate for a large one. At
+that limit, or once a settled channel names another account, the agent stops buying
 (`gateway/attribution_hold`, Telegram once a day) and resumes by itself when the chain confirms.
 `FLOP_ATTRIB_GATE=off` overrides this if FLOP states that gateway spend counts.
 
@@ -215,8 +217,8 @@ needs an adapter for the published testnet API. The mempool scaffold is refused 
    `FLOP_SESSION_MAX_PER_RUN=3`, `FLOP_INFERENCE_COST` + `FLOP_SESSION_FLOPS`.
 6. Watch the first runs (or ask for a log check): `[faucet] +N FLOP … tx=…` then
    `[gateway] enroll ví 5CFP…`, `[session] N✓ gateway/spent … quota=…`, and one run later
-   `[gateway] biên nhận: settled +N (X FLOP)` - that settled amount is what the ledger books
-   as compute purchased. `gateway/pace_wait` between buys is normal. Outcomes that need
+   `[gateway] biên nhận: settled +N (X FLOP)` - that amount is booked as **unconfirmed** until the
+   explorer shows it under the wallet (see "Spend attribution gate"). `gateway/pace_wait` between buys is normal. Outcomes that need
    action: `network_mismatch` (set `FLOP_GATEWAY_URL`/`FLOP_GATEWAY_NETWORK`),
    `payment_required` (x402 - the agent never pays by itself; fit by hand), `unfunded` (faucet
    not reaching the DID wallet), `price_unknown` (item 5). The daily Telegram report carries a

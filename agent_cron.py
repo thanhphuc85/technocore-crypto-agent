@@ -1598,9 +1598,11 @@ def primary_alive(now: int, within_min: float, private_key=None) -> bool:
 # runner chính lẫn phụ) rồi hydrate lúc khởi động -> cooldown được tôn trọng ở mọi nơi.
 _TS_DURABLE_KEYS = ("last_seq", "last_telemetry", "last_manifest", "last_digest",
                     "last_status_feed", "last_recap", "last_weekly_sample",
-                    "last_daily_report", "last_radar", "last_state_loss_alert")
-# gateway_inflight: request gateway đang treo (timeout/5xx mơ hồ) — mất Actions cache vẫn đối soát được.
-_BLOB_DURABLE_KEYS = ("weekly_samples", "last_alert_price", "testnet_radar", "gateway_inflight")
+                    "last_daily_report", "last_radar", "last_state_loss_alert",
+                    "gateway_foreign_seen")
+# gateway_inflight: request gateway đang treo (timeout/5xx mơ hồ) + trần ngày + cờ cấm phát lại — mất
+# Actions cache vẫn đối soát được và không tự đặt lại phanh an toàn.
+_BLOB_DURABLE_KEYS = ("weekly_samples", "last_alert_price", "testnet_radar", "gateway_inflight", "llm_paid")
 # Khóa BỘ ĐẾM cộng dồn: hợp nhất bằng MAX từng ô (đếm chỉ tăng) — KHÔNG dùng luật blob
 # "local có thì local thắng", vì state.json rỗng sau khi cache mất sẽ nuốt số đã tích.
 _COUNTER_DURABLE_KEYS = ("kibble_lifetime", "kibble_lifetime_clean")
@@ -1781,7 +1783,10 @@ def _ledger_progress(led) -> tuple:
         cum = float(token_manager.cumulative_spent(led if isinstance(led, dict) else {}))
     except Exception:
         cum = 0.0
-    return (1 if cum > 0 else 0, cum, _ledger_spent_magnitude(led))
+    # Chain xác nhận làm GIẢM số dư mà cum không đổi: xếp phần đã xác nhận TRƯỚC |số dư|.
+    att = (led.get("gateway_attributed") or {}) if isinstance(led, dict) else {}
+    confirmed = sum(float(v or 0) for v in att.values()) if isinstance(att, dict) else 0.0
+    return (1 if cum > 0 else 0, cum, confirmed, _ledger_spent_magnitude(led))
 
 
 def _ledger_snapshot_key() -> str:
@@ -1935,7 +1940,9 @@ def persist_ledger_to_kv(private_key, did) -> None:
                 "gateway_refs": (led.get("gateway_refs") or [])[-100:],
                 # Chi qua gateway chờ / đã được chain xác nhận đứng tên ví mình (mở khoá 3:1).
                 "gateway_unattributed": led.get("gateway_unattributed", {}),
-                "gateway_attributed": led.get("gateway_attributed", {})}
+                "gateway_attributed": led.get("gateway_attributed", {}),
+                "gateway_count": led.get("gateway_count", {}),
+                "gateway_counted": led.get("gateway_counted", {})}
         entries = (led.get("entries", []) or [])
         body = None
         # Cắt dần tới khi VỪA giới hạn. Số dư và các tổng chạy không suy từ entries, nên
@@ -2149,6 +2156,24 @@ def _one_reply(provider: str, user_text: str, system: str, temperature: float,
 # chạy này thay vì gọi lại ở MỌI lần cần LLM. Một lượt = một tiến trình, nên tự xoá ở lượt sau.
 _LLM_DEAD_STATUS = (401, 402)
 _llm_dead = {}                       # provider -> mã HTTP đã khiến nó bị bỏ qua
+# Provider TÍNH TIỀN theo lượt gọi: khi provider miễn phí hỏng cả ngày, mọi lượt đổ sang đây.
+_LLM_PAID = ("deepseek", "openai")
+_llm_paid = {}                       # {"day": 'YYYY-MM-DD', "n": số lần gọi}, bền qua state
+
+
+def _llm_paid_allow() -> bool:
+    """Giữ một lượt gọi provider trả phí; False khi đã chạm FLOP_LLM_PAID_MAX_PER_DAY (0 = tắt trần).
+    Đếm TRƯỚC khi gọi: lần timeout phía ta vẫn có thể bị tính tiền."""
+    day = time.strftime("%Y-%m-%d", time.gmtime())
+    if _llm_paid.get("day") != day:
+        _llm_paid.clear()
+        _llm_paid.update(day=day, n=0)
+    cap = int(_env_float("FLOP_LLM_PAID_MAX_PER_DAY", 300))
+    if cap > 0 and int(_llm_paid.get("n") or 0) >= cap:
+        print(f"[llm] đã chạm trần {cap} lần gọi provider trả phí hôm nay — bỏ qua")
+        return False
+    _llm_paid["n"] = int(_llm_paid.get("n") or 0) + 1
+    return True
 
 
 def _provider_reply(user_text: str, system: str, temperature: float, max_tokens: int = 120):
@@ -2164,6 +2189,8 @@ def _provider_reply(user_text: str, system: str, temperature: float, max_tokens:
                            f"mọi provider LLM bị bỏ qua trong lượt này (401/402): {_llm_dead}")
     last_err = None
     for provider in chain:
+        if provider in _LLM_PAID and not _llm_paid_allow():
+            continue
         try:
             text = _one_reply(provider, user_text, system, temperature, max_tokens)
             if provider != full[0]:
@@ -2200,6 +2227,9 @@ GEMINI_429_COOLDOWN_SEC = int(_env_float("GEMINI_429_COOLDOWN_SEC", 3 * 3600))
 # DÍNH mãi chừng nào model đó còn chạy. Hết hạn -> dò lại từ đầu danh sách ưu tiên một lần
 # (bỏ qua model đang né 429) để quay về model tốt nhất còn dùng được.
 GEMINI_LAST_GOOD_TTL_SEC = int(_env_float("GEMINI_LAST_GOOD_TTL_SEC", 3600))
+# Mỗi model treo mất tới 20s và key có thể có hàng chục model: một câu trả lời không được phép ăn
+# hết ngân sách của cả lượt khi Google chập chờn.
+GEMINI_MAX_TRIES = int(_env_float("GEMINI_MAX_TRIES", 6))
 _gemini_last_good_ts = None          # lúc model trong cache được xác nhận chạy (epoch)
 
 
@@ -2369,6 +2399,9 @@ def _gemini_reply(user_text: str, system: str, temperature: float,
     for model in _gemini_candidates():
         if model in tried:
             continue
+        if len(tried) >= GEMINI_MAX_TRIES or time.time() + 20 > run_deadline():
+            print(f"[llm:gemini] dừng sau {len(tried)} model (trần lượt thử / ngân sách lượt)")
+            break
         try:
             text = _gemini_call(model, user_text, system, temperature, max_tokens)
             print(f"[llm:gemini] model = {model}")
@@ -4368,11 +4401,22 @@ def _gateway_http(method, url, headers=None, json=None, timeout=20):
                             json=json, timeout=timeout)
 
 
+def _explorer_net(net: str) -> str:
+    """Tên trong host explorer: /health có thể báo 'flop-testnet-1' còn host vẫn là explorer.testnet."""
+    import flop_gateway
+    net = (net or "testnet").strip().lower()
+    return next((n for n in ("testnet", "devnet") if flop_gateway.network_matches(net, n)), net)
+
+
+def _attrib_net() -> str:
+    return _explorer_net(os.environ.get("FLOP_GATEWAY_NETWORK", ""))
+
+
 def _explorer_base(net: str) -> str:
     """Explorer của mạng đang chạy: FLOP_RADAR_EXPLORER_URL nếu đặt, không thì theo tên mạng."""
     if RADAR_EXPLORER.startswith("https://"):
         return RADAR_EXPLORER
-    return f"https://explorer.{net or 'testnet'}.flop.network"
+    return f"https://explorer.{_explorer_net(net)}.flop.network"
 
 
 def _first_str(d: dict, keys) -> str:
@@ -4409,7 +4453,7 @@ def onchain_spent(state: dict, now: int):
     """Chi tiêu đứng tên ví mình trên explorer đúng mạng (FLOP), đọc còn mới; None nếu không biết."""
     import flop_radar
     from decimal import Decimal
-    net = os.environ.get("FLOP_GATEWAY_NETWORK", "").strip().lower() or "testnet"
+    net = _attrib_net()
     own = _explorer_base(net).split("//", 1)[-1].split("/", 1)[0]
     r = state.get(flop_radar.KEY) or {}
     at = r.get("attr_spent_at") or {}
@@ -4419,36 +4463,54 @@ def onchain_spent(state: dict, now: int):
     return Decimal(max(seen)) / Decimal(10 ** 18) if seen else None
 
 
-def chain_balance(state: dict):
-    """Số dư ví trên explorer đúng mạng (FLOP); None nếu chưa đọc được."""
+def chain_balance(state: dict, now: int):
+    """Số dư ví trên explorer đúng mạng (FLOP), đọc còn mới; None nếu không biết."""
     import flop_radar
     from decimal import Decimal
-    net = os.environ.get("FLOP_GATEWAY_NETWORK", "").strip().lower() or "testnet"
+    net = _attrib_net()
     own = _explorer_base(net).split("//", 1)[-1].split("/", 1)[0]
-    raw = (state.get(flop_radar.KEY) or {}).get("attr_balance_raw") or {}
-    vals = [v for h, v in raw.items() if isinstance(v, int) and (h == own or f".{net}." in h)]
+    r = state.get(flop_radar.KEY) or {}
+    at = r.get("attr_balance_at") or {}
+    vals = [v for h, v in (r.get("attr_balance_raw") or {}).items()
+            if isinstance(v, int) and (h == own or f".{net}." in h)
+            and now - int(at.get(h) or 0) <= ATTRIB_FRESH_SEC]
     return Decimal(vals[0]) / Decimal(10 ** 18) if vals else None
 
 
-def attribution_hold(state: dict, now: int):
-    """Lý do DỪNG MUA, hoặc None. Testnet: sổ đã có >= FLOP_ATTRIB_GATE_MIN FLOP gateway settle (hoặc
-    đã thấy kênh đứng tên người khác) mà chain chưa ghi đồng nào cho ví mình -> mua tiếp có thể chỉ
-    tiêu quota mà không được tính (R8.4, yellowpaper#172). FLOP_ATTRIB_GATE=off để bỏ qua."""
+def attribution_room(state: dict, now: int):
+    """Số FLOP còn được mua trước khi chain xác nhận; None = không giới hạn (không ở testnet hoặc
+    FLOP_ATTRIB_GATE=off). Hạn mức = max(FLOP_ATTRIB_GATE_MIN, số chain đã ghi cho ví): chain càng
+    xác nhận nhiều thì độ trễ cho phép càng lớn, nhưng một khoản nhỏ không mở cổng cho khoản lớn.
+    Tính cả phần chưa vào sổ (biên nhận chờ, request treo), và về 0 khi đã thấy kênh đứng tên người
+    khác mà chain chưa ghi đủ. Lý do dừng: R8.4, yellowpaper#172."""
+    import flop_gateway
     import token_manager as tm
     from decimal import Decimal
     if tm.ledger_mode() != "testnet":
         return None
     if os.environ.get("FLOP_ATTRIB_GATE", "").strip().lower() in ("0", "false", "off", "no"):
         return None
-    pend = tm.gateway_attribution()["unattributed"]
-    foreign = bool(state.get(FOREIGN_SEEN_KEY))
-    if pend <= 0 or (pend < Decimal(str(_env_float("FLOP_ATTRIB_GATE_MIN", ATTRIB_ALERT_MIN))) and not foreign):
+    total = float(tm.gateway_attribution()["unattributed"])
+    total += flop_gateway.unsettled_exposure(state.get(flop_gateway.KEY))
+    chain = float(onchain_spent(state, now) or Decimal(0))
+    if state.get(FOREIGN_SEEN_KEY) and total > 0 and chain < total:
+        return 0.0
+    return max(_env_float("FLOP_ATTRIB_GATE_MIN", ATTRIB_ALERT_MIN), chain) - total
+
+
+def attribution_hold(state: dict, now: int):
+    """Lý do DỪNG MUA, hoặc None (xem attribution_room). FLOP_ATTRIB_GATE=off để bỏ qua."""
+    import flop_gateway
+    import token_manager as tm
+    room = attribution_room(state, now)
+    if room is None or room > 0:
         return None
+    total = float(tm.gateway_attribution()["unattributed"])
+    total += flop_gateway.unsettled_exposure(state.get(flop_gateway.KEY))
     chain = onchain_spent(state, now)
-    if chain is not None and chain > 0:
-        return None
-    seen = "chain ghi 0" if chain is not None else "chưa đọc được explorer"
-    return f"{pend:.4g} FLOP gateway đã settle nhưng {seen}" + (" · có kênh đứng tên người khác" if foreign else "")
+    seen = f"chain ghi {chain:.4g}" if chain is not None else "chưa đọc được explorer"
+    return (f"{total:.4g} FLOP gateway chưa được chain xác nhận, {seen}"
+            + (" · có kênh đứng tên người khác" if state.get(FOREIGN_SEEN_KEY) else ""))
 
 
 def gateway_attribution_step(state: dict, now: int) -> str:
@@ -4461,8 +4523,7 @@ def gateway_attribution_step(state: dict, now: int) -> str:
         from decimal import Decimal
         if tm.ledger_mode() != "testnet":
             return "off"
-        net = os.environ.get("FLOP_GATEWAY_NETWORK", "").strip().lower() or "testnet"
-        own = _explorer_base(net).split("//", 1)[-1].split("/", 1)[0]
+        own = _explorer_base(_attrib_net()).split("//", 1)[-1].split("/", 1)[0]
         onchain = onchain_spent(state, now)
         if onchain is None:
             pend = tm.gateway_attribution()["unattributed"]
@@ -4477,9 +4538,9 @@ def gateway_attribution_step(state: dict, now: int) -> str:
             return "unknown"
         tm.confirm_gateway_attribution(onchain)
         pend = tm.gateway_attribution()["unattributed"]
-        if onchain == 0 and pend >= Decimal(str(ATTRIB_ALERT_MIN)) and _due(state, "last_attrib_alert", 24, now):
-            msg = (f"⚠️ Sổ đã ghi {pend:.4g} FLOP chi qua gateway nhưng explorer {own} ghi ví mình "
-                   "0 FLOP chi tiêu. Chi tiêu có thể đang ĐỨNG TÊN broker của gateway, không tính "
+        if onchain < pend and pend >= Decimal(str(ATTRIB_ALERT_MIN)) and _due(state, "last_attrib_alert", 24, now):
+            msg = (f"⚠️ Sổ còn {pend:.4g} FLOP chi qua gateway chưa xác nhận trong khi explorer {own} ghi ví "
+                   f"mình {onchain:.4g} FLOP chi tiêu. Chi tiêu có thể đang ĐỨNG TÊN broker của gateway, không tính "
                    "airdrop cho mình (yellowpaper#172). Kiểm tra /api/accounts/<ví>/inference-spend.")
             print(f"[attrib] {msg}")
             if _telegram_send(msg):
@@ -4622,21 +4683,17 @@ def gateway_session_step(state: dict, private_key, now: int):
     _g = state.get(flop_gateway.KEY) if isinstance(state.get(flop_gateway.KEY), dict) else {}
     _gi = state.get("gateway_inflight")
     _dur = _gi.get("inflight") if isinstance(_gi, dict) else None
+    _restore = {}
     if not _g.get("inflight") and isinstance(_dur, dict) and _dur.get("key"):
         print(f"[gateway] khôi phục request treo {str(_dur['key'])[:8]}… từ KV (mất state.json)")
+        _restore["inflight"] = _dur
+    for _k in ("day_spent", "replay_unsafe"):            # phanh an toàn không được mất theo cache
+        if isinstance(_gi, dict) and _gi.get(_k) and not _g.get(_k):
+            _restore[_k] = _gi[_k]
+    if _restore:
         # Mang theo profile: run_step xoá sạch trạng thái không có profile khớp.
-        state[flop_gateway.KEY] = {**_g, "inflight": _dur,
-                                   "profile": _g.get("profile") or _gi.get("profile")
+        state[flop_gateway.KEY] = {**_g, **_restore, "profile": _g.get("profile") or _gi.get("profile")
                                    or flop_gateway.profile_of(expect)}
-
-    hold = attribution_hold(state, now)
-    if hold and _due(state, "last_attrib_hold_alert", 24, now):
-        _m = (f"⛔ Đã DỪNG mua compute: {hold}. Agent vẫn đọc biên nhận và tự mua lại khi chain ghi chi "
-              "tiêu cho ví mình. Muốn mua tiếp dù chưa xác nhận: đặt FLOP_ATTRIB_GATE=off.")
-        print(f"[attrib] {_m}")
-        if _telegram_send(_m):
-            state["last_attrib_hold_alert"] = now
-            save_state({"last_attrib_hold_alert": now})
 
     r = flop_gateway.run_step(
         state, agent_key=private_key, now=now, prompts=prompts, expect_network=expect,
@@ -4646,7 +4703,17 @@ def gateway_session_step(state: dict, private_key, now: int):
         # Lưu mốc "request đang treo" xuống state.json NGAY trước mỗi lần gọi: job bị giết giữa
         # chừng (timeout 20') thì lượt sau vẫn biết để đối soát thay vì gửi lại cùng đề.
         checkpoint=lambda: save_state({flop_gateway.KEY: state.get(flop_gateway.KEY)}),
-        channel_fn=lambda cid: channel_info(expect, cid), hold_reason=hold)
+        channel_fn=lambda cid: channel_info(expect, cid),
+        gate=lambda: (attribution_hold(state, now), attribution_room(state, now)),
+        # Lưu sổ NGAY khi có biên nhận mới, TRƯỚC khi checkpoint ghi "đã thấy" xuống state.json.
+        after_book=(lambda: persist_ledger_to_kv(private_key, did_of(private_key))) if testnet else None)
+    if r.get("outcome") == "attribution_hold" and _due(state, "last_attrib_hold_alert", 24, now):
+        _m = (f"⛔ Đã DỪNG mua compute: {r.get('reason')}. Agent vẫn đọc biên nhận và tự mua lại khi chain ghi "
+              "chi tiêu cho ví mình. Muốn mua tiếp dù chưa xác nhận: đặt FLOP_ATTRIB_GATE=off.")
+        print(f"[attrib] {_m}")
+        if _telegram_send(_m):
+            state["last_attrib_hold_alert"] = now
+            save_state({"last_attrib_hold_alert": now})
     if testnet and r.get("foreign_channels"):
         state[FOREIGN_SEEN_KEY] = now
         save_state({FOREIGN_SEEN_KEY: now})
@@ -4674,15 +4741,11 @@ def gateway_session_step(state: dict, private_key, now: int):
     # thì đối soát theo biên nhận, không phát lại được.
     _inf = _g.get("inflight") if isinstance(_g.get("inflight"), dict) else None
     state["gateway_inflight"] = {"inflight": _inf and {k: _inf.get(k) for k in ("key", "ts", "max_cost")},
-                                 "profile": _g.get("profile"), "at": now}
+                                 "profile": _g.get("profile"), "at": now, "day_spent": _g.get("day_spent"),
+                                 "replay_unsafe": _g.get("replay_unsafe")}
     save_state({"gateway_inflight": state["gateway_inflight"]})
     if GATEWAY_BRIEF and r.get("calls"):
         save_state({BRIEF_KEY: state.get(BRIEF_KEY)})
-    if testnet and r.get("receipts_new"):
-        # Lưu sổ cái NGAY: biên nhận vừa ghi đã được đánh dấu "đã ghi" trong state.json (cache lưu
-        # cả khi run lỗi). Nếu chỉ đợi persist cuối run mà run chết giữa chừng thì số chi mất
-        # VĨNH VIỄN (lượt sau coi biên nhận đã ghi rồi). persist ghi KV + bản sao state.json.
-        persist_ledger_to_kv(private_key, did_of(private_key))
     # `sent` gồm cả lần gọi không rõ kết quả (timeout): gửi lại job đó = có thể trả tiền hai lần.
     if jobs and r.get("sent"):
         used = int(r["sent"])
@@ -4725,7 +4788,7 @@ def gateway_session_step(state: dict, private_key, now: int):
     if r.get("payment"):
         print(f"[gateway] 402 hình dạng thanh toán (KHÔNG tự trả): {r['payment']}")
     if r.get("receipts_new"):
-        print(f"[gateway] biên nhận on-chain mới: {r['receipts_new']}")
+        print(f"[gateway] biên nhận gateway mới: {r['receipts_new']}")
         try:
             import flop_miners as _fm
             st = dict(_miner_stats)
@@ -4821,6 +4884,8 @@ def main():
     _gemini_404.update(state.get("gemini_404") or [])
     # Model chạy được lần trước + model đang né 429 -> run này gọi thẳng, không dò lại.
     gemini_memory_load(state)
+    _llm_paid.clear()
+    _llm_paid.update(state.get("llm_paid") if isinstance(state.get("llm_paid"), dict) else {})
     # Đếm tin/phòng hôm nay cho phanh cứng (đã hợp nhất với KV ở hydrate_durable_from_kv).
     _post_gov_state.clear()
     if isinstance(state.get("post_counts"), dict):
@@ -5202,7 +5267,7 @@ def main():
     faucet_status = faucet_step(state, private_key, did)
 
     # 3a9) (Tùy chọn, GATED) MUA PHIÊN INFERENCE từ thợ đào FLOP — đường "spend-to-earn" theo
-    #      bản nháp FLOP (post session request -> PoUI -> settle -> tích lũy mở khóa 3:1).
+    #      bản nháp FLOP (post session request -> PoUI -> settle). Testnet: đường gateway.
     #      Mặc định TẮT (FLOP_SESSION_ENABLED) -> agent KHÔNG đổi hành vi. Khi bật:
     #        · SIMULATION (TESTNET_ENABLED off): chạy happy-path bằng thợ đào GIẢ (không mạng,
     #          KHÔNG tích mở khóa — đúng: chỉ chi THẬT mới tính). Dùng để kiểm wiring.
@@ -5442,6 +5507,8 @@ def main():
     if _gemini_404:
         save_state({"gemini_404": sorted(_gemini_404)[:GEMINI_404_MAX]})
     save_state(gemini_memory_dump())
+    if _llm_paid:
+        save_state({"llm_paid": dict(_llm_paid)})
     if _post_gov_state.get("post_counts"):
         save_state({"post_counts": _post_gov_state["post_counts"]})
         try:
@@ -5525,9 +5592,14 @@ def main():
         if _tma.ledger_mode() == "testnet" and (_ga["unattributed"] or _ga["attributed"]):
             _mx["đứng tên ví mình (chain)"] = (f"{_ga['attributed']:.4g} FLOP đã xác nhận · "
                                               f"{_ga['unattributed']:.4g} FLOP chờ xác nhận")
-        _bal = chain_balance(state)
+        _bal = chain_balance(state, now)
         if _tma.ledger_mode() == "testnet" and _bal is not None:
-            _mx["số dư ví (chain)"] = f"{_bal:.4g} FLOP · sổ ghi {_tma.check_balance()}"
+            # Faucet timeout SAU khi đã cấp -> sổ thiếu một khoản nạp; chain là nguồn đúng.
+            _gap = abs(_bal - (_tma._parse_amount(_tma.check_balance()) or 0))
+            _mx["số dư ví (chain)"] = (f"{_bal:.4g} FLOP · sổ ghi {_tma.check_balance()}"
+                                       + (f" · ⚠️ lệch {_gap:.4g}" if _gap >= 1 else ""))
+        if _llm_paid.get("n"):
+            _mx["LLM trả phí hôm nay"] = f"{_llm_paid['n']} lần"
     except Exception:
         pass
     if maybe_send_daily_report(state, now, extras=_mx):

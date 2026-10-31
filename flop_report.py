@@ -142,7 +142,14 @@ def summarize(ledger, now: int, token: str = "FLOP", window_s: int = WINDOW_S,
     out["gateway_unverified"] = _fmt(_dec(gu.get(token)) if isinstance(gu, dict) else Decimal(0))
     out["meter_total"] = _fmt(max(Decimal(0), _dec(out["spent_total"]) - _dec(out["session_total"])
                                   - _dec(out["gateway_unverified"])))
-    out["meter_count"] = max(0, out["spend_count_total"] - out["session_count"])
+    def _n(key):
+        d = led.get(key)
+        try:
+            return int(d.get(token, 0)) if isinstance(d, dict) else 0
+        except (TypeError, ValueError):
+            return 0
+    unconfirmed = max(0, _n("gateway_count") - _n("gateway_counted"))
+    out["meter_count"] = max(0, out["spend_count_total"] - out["session_count"] - unconfirmed)
     for k in ("spent", "credited", "spent_total"):
         out[k] = _fmt(out[k])
     return out

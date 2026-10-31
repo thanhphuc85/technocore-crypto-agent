@@ -81,8 +81,9 @@ def observe(state: dict, *, settled_onchain: int, status: str, spent_today_oncha
     if settled_onchain > 0 or healthy_wait:
         if w.get("alerted_ts") and settled_onchain > 0:
             mins = max(0, int((now - int(_num(w.get("since", now)))) / 60))
-            out["recovered"] = (f"✅ TESTNET: agent đã CHI THẬT lại (spent_onchain) sau khoảng "
-                                f"{mins} phút gián đoạn.")
+            # Gateway settle chưa chứng minh chi tiêu đứng tên ví; dòng "đứng tên ví" mới nói điều đó.
+            out["recovered"] = (f"✅ TESTNET: agent đã có phiên settle lại sau khoảng {mins} phút gián "
+                                "đoạn (chưa phải bằng chứng chain đã ghi cho ví mình).")
         state[KEY] = {}
         return out
     w["misses"] = int(_num(w.get("misses"))) + 1
