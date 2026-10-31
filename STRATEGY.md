@@ -142,6 +142,22 @@ exactly), 5 miners, an 8-line `flop-devnet-enroll/v1` challenge naming our SS58 
   books nothing. It needs a funded devnet wallet (>= 1 FLOP from faucet.flop.network) and
   each account gets one 24 h allowance only, so it is a one-day dry run.
 
+### Spend attribution gate
+
+Yellow Paper R8.4 scores "settled compute-channel spend", and channels opened through the gateway
+were measured under the gateway's broker account, not the enrolled wallet (`yellowpaper#172` has no
+maintainer answer). So gateway spend is booked as `gateway_unattributed`: it stays out of the airdrop
+metric and the wallet balance until the explorer shows spend under the wallet. Once `FLOP_ATTRIB_GATE_MIN`
+FLOP (default 20) is unconfirmed, or a settled channel names another account, the agent stops buying
+(`gateway/attribution_hold`, Telegram once a day) and resumes by itself when the chain confirms.
+`FLOP_ATTRIB_GATE=off` overrides this if FLOP states that gateway spend counts.
+
+The wallet-owned path (`open_channel` through the official SDK or CLI) is not implemented: it needs
+a reachable miner endpoint or signed offer, and devnet has none to test against. `/enroll/*` is also
+documented "Devnet only": a gateway without it yields `gateway/enroll_unavailable` and an alert, and
+needs an adapter for the published testnet API. The mempool scaffold is refused on testnet
+(`blocked-mempool`) because it pays by a transfer with no recipient, not through channel escrow.
+
 ### Day-one checklist (Variables only — no code change)
 1. `TESTNET_ENABLED=true` **first**; `FLOP_TESTNET_START=2026-11-03` (or the confirmed
    date). The faucet refuses to claim while the ledger is in simulation mode

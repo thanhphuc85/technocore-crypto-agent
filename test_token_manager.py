@@ -674,11 +674,15 @@ def test_gateway_spend_books_only_on_testnet_and_counts_as_a_session(ledger, mon
     assert tm.record_gateway_spend("1.5", "inference-session gateway m1", "", path=ledger)["outcome"] \
         == "skipped_insufficient"                                       # không bằng chứng -> không ghi
     r = tm.record_gateway_spend("1.5", "inference-session gateway m1", "chatcmpl-1", path=ledger)
-    assert r["outcome"] == "spent_onchain"
+    assert r["outcome"] == "gateway_settled_unverified"
     led = tm.load_ledger(ledger)
-    assert led["session_cumulative"]["FLOP"] == "1.5" and led["entries"][-1]["via"] == "gateway"
-    assert tm.record_gateway_spend("50", "inference-session gateway m1", "chatcmpl-2",
-                                   path=ledger)["balance_after"] == "0"  # kẹp 0, không âm
+    e = led["entries"][-1]
+    assert e["via"] == "gateway" and e["ref"] == "chatcmpl-1" and "tx_hash" not in e   # không phải tx
+    assert "session_cumulative" not in led and led["gateway_unattributed"]["FLOP"] == "1.5"
+    assert led["balances"]["FLOP"] == "10"                 # quota gateway không rút từ ví
+    tm.confirm_gateway_attribution("1.5", path=ledger)
+    led = tm.load_ledger(ledger)
+    assert led["session_cumulative"]["FLOP"] == "1.5" and led["balances"]["FLOP"] == "8.5"
 
 
 def test_gateway_booking_is_idempotent_inside_the_ledger(ledger, monkeypatch):
@@ -686,8 +690,8 @@ def test_gateway_booking_is_idempotent_inside_the_ledger(ledger, monkeypatch):
     # cũ. Sổ cái phải tự chặn ghi lần hai (tổng chi chỉ tăng nên ghi trùng là VĨNH VIỄN).
     monkeypatch.setenv("TESTNET_ENABLED", "true")
     assert tm.record_gateway_spend("6.5", "inference-session gateway m1", "req-1", path=ledger)["outcome"] \
-        == "spent_onchain"
+        == "gateway_settled_unverified"
     assert tm.record_gateway_spend("6.5", "inference-session gateway m1", "req-1", path=ledger)["outcome"] \
         == "duplicate"
     led = tm.load_ledger(ledger)
-    assert led["session_cumulative"]["FLOP"] == "6.5" and len(led["gateway_refs"]) == 1
+    assert led["gateway_unattributed"]["FLOP"] == "6.5" and len(led["gateway_refs"]) == 1

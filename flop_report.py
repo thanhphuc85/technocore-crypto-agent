@@ -137,7 +137,11 @@ def summarize(ledger, now: int, token: str = "FLOP", window_s: int = WINDOW_S,
         if amt > out["credited"]:
             out["credited"], out["credit_count"] = amt, max(n, out["credit_count"])
     # Ghi sổ LLM = TỔNG chi trừ phần MUA COMPUTE (trước đây in tổng gộp dưới nhãn "KHÔNG tính").
-    out["meter_total"] = _fmt(max(Decimal(0), _dec(out["spent_total"]) - _dec(out["session_total"])))
+    # Chi qua gateway chain chưa xác nhận cũng không phải ghi sổ LLM -> tách dòng riêng.
+    gu = led.get("gateway_unattributed")
+    out["gateway_unverified"] = _fmt(_dec(gu.get(token)) if isinstance(gu, dict) else Decimal(0))
+    out["meter_total"] = _fmt(max(Decimal(0), _dec(out["spent_total"]) - _dec(out["session_total"])
+                                  - _dec(out["gateway_unverified"])))
     out["meter_count"] = max(0, out["spend_count_total"] - out["session_count"])
     for k in ("spent", "credited", "spent_total"):
         out[k] = _fmt(out[k])
@@ -307,6 +311,9 @@ def format_report(s: dict, *, date_label: str = None, extras: dict = None,
         f"nạp 24h: {s.get('credited', '0')} {tok} ({s.get('credit_count', 0)} lần) "
         f"· số dư {s.get('balance', '0')}",
     ]
+    if s.get("gateway_unverified") not in (None, "0"):
+        lines.insert(2, f"⚠️ gateway đã settle, chain CHƯA xác nhận (chưa tính): "
+                        f"{_grp(s['gateway_unverified'])} {tok}")
     h = spend_health(s, pacing)
     if h["idle_warn"]:
         lines.append(f"⚠️ nhàn rỗi: {h['idle']} {tok} — giữ token KHÔNG sinh phân bổ")

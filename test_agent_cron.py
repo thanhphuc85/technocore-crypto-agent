@@ -3163,6 +3163,7 @@ def test_main_testnet_stops_new_sessions_at_pending_cap(monkeypatch, tmp_path):
     import flop_session
     import time as _t
     monkeypatch.setenv("FLOP_SESSION_BACKEND", "mempool")   # testnet mặc định = gateway; test đường cũ
+    monkeypatch.setattr(ac, "MEMPOOL_TESTNET_ALLOWED", True)
     monkeypatch.setattr(ac, "SEED_HEX", SEED_HEX)
     monkeypatch.setattr(ac, "RUNNER_ROLE", "primary")
     now = int(_t.time())
@@ -3642,7 +3643,7 @@ def test_gateway_step_books_only_on_testnet(monkeypatch):
     monkeypatch.setenv("TESTNET_ENABLED", "true")
     st, settled, last = ac.gateway_session_step({}, _real_key(), 1_800_000_000)
     assert seen["expect_network"] == "testnet" and seen["book_fn"] is not None
-    assert settled == 2 and last["outcome"] == "spent_onchain" and st == "2✓ gateway/spent"
+    assert settled == 2 and last["outcome"] == "gateway_settled_unverified" and st == "2✓ gateway/spent"
 
 
 def test_gateway_checkpoint_persists_inflight_before_the_call(monkeypatch):
@@ -3680,7 +3681,7 @@ def test_gateway_inflight_survives_cache_loss_via_the_durable_key(monkeypatch):
     st = {"gateway_inflight": {"inflight": {"key": "k-9", "ts": 5}, "at": 5}}   # chỉ có bản từ KV
     ac.gateway_session_step(st, _real_key(), 1_800_000_000)
     assert seen == [{"key": "k-9", "ts": 5}]
-    assert {"gateway_inflight": {"inflight": None, "at": 1_800_000_000}} in saved
+    assert any(d.get("gateway_inflight", {}).get("inflight", 0) is None for d in saved)
     assert "gateway_inflight" in ac.DURABLE_STATE_KEYS
 
 
@@ -3755,9 +3756,13 @@ def test_attribution_confirmed_onchain_unlocks_and_stays_quiet(monkeypatch, tmp_
 def test_attribution_ignores_other_networks_and_simulation(monkeypatch, tmp_path):
     import flop_radar
     _testnet_ledger(monkeypatch, tmp_path, gateway_spend=30)
-    monkeypatch.setattr(ac, "_telegram_send", lambda m: pytest.fail("devnet 0 không phải bằng chứng testnet"))
+    sent = []
+    monkeypatch.setattr(ac, "_telegram_send", lambda m: sent.append(m) or True)
+    monkeypatch.setattr(ac, "save_state", lambda d: None)
     st = {flop_radar.KEY: {"attr_spent_raw": {"explorer.devnet.flop.network": 0}}}
-    assert ac.gateway_attribution_step(st, 1_800_000_000) == "unknown"
+    # Devnet 0 không phải bằng chứng testnet -> không kết luận MISMATCH, nhưng phải báo là chưa kiểm được.
+    assert ac.gateway_attribution_step(st, 1_800_000_000) == "UNVERIFIED"
+    assert len(sent) == 1 and "broker" not in sent[0]
     monkeypatch.delenv("TESTNET_ENABLED")
     assert ac.gateway_attribution_step(st, 1_800_000_000) == "off"
 
@@ -3880,7 +3885,7 @@ def test_answered_kibble_jobs_become_gateway_prompts_and_are_consumed(monkeypatc
     assert [j["id"] for j in state["gateway_jobs"]] == ["k0", "k1", "k2"] and ac._gateway_jobs_new == []
     seen = {}
     monkeypatch.setattr(flop_gateway, "run_step", lambda st, **k: seen.update(k) or
-                        {"outcome": "spent", "calls": 2, "spent": 1, "due": 1, "remaining": 5})
+                        {"outcome": "spent", "calls": 2, "sent": 2, "spent": 1, "due": 1, "remaining": 5})
     monkeypatch.setattr(ac, "save_state", lambda d: None)
     monkeypatch.delenv("FLOP_GATEWAY_PROMPTS", raising=False)
     monkeypatch.setattr(ac, "KIBBLE_REQ_QUESTIONS", [])
@@ -3928,7 +3933,7 @@ def test_last_queued_job_is_followed_by_an_operator_prompt(monkeypatch):
     import flop_gateway
     seen = {}
     monkeypatch.setattr(flop_gateway, "run_step", lambda st, **k: seen.update(k) or
-                        {"outcome": "spent", "calls": 2, "spent": 1, "due": 1, "remaining": 5})
+                        {"outcome": "spent", "calls": 2, "sent": 2, "spent": 1, "due": 1, "remaining": 5})
     monkeypatch.setattr(ac, "save_state", lambda d: None)
     monkeypatch.setenv("FLOP_GATEWAY_PROMPTS", "OpA|OpB")
     state = {"gateway_jobs": [{"id": "k1", "task": "Only job"}]}

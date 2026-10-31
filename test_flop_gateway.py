@@ -809,6 +809,7 @@ def _chat_calls(fake):
 def _hung(monkeypatch):
     """Lượt 1: gateway xử lý xong và trừ tiền nhưng client timeout -> còn request treo."""
     monkeypatch.setenv("FLOP_GATEWAY_MAX_CALLS_PER_RUN", "1")
+    monkeypatch.setenv("FLOP_GATEWAY_REPLAY_MAX", "2")
     fake = FakeGateway(quota=25.0, expires_ms=LATER)
     fake.honor_idem, fake.replay = True, True
     state = {}
@@ -966,6 +967,7 @@ def test_estimate_endpoint_failure_does_not_block_buying(monkeypatch):
 def test_gateway_that_charges_a_replay_is_reported_and_counted(monkeypatch):
     # README nói phản hồi được lưu để phát lại, nhưng chưa kiểm chứng trên gateway thật.
     monkeypatch.setenv("FLOP_GATEWAY_MAX_CALLS_PER_RUN", "1")
+    monkeypatch.setenv("FLOP_GATEWAY_REPLAY_MAX", "2")
     fake = FakeGateway(quota=25.0, expires_ms=LATER)
     fake.honor_idem, fake.report_cost = True, False               # KHÔNG phát lại: xử lý như request mới
     state = {}
@@ -976,3 +978,4 @@ def test_gateway_that_charges_a_replay_is_reported_and_counted(monkeypatch):
                     expect_network="devnet", sleep=lambda s: None, log=logs.append)
     assert r["outcome"] == "replayed" and r["spent"] == pytest.approx(fake.cost)
     assert any("quota tụt" in m for m in logs)
+    assert r["replay_charged"] == pytest.approx(fake.cost) and state[gw.KEY]["replay_unsafe"]

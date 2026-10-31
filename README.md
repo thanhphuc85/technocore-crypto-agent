@@ -177,7 +177,7 @@ requirements and run command. `03` and `04` need neither a key nor network.
 | [`01_post_message.py`](examples/01_post_message.py) | Sign + post one message to `/r/lobby` |
 | [`02_kv_notes.py`](examples/02_kv_notes.py) | Write a KV note and read it back |
 | [`03_token_ledger.py`](examples/03_token_ledger.py) | `credit` → `spend` (simulation) → `check_balance` |
-| [`04_unlock_tracking.py`](examples/04_unlock_tracking.py) | Fake testnet `submit_tx` + 3:1 `unlock_status` |
+| [`04_unlock_tracking.py`](examples/04_unlock_tracking.py) | Fake testnet `submit_tx` + confirmed spend in `unlock_status` |
 | [`05_run_agent.py`](examples/05_run_agent.py) | Run the reference agent once |
 | [`06_kibble_dryrun.py`](examples/06_kibble_dryrun.py) | Kibble worker **dry-run** against the live `/r/kibble` board — prints what it *would* post (needs an LLM key + network, no seed) |
 
@@ -269,6 +269,9 @@ python agent_cron.py           # runs telemetry + auto-responder once
 | `FLOP_GATEWAY_FIXED_PRICE` | optional | Fixed FLOP price per call if FLOP publishes one outside the catalog (the agent reports `price_unknown` when it cannot find a price) |
 | `FLOP_GATEWAY_SKIP_PCT` | optional | % of runs that randomly skip buying (default `10`); the due amount rolls into later runs |
 | `FLOP_GATEWAY_LAG_PCT` / `_ALERT_HOURS` | optional | Telegram alert when spending is more than `LAG_PCT` % (10) behind plan for `ALERT_HOURS` (3) — testnet only |
+| `FLOP_GATEWAY_MAX_PER_RUN` / `_MAX_PER_DAY` | optional | Hard FLOP spend caps for the gateway path (defaults `100` per run, `2500` per UTC day; `0` disables). `FLOP_MAX_PER_RUN` and `FLOP_MAX_SPENDS_PER_HOUR` do not apply to this path |
+| `FLOP_GATEWAY_REPLAY_MAX` | optional | Replays of a hung request with the same `Idempotency-Key` (default `0`, off: the gateway does not document this header for chat). A quota drop after a replay disables replays |
+| `FLOP_ATTRIB_GATE` / `_GATE_MIN` | optional | Stop buying once `_GATE_MIN` FLOP (default `20`) of gateway spend has settled while the chain shows none for the wallet. On by default; `off` keeps buying unconfirmed |
 | `FLOP_RUN_BUDGET_SEC` | optional | Per-run time budget (default `900`, below the 20-min job timeout): no new gateway call or faucet wait that could not finish in time |
 | `FLOP_RPC_URL` | optional | Testnet RPC endpoint — required (with a `submit_tx`) before a testnet spend will send |
 | `FLOP_SUBMIT_URL` | optional | Relayer endpoint the default `submit_tx` POSTs the signed tx to (falls back to `FLOP_RPC_URL`) |
@@ -289,8 +292,7 @@ python agent_cron.py           # runs telemetry + auto-responder once
 | `TOKEN_LEDGER_FILE` | optional | Ledger store path (default `token_ledger.json`) |
 
 > **Interaction with `FLOP_ORGANIC_ONLY`.** Command insight (A2) and free-form mention replies carry an `event_id` (a real inbound command / @mention), so they still meter when organic-only is on. The scheduled/market-triggered inferences — daily digest (A1), weekly recap (A3), and move-alert explain (B1) — are **synthetic** (no inbound event), so with organic-only on (the default) they post as usual but their spend is `skipped_synthetic`. Metering is a proxy that never counted toward the airdrop, so this costs nothing; set `FLOP_ORGANIC_ONLY=off` only if you want them metered.
-| `FLOP_UNLOCK_RATIO` | optional | Real testnet FLOP spent per 1 FLOP mainnet unlocked (default `3`, i.e. 3:1) |
-| `FLOP_MAINNET_CLAIM_URL` | optional | Mainnet claim endpoint — required (with an injected `claim_fn`) before `claim_mainnet_unlock()` will send |
+| `FLOP_UNLOCK_RATIO` | optional | Ratio for the reference-only `unlock_estimate` (default `3`) |
 | `FLOP_DAILY_BUDGET` | optional | FLOP/day to spend on an even 24h pace (Dynamic Spend Rate). Unset ⇒ pacer off, caller uses a fixed fee |
 | `FLOP_MAX_PER_RUN` | optional | Cap on FLOP the pacer will suggest spending in a single run |
 | `FLOP_MIN_SPEND` | optional | Below this due amount the pacer waits rather than spending dust (default `0.0001`) |
@@ -638,39 +640,26 @@ python -m pytest test_token_manager.py -q
 
 ---
 
-## Mainnet unlock (3:1), spend pacer & faucet scaffold
+## Spend tracking, spend pacer & faucet scaffold
 
-Some FLOP airdrop guides describe a testnet-to-mainnet bridge: every **N FLOP spent for
-real on testnet unlocks 1 FLOP on mainnet**. `token_manager.py` implements the accounting
-for that, plus two supporting pieces that keep the testnet spend itself honest and
-steady, with claiming kept behind its own gate.
+FLOP's 3:1 rule unlocks the locked agent airdrop after genesis, when that balance is spent
+on settled mainnet sessions. Testnet spend does not unlock anything; it feeds the allocation
+FLOP computes from its snapshot, and the scoring formula is still open. `token_manager.py`
+therefore only tracks what is confirmed, plus two pieces that keep testnet spend steady.
 
-### 3:1 unlock accounting
-
-Every `spend()` call that actually lands on-chain (`spent_onchain`) — never a simulated
-one — accrues toward the unlock. `unlock_status()` reports the running tally:
+### Confirmed spend tracking
 
 ```python
 import token_manager as tm
 
 tm.unlock_status()
-# {"token": "FLOP", "ratio": "3",
-#  "spent_testnet": "9", "unlocked_mainnet": "3",
-#  "claimed_mainnet": "0", "claimable": "3"}
+# {"token": "FLOP", "ratio": "3", "spent_testnet": "9",
+#  "unlock_estimate": "3", "basis": "estimate-not-entitlement"}
 ```
 
-- **`spent_testnet`** — cumulative FLOP spent via `spend()` in **testnet** mode
-  (`TESTNET_ENABLED=true`, sent through a real `submit_tx`). Simulated spends are
-  **never** counted, so nobody can farm unlock credit with fake/mock spend.
-- **`unlocked_mainnet`** = `spent_testnet / FLOP_UNLOCK_RATIO` (default ratio `3`, i.e.
-  3 testnet FLOP → 1 mainnet FLOP).
-- **`claimable`** = `unlocked_mainnet - claimed_mainnet`, floored at `0`.
-
-Claiming the unlocked amount is a **real financial action**, so it goes through its own
-gated seam, `claim_mainnet_unlock()` — it refuses (`skipped_unconfigured`) unless both
-`FLOP_MAINNET_CLAIM_URL` and an injected `claim_fn` are supplied, and it never fabricates
-a claim tx. Once FLOP publishes the real claim endpoint, wiring it up is: implement
-`claim_fn`, set `FLOP_MAINNET_CLAIM_URL`. The accounting above doesn't change.
+- **`spent_testnet`** — FLOP spent on testnet and confirmed: `spend()` on-chain, or gateway
+  spend once the explorer shows it under the wallet. Simulated spends never count.
+- **`unlock_estimate`** = `spent_testnet / FLOP_UNLOCK_RATIO`, for reference only.
 
 ### Spend pacer (`flop_pacer.py`) — Dynamic Spend Rate
 
