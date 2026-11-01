@@ -42,10 +42,8 @@ except Exception:  # pragma: no cover
 
 
 def vary_request(models, flops, max_latency_ms, fee=None, *, jitter_pct=0.0, rng=None):
-    """ĐA DẠNG HÓA tham số 1 phiên (chống 'manufactured activity' / pattern máy): chọn
-    model_hash NGẪU NHIÊN từ `models` (list — mỗi phiên khác nhau), và JITTER
-    flops/max_latency_ms/fee ±jitter_pct quanh giá trị nền. Spend đa dạng trông như DEMAND
-    THẬT thay vì N request giống hệt (mà census/anti-sybil chấm là boilerplate/low-originality).
+    """Tham số cho 1 phiên: chọn model_hash ngẫu nhiên từ `models` và lệch flops/max_latency_ms/fee
+    ±jitter_pct quanh giá trị nền, để nhiều phiên trong một lượt không gửi cùng một yêu cầu.
 
     Hàm THUẦN: tiêm `rng` để test tất định; không mạng, không side-effect. Trả
     (model_hash, flops, max_latency_ms, fee_str|None). `models` rỗng -> model_hash=None (caller

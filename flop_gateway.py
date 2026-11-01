@@ -908,7 +908,7 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
         if day_cap > 0 and day_left <= 0:
             return done("daily_cap", due=round(due, 6), remaining=remaining,
                         reason=f"đã chi {g['day_spent']['spent']} FLOP hôm nay, trần {day_cap:g}")
-        # Nhịp mua bớt máy móc (như flop_pacer): thỉnh thoảng nghỉ cả lượt và co giãn phần đến
+        # Rải việc mua như flop_pacer: thỉnh thoảng nghỉ cả lượt và co giãn phần đến
         # hạn ±FLOP_PACE_JITTER_PCT. Phần không chi được TÍCH sang lượt sau (window_due cộng
         # dồn) nên tổng chi trong ngày không đổi. Sát hạn thì không nghỉ, để kịp chi hết.
         rnd = rng or random.random

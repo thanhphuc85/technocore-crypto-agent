@@ -5330,9 +5330,8 @@ def main():
                 _sess_flops = int(os.environ.get("FLOP_SESSION_FLOPS", "").strip() or "1000000000")
                 _sess_lat = int(os.environ.get("FLOP_SESSION_MAX_LATENCY_MS", "").strip() or "2000")
                 _sess_fee = os.environ.get("FLOP_INFERENCE_COST", "").strip() or None
-                # Đa dạng hóa request (chống bot/sybil): xoay model + jitter ±% flops/latency/fee
-                # quanh nền -> spend trông như DEMAND THẬT, không N request giống hệt. Mặc định 20%,
-                # kẹp 0..50 (0 = tắt jitter). Nền tảng phòng thủ "manufactured activity".
+                # Xoay model + lệch ±% flops/latency/fee quanh giá trị nền: các phiên trong một lượt
+                # không gửi cùng một yêu cầu. Mặc định 20%, kẹp 0..50 (0 = tắt).
                 _sess_jit = max(0.0, min(50.0, float(os.environ.get("FLOP_SESSION_JITTER_PCT", "").strip() or "20")))
                 # G4: nhiều phiên/run (earn = tuyến tính pro-rata theo spend). Mặc định 1.
                 _sess_max = max(1, int(os.environ.get("FLOP_SESSION_MAX_PER_RUN", "").strip() or "1"))
@@ -5367,7 +5366,7 @@ def main():
                         save_state({"pending_block_alerted": 0})
                 _n_iter = 0 if _pend_block else (len(_plan) if _plan is not None else _sess_max)
                 for _i in range(_n_iter):
-                    # Mỗi phiên: model xoay + flops/latency/fee jitter -> đa dạng hữu cơ.
+                    # Mỗi phiên một bộ tham số riêng (xem flop_session.vary_request).
                     _m, _fl, _lt, _fe = flop_session.vary_request(
                         _sess_models, _sess_flops, _sess_lat, _sess_fee, jitter_pct=_sess_jit)
                     if _plan is not None:
@@ -5486,7 +5485,7 @@ def main():
         try:
             import token_manager
             import flop_pacer
-            # Bằng chứng usage hữu cơ (chống sybil): công khai số lần CHI (tổng + 24h) bên
+            # Số liệu để đối chiếu công khai: số lần CHI (tổng + 24h) bên
             # cạnh số lượt TRẢ LỜI/PROACTIVE của run này. Auditor đối chiếu 2 chuỗi này
             # theo thời gian -> farm lộ ra (chi tách rời hoạt động thật). Không bịa tỉ lệ
             # gộp lệch cửa sổ: publish số liệu thô, để bên ngoài tự tương quan.
