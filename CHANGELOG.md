@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Daily report labels: simulated compute, seed credits and miners are named as simulated, and confirmed
+  testnet compute no longer reads as "counted". The day count and projection need testnet mode plus
+  `FLOP_TESTNET_START`. `kibble` and `session` lines say they are the last run, and room share names
+  its sample size.
+- Miner statistics survive `state.json` loss through their own signed KV key, trimmed to fit its limit.
 - **Spend-path audit.** Gateway spend is no longer reported as on-chain or counted in the airdrop
   metric until the explorer confirms it under the wallet (`gateway_settled_unverified`), and buying
   stops after `FLOP_ATTRIB_GATE_MIN` FLOP unconfirmed. Failed runs keep their receipt results, so

@@ -120,7 +120,7 @@ def footprint_line(counts: dict, caps: dict, shares: dict, warn_share: float = 0
         mine, total = shares.get(room, (0, 0))
         if total:
             pct = mine / total
-            seg += f" ({pct:.1%} phòng)"
+            seg += f" ({pct:.1%} của {total} tin gần nhất)"
             if pct > warn_share:
                 warns.append(f"r/{room}: ta chiếm {pct:.1%} trong {total} tin gần nhất (> {warn_share:.0%})")
         parts.append(seg)
