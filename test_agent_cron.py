@@ -2765,7 +2765,7 @@ def test_daily_report_compacts_only_the_kibble_extra(monkeypatch):
               "faucet": "off"}
     before = dict(extras)
     assert ac.maybe_send_daily_report({}, 1_790_000_000, extras=extras) is True
-    assert "kibble: 2\u2713 \u00b7 useful 57% \u00b7 lifetime 58% (n=48)" in sent[0]
+    assert "kibble lượt cuối: 2\u2713 \u00b7 useful 57% \u00b7 lifetime 58% (n=48)" in sent[0]
     assert "pending=223" not in sent[0]
     assert "faucet: off" in sent[0]
     assert extras == before                      # không sửa dict của caller

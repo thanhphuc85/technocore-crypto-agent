@@ -1900,14 +1900,46 @@ def maybe_send_daily_report(state: dict, now: int, extras: dict = None) -> bool:
             _start = os.environ.get("FLOP_TESTNET_START", "").strip()
             if _start:
                 _led["testnet_start"] = _start
-            proj = fr.projection(_led, now,
-                                 token=token_manager.default_token(), horizon_days=_days)
+            # Chỉ dự phóng khi kỳ testnet đã có mốc: đếm từ lần chi mô phỏng đầu tiên thì "ngày 16/90"
+            # là một kỳ không tồn tại.
+            proj = (fr.projection(_led, now, token=token_manager.default_token(), horizon_days=_days)
+                    if _start and token_manager.testnet_enabled() else None)
         except Exception:
             proj = None
+        # kibble/session là trạng thái của LƯỢT CUỐI, không phải tổng ngày.
+        _labels = {"kibble": "kibble lượt cuối", "session": "phiên lượt cuối"}
+        if not token_manager.testnet_enabled():
+            _labels["thợ đào"] = "thợ đào mô phỏng"
+        extras = {_labels.get(k, k): v for k, v in extras.items()}
         return _telegram_send(fr.format_report(summ, extras=extras, pacing=pacing, proj=proj))
     except Exception as e:
         print(f"[report] bỏ qua ({str(e)[:100]})")
         return False
+
+
+def persist_miner_stats(private_key, did) -> None:
+    """Đẩy thống kê thợ đào lên khoá KV ĐÃ KÝ riêng. Tách khỏi `state`: tới MINER_CAP thợ đào có thể
+    vượt KV_VALUE_MAX, và một lần ghi bị từ chối sẽ làm mất mọi khoá bền khác. Quá trần -> giữ các
+    thợ đào nhiều phiên nhất."""
+    import flop_miners
+    st = flop_miners._clean(_miner_stats)
+    if not st["counts"]:
+        return
+    top = sorted(st["counts"].items(), key=lambda kv: -kv[1])
+    for cap in (len(top), 100, 50, 20):
+        sealed = _kv_seal(private_key, {"counts": dict(top[:cap]), "denied": st["denied"]})
+        if len(sealed) <= KV_VALUE_MAX:
+            kv_set(private_key, did, _miner_stats_key(), sealed)
+            return
+
+
+def hydrate_miner_stats(state: dict, private_key=None) -> dict:
+    """Thống kê thợ đào từ state.json; mất state.json thì lấy bản KV đã ký của chính agent."""
+    local = state.get(_miner_stats_key())
+    if local:
+        return local
+    body = _kv_open(kv_get(_miner_stats_key()), private_key)
+    return body if isinstance(body, dict) else {}
 
 
 def persist_ledger_to_kv(private_key, did) -> None:
@@ -4897,7 +4929,7 @@ def main():
     # Độ phân tán thợ đào: bằng chứng "independent demand" chỉ có giá trị khi tích luỹ
     # qua nhiều ngày, nên phải bền qua run.
     _miner_stats.clear()
-    _miner_stats.update(state.get(_miner_stats_key()) or {})
+    _miner_stats.update(hydrate_miner_stats(state, private_key))
     now = int(time.time())
     force = force_broadcast_requested()
 
@@ -5554,6 +5586,7 @@ def main():
     # kiểm tra outage để 1 lần kv_set thành công ở đây không che giấu outage thật.
     persist_durable_to_kv(private_key, did)
     persist_ledger_to_kv(private_key, did)   # đẩy sổ cái token (metering) lên KV -> bền, đo được
+    persist_miner_stats(private_key, did)
     # Báo cáo chi tiêu định kỳ (GATED) — đặt SAU persist để số liệu đã chốt của run này.
     _mx = {"kibble": kibble_status, "faucet": faucet_status, "session": session_status}
     # Dấu chân công khai (chỉ khi SẮP gửi báo cáo -> không tốn request mỗi run): tin/phòng hôm

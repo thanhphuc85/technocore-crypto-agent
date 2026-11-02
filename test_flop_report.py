@@ -81,7 +81,7 @@ def test_report_includes_counts_and_extras():
                            extras={"faucet": "1 claim", "session": "6 settled"})
     assert "2026-10-17" in txt
     # Dòng dẫn đầu nay là THƯỚC ĐO THẬT (mua compute), không phải tổng chi gộp.
-    assert "MUA COMPUTE (được tính)" in txt
+    assert "MUA COMPUTE (chain đã xác nhận)" in txt
     assert "ghi sổ LLM (KHÔNG tính): 0.5 FLOP" in txt
     assert "số dư 99.5" in txt
     assert "faucet: 1 claim" in txt and "session: 6 settled" in txt
@@ -360,7 +360,7 @@ def test_report_leads_with_the_metric_that_counts():
                                                   sess_by_day={today: "99000"}),
                                         NOW, mode="testnet"))
     first = txt.split("\n")[1]
-    assert "MUA COMPUTE (được tính)" in first and "287,000" in first
+    assert "MUA COMPUTE (chain đã xác nhận)" in first and "287,000" in first
     assert "ghi sổ LLM (KHÔNG tính): 33,000" in txt     # metering = tổng 320k trừ 287k compute
 
 
@@ -407,4 +407,26 @@ def test_meter_line_excludes_compute_and_credits_survive_trim():
     assert s["meter_total"] == "98" and s["meter_count"] == 2719
     assert s["credited"] == "100" and s["credit_count"] == 1            # nạp 7h trước, entries đã bị cắt
     txt = fr.format_report(s)
-    assert "ghi sổ LLM (KHÔNG tính): 98 FLOP (2719 lần)" in txt and "nạp 24h: 100 FLOP (1 lần)" in txt
+    assert "ghi sổ LLM (KHÔNG tính): 98 FLOP (2719 lần)" in txt and "nạp mô phỏng 24h: 100 FLOP (1 lần)" in txt
+
+
+# --- nhãn theo chế độ: mô phỏng không được đọc như chi tiêu thật ----------------------------
+
+def _labels_summary(mode):
+    return {"mode": mode, "token": "FLOP", "session_total": "10", "session_count": 3, "session_today": "1",
+            "meter_total": "0", "meter_count": 0, "credited": "100", "credit_count": 1, "balance": "90"}
+
+
+def test_simulation_labels_never_read_as_counted_spend():
+    proj = {"projected": "9000", "days": 6, "basis": "days", "day_index": 16, "horizon": 90, "days_left": 74,
+            "today": "1", "total_so_far": "10", "avg_per_day": "100"}
+    txt = fr.format_report(_labels_summary("simulation"), proj=proj)
+    assert "MÔ PHỎNG, KHÔNG được tính" in txt and "nạp mô phỏng 24h" in txt
+    assert "được tính)" in txt and "(được tính)" not in txt
+    assert "ngày 16/90" not in txt and "dự phóng" not in txt and "TB 100" not in txt
+
+
+def test_testnet_labels_claim_confirmation_not_reward():
+    txt = fr.format_report(_labels_summary("testnet"))
+    assert "chain đã xác nhận" in txt and "được tính" not in txt.split("\n")[1]
+    assert "nạp 24h" in txt and "mô phỏng" not in txt

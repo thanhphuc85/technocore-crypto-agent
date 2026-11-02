@@ -63,7 +63,8 @@ def test_engage_replies_counted_once_per_peer_within_window():
 def test_footprint_line_and_spam_warning():
     shares = {"flop": (15, 200), "kibble": (3, 200)}
     line, warn = o.footprint_line({"flop": 28, "kibble": 900}, {"flop": 40, "kibble": 1300, "*": 30}, shares)
-    assert "flop 28/40 (7.5% phòng)" in line and "kibble 900/1300 (1.5% phòng)" in line
+    assert "flop 28/40 (7.5% của 200 tin gần nhất)" in line
+    assert "kibble 900/1300 (1.5% của 200 tin gần nhất)" in line
     assert warn and "r/flop" in warn and "kibble" not in warn
     _, ok = o.footprint_line({"flop": 5}, {"*": 30}, {"flop": (2, 200)})
     assert ok is None

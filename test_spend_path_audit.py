@@ -637,3 +637,69 @@ def test_paid_llm_calls_stop_at_the_daily_cap(monkeypatch):
     with pytest.raises(RuntimeError):
         ac._provider_reply("q", "s", 0.2)
     assert len(posts) == 1
+
+
+# --- báo cáo ngày + thống kê thợ đào bền -------------------------------------------------
+
+def _report(monkeypatch, tmp_path, telegram, mode_testnet, start=""):
+    import time as _t
+    if mode_testnet:
+        monkeypatch.setenv("TESTNET_ENABLED", "true")
+    else:
+        monkeypatch.delenv("TESTNET_ENABLED", raising=False)
+    monkeypatch.setenv("FLOP_TESTNET_START", start)
+    monkeypatch.setenv("TOKEN_LEDGER_FILE", str(tmp_path / f"r{mode_testnet}.json"))
+    monkeypatch.setattr(ac, "DAILY_REPORT_ENABLED", True)
+    tm.credit("100")
+    if mode_testnet:
+        tm.spend("3", "inference-session:a", submit_tx=lambda tx: {"tx_hash": "0x1"}, rpc="https://r.invalid",
+                 log=lambda m: None)
+    else:
+        tm.spend("3", "inference-session:a", log=lambda m: None)
+    assert ac.maybe_send_daily_report({}, int(_t.time()), extras={"kibble": "2✓ x", "session": "3✓", "thợ đào": "8"})
+    return telegram[-1]
+
+
+def test_report_in_simulation_has_no_day_count_and_names_fake_miners(monkeypatch, tmp_path, telegram):
+    txt = _report(monkeypatch, tmp_path, telegram, False, "2026-11-03")
+    assert "dự phóng" not in txt and "/90" not in txt
+    assert "thợ đào mô phỏng: 8" in txt and "phiên lượt cuối: 3✓" in txt and "kibble lượt cuối" in txt
+
+
+def test_report_projects_only_with_a_published_testnet_start(monkeypatch, tmp_path, telegram):
+    assert "dự phóng" not in _report(monkeypatch, tmp_path, telegram, True, "")
+    txt = _report(monkeypatch, tmp_path, telegram, True, "2026-01-01")
+    assert "dự phóng" in txt and "thợ đào: 8" in txt
+
+
+def test_miner_stats_come_back_from_signed_kv_after_state_loss(monkeypatch):
+    kv = {}
+    monkeypatch.setattr(ac, "kv_set", lambda pk, did, k, v: kv.update({k: v}) or True)
+    monkeypatch.setattr(ac, "kv_get", lambda k: kv.get(k))
+    monkeypatch.setattr(ac, "_miner_stats", {"counts": {"5Miner": 7}, "denied": 1})
+    ac.persist_miner_stats(KEY, "did")
+    assert ac.hydrate_miner_stats({}, KEY) == {"counts": {"5Miner": 7}, "denied": 1}
+    local = {ac._miner_stats_key(): {"counts": {"5Local": 2}}}
+    assert ac.hydrate_miner_stats(local, KEY) == local[ac._miner_stats_key()]    # state.json thắng
+
+
+def test_forged_miner_stats_on_kv_are_ignored(monkeypatch):
+    monkeypatch.setattr(ac, "kv_get", lambda k: json.dumps({"body": {"counts": {"x": 9}}, "sig": "AAAA"}))
+    assert ac.hydrate_miner_stats({}, KEY) == {}
+
+
+def test_miner_stats_are_trimmed_to_the_kv_limit(monkeypatch):
+    wrote = {}
+    monkeypatch.setattr(ac, "kv_set", lambda pk, did, k, v: wrote.update({k: v}) or True)
+    counts = {("5" + str(i).zfill(47)): i + 1 for i in range(200)}
+    monkeypatch.setattr(ac, "_miner_stats", {"counts": counts, "denied": 0})
+    ac.persist_miner_stats(KEY, "did")
+    sealed = wrote[ac._miner_stats_key()]
+    kept = json.loads(sealed)["body"]["counts"]
+    assert len(sealed) <= ac.KV_VALUE_MAX and 0 < len(kept) < 200 and max(counts.values()) in kept.values()
+
+
+def test_nothing_is_written_without_miner_stats(monkeypatch):
+    monkeypatch.setattr(ac, "kv_set", lambda *a, **k: pytest.fail("không có gì để ghi"))
+    monkeypatch.setattr(ac, "_miner_stats", {})
+    ac.persist_miner_stats(KEY, "did")

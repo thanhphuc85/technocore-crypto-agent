@@ -307,16 +307,20 @@ def format_report(s: dict, *, date_label: str = None, extras: dict = None,
     s = s if isinstance(s, dict) else {}
     tok = s.get("token", "FLOP")
     head = f"Technocore agent — {date_label or time.strftime('%Y-%m-%d', time.gmtime())}"
-    if (s.get("mode") or "") != "testnet":
+    sim = (s.get("mode") or "") != "testnet"
+    if sim:
         head += f"  [{s.get('mode', '?')} — KHÔNG phải chi tiêu thật]"
+    # "Đã xác nhận" chứ không phải "được tính": chain ghi nhận chi tiêu, còn FLOP mới quyết định
+    # phân bổ. Ở mô phỏng thì không có gì được tính cả.
+    compute = "MÔ PHỎNG, KHÔNG được tính" if sim else "chain đã xác nhận"
     lines = [
         head,
-        f"◆ MUA COMPUTE (được tính): {_grp(s.get('session_total', '0'))} {tok} "
+        f"◆ MUA COMPUTE ({compute}): {_grp(s.get('session_total', '0'))} {tok} "
         f"· {s.get('session_count', 0)} phiên · hôm nay +{_grp(s.get('session_today', '0'))}",
         f"ghi sổ LLM (KHÔNG tính): {_grp(s.get('meter_total', s.get('spent_total', '0')))} {tok} "
         f"({s.get('meter_count', s.get('spend_count_total', 0))} lần)",
-        f"nạp 24h: {s.get('credited', '0')} {tok} ({s.get('credit_count', 0)} lần) "
-        f"· số dư {s.get('balance', '0')}",
+        f"{'nạp mô phỏng' if sim else 'nạp'} 24h: {s.get('credited', '0')} {tok} "
+        f"({s.get('credit_count', 0)} lần) · số dư {s.get('balance', '0')}",
     ]
     if s.get("gateway_unverified") not in (None, "0"):
         lines.insert(2, f"⚠️ gateway đã settle, chain CHƯA xác nhận (chưa tính): "
@@ -331,7 +335,7 @@ def format_report(s: dict, *, date_label: str = None, extras: dict = None,
         lines.append(f"nhịp: {h['elapsed_pct']}% ngày đã trôi · "
                      f"{h['spent_pct']}% ngân sách đã chi -> {label}")
     pj = proj if isinstance(proj, dict) else {}
-    if pj.get("projected"):
+    if pj.get("projected") and not sim:             # mô phỏng: chưa có kỳ testnet nào để đếm/dự phóng
         src = f"TB {pj['days']} ngày" if pj.get("basis") == "days" else "nhịp hôm nay"
         if pj.get("day_index"):
             lines.append(f"ngày {pj['day_index']}/{pj['horizon']} · hôm nay "
