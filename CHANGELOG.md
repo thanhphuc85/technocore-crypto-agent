@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- A `settled` gateway receipt whose `settled_spend` and `settled_spend_raw` are still null (OpenAPI:
+  "unknown", never zero) is kept open and booked once the gateway fills the amount; it was marked seen
+  at 0 FLOP and never booked.
+- An exhausted gateway allowance now raises the real-spend alert instead of counting as a normal wait:
+  the OpenAPI says a wallet allowance is never renewed, and the faucet funds the wallet, not the quota.
+  `exhausted`/`unfunded` error codes match regardless of case (an upper-case code was reported as x402).
+- A hung gateway request is reconciled by its send time when the receipt `request_id` is not the
+  `Idempotency-Key` (the OpenAPI does not declare that header for `/chat/completions`), instead of
+  blocking new calls for 30 minutes. Only a single unambiguous receipt of the same model is accepted.
+- An LLM key rejected with 400/403 and a key error (Google's "API key not valid") marks the provider
+  dead for the run, like 401/402; Gemini and Groq stop walking models on a rejected key. The Groq model
+  walk is capped by `GROQ_MAX_TRIES` (6) and respects the run budget.
 - Gateway receipts in an unknown state (for example `streaming`) are no longer booked as settled just
   because they carry `settled_spend`; they are tracked as open (counted by the attribution gate) and
   booked once settled. Only receipts with no `state` field are trusted by amount.

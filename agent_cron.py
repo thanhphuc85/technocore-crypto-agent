@@ -2235,7 +2235,30 @@ def _one_reply(provider: str, user_text: str, system: str, temperature: float,
 # Provider trả 401/402 (key sai / hết tiền) = hỏng HẲN, không phải lỗi tạm: bỏ qua tới hết lượt
 # chạy này thay vì gọi lại ở MỌI lần cần LLM. Một lượt = một tiến trình, nên tự xoá ở lượt sau.
 _LLM_DEAD_STATUS = (401, 402)
+# Google trả 400 INVALID_ARGUMENT ("API key not valid") / 403 PERMISSION_DENIED cho KHOÁ hỏng — không
+# phải 401. Không nhận ra thì mỗi câu trả lời lại gõ tới GEMINI_MAX_TRIES model rồi mới rơi xuống
+# provider trả phí. Chỉ coi 400/403 là khoá hỏng khi thân lỗi NÓI về khoá (400 thường = request sai).
+_KEY_REJECTED_MARKERS = ("api key not valid", "api_key_invalid", "invalid api key", "api key expired",
+                         "api_key_expired", "permission_denied", "consumer_suspended",
+                         "has been suspended", "incorrect api key")
 _llm_dead = {}                       # provider -> mã HTTP đã khiến nó bị bỏ qua
+
+
+def _key_rejected(e) -> int:
+    """Mã HTTP nếu lỗi `e` cho thấy KHOÁ API hỏng hẳn (401/402, hoặc 400/403 kèm thông báo về khoá),
+    ngược lại 0."""
+    resp = getattr(e, "response", None)
+    status = getattr(resp, "status_code", None)
+    if status in _LLM_DEAD_STATUS:
+        return status
+    if status in (400, 403):
+        try:
+            body = str(getattr(resp, "text", "") or "")
+        except Exception:
+            body = ""
+        if any(m in f"{body} {e}".lower() for m in _KEY_REJECTED_MARKERS):
+            return status
+    return 0
 # Provider TÍNH TIỀN theo lượt gọi: khi provider miễn phí hỏng cả ngày, mọi lượt đổ sang đây.
 _LLM_PAID = ("deepseek", "openai")
 _llm_paid = {}                       # {"day": 'YYYY-MM-DD', "n": số lần gọi}, bền qua state
@@ -2279,10 +2302,10 @@ def _provider_reply(user_text: str, system: str, temperature: float, max_tokens:
         except Exception as e:
             last_err = e
             print(f"[llm:{provider}] failed | {str(e)[:100]}")
-            status = getattr(getattr(e, "response", None), "status_code", None)
-            if status in _LLM_DEAD_STATUS:
+            status = _key_rejected(e)
+            if status:
                 _llm_dead[provider] = status
-                print(f"[llm:{provider}] HTTP {status} — bỏ qua provider này tới hết lượt chạy")
+                print(f"[llm:{provider}] HTTP {status} (khoá bị từ chối) — bỏ qua provider này tới hết lượt chạy")
     raise last_err or RuntimeError("no llm provider available")
 
 
@@ -2310,6 +2333,7 @@ GEMINI_LAST_GOOD_TTL_SEC = int(_env_float("GEMINI_LAST_GOOD_TTL_SEC", 3600))
 # Mỗi model treo mất tới 20s và key có thể có hàng chục model: một câu trả lời không được phép ăn
 # hết ngân sách của cả lượt khi Google chập chờn.
 GEMINI_MAX_TRIES = int(_env_float("GEMINI_MAX_TRIES", 6))
+GROQ_MAX_TRIES = int(_env_float("GROQ_MAX_TRIES", 6))       # cùng lý do cho vòng dò model Groq
 _gemini_last_good_ts = None          # lúc model trong cache được xác nhận chạy (epoch)
 
 
@@ -2474,6 +2498,8 @@ def _gemini_reply(user_text: str, system: str, temperature: float,
             _gemini_note_429(_gemini_model_cache, e)
             _gemini_model_cache = None
             _gemini_last_good_ts = None
+            if _key_rejected(e):
+                raise                            # khoá hỏng: model khác cũng vậy, không thử tiếp
 
     # 2) Lùi về danh sách ưu tiên (áp dụng cả khi user ghim GEMINI_MODEL nhưng nó fail).
     for model in _gemini_candidates():
@@ -2494,6 +2520,8 @@ def _gemini_reply(user_text: str, system: str, temperature: float,
             tried.add(model)
             _gemini_note_404(model, e)
             _gemini_note_429(model, e)
+            if _key_rejected(e):
+                raise                            # khoá hỏng: model khác cũng vậy, không thử tiếp
     raise last_err or RuntimeError("no gemini model available")
 
 
@@ -2587,11 +2615,18 @@ def _groq_reply(user_text: str, system: str, temperature: float,
             print(f"[llm:groq] cached {_groq_model_cache} -> {str(e)[:80]}, fallback")
             tried.add(_groq_model_cache)
             _groq_model_cache = None
+            if _key_rejected(e):
+                raise                            # khoá hỏng: model khác cũng vậy, không thử tiếp
 
-    # 2) Lùi về danh sách ưu tiên (áp dụng cả khi user ghim GROQ_MODEL nhưng nó fail).
+    # 2) Lùi về danh sách ưu tiên (áp dụng cả khi user ghim GROQ_MODEL nhưng nó fail). Có TRẦN lượt
+    #    thử và tôn trọng ngân sách lượt như Gemini: key Groq liệt kê hàng chục model, mỗi lần treo tới
+    #    20s — trước đây không trần, có thể đẩy lượt chạy quá timeout-minutes 20 của job.
     for model in _groq_candidates():
         if model in tried:
             continue
+        if len(tried) >= GROQ_MAX_TRIES or time.time() + 20 > run_deadline():
+            print(f"[llm:groq] dừng sau {len(tried)} model (trần lượt thử / ngân sách lượt)")
+            break
         try:
             text = _groq_call(model, user_text, system, temperature, max_tokens)
             print(f"[llm:groq] model = {model}")
@@ -2601,6 +2636,8 @@ def _groq_reply(user_text: str, system: str, temperature: float,
             last_err = e
             print(f"[llm:groq] {model} -> {str(e)[:80]}")
             tried.add(model)
+            if _key_rejected(e):
+                raise                            # khoá hỏng: model khác cũng vậy, không thử tiếp
     raise last_err or RuntimeError("no groq model available")
 
 
@@ -4822,7 +4859,9 @@ def gateway_session_step(state: dict, private_key, now: int):
     # KV công khai và giới hạn 8192 ký tự: chỉ sao khoá đối soát, KHÔNG sao đề bài. Mất state.json
     # thì đối soát theo biên nhận, không phát lại được.
     _inf = _g.get("inflight") if isinstance(_g.get("inflight"), dict) else None
-    state["gateway_inflight"] = {"inflight": _inf and {k: _inf.get(k) for k in ("key", "ts", "max_cost")},
+    state["gateway_inflight"] = {"inflight": _inf and {k: _inf[k] for k in ("key", "ts", "sent", "max_cost",
+                                                                            "model", "max_wait")
+                                                       if _inf.get(k) is not None},
                                  "profile": _g.get("profile"), "at": now, "day_spent": _g.get("day_spent"),
                                  "replay_unsafe": _g.get("replay_unsafe")}
     save_state({"gateway_inflight": state["gateway_inflight"]})

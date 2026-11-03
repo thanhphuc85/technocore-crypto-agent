@@ -327,8 +327,10 @@ def window_due(win, remaining: float, now: int, horizon_ts: int, interval: float
     flop_pacer): cửa sổ [start, hạn - biên], total = quota lúc mở cửa sổ; mục tiêu tới run
     này = total * (now + interval - start) / (end - start); due = mục tiêu - đã chi.
     Phần nhỏ chưa đủ 1 lần gọi được TÍCH LẠI sang run sau (không bị bỏ).
-    Mở cửa sổ mới khi hạn đổi (allowance/ngày mới) hoặc quota TĂNG ít nhất `topup_min`
-    (faucet nạp). Quota tăng ÍT hơn thế = gateway HOÀN phần giữ chỗ thừa của lần gọi trước
+    Mở cửa sổ mới khi hạn đổi (allowance/ngày mới) hoặc quota TĂNG ít nhất `topup_min` (coi
+    như một allowance mới). Lưu ý: OpenAPI v2 /enroll/wallet cấp MỘT allowance mỗi ví và "never
+    renewed" — faucet nạp vào SỐ DƯ VÍ, KHÔNG nạp lại quota gateway; nhánh này chỉ phòng trường hợp
+    mạng khác cấp thêm. Quota tăng ÍT hơn thế = gateway HOÀN phần giữ chỗ thừa của lần gọi trước
     (devnet 2026-10-24: giữ chỗ ~6,5, settle khác) -> trừ vào "đã chi", KHÔNG mở cửa sổ mới.
     Trước đây mỗi lần hoàn tiền đều mở cửa sổ mới: mốc kế hoạch về 0, mất phần chi bù đã tích
     và cảnh báo tụt lại không bao giờ bắn."""
@@ -410,6 +412,32 @@ REPLAY_RETRY_STATUS = AMBIGUOUS_STATUS | {409, 425, 429, 503}
 # Biên nhận thật (devnet 2026-10-24) KHÔNG có trường miner, chỉ có channel_id: tra kênh trên
 # explorer để biết miner và kênh ĐỨNG TÊN AI (agent). Tối đa ngần này lần tra mỗi lượt.
 CHANNEL_LOOKUPS_PER_RUN = 5
+# OpenAPI v2 (/enroll/wallet): mỗi ví MỘT allowance (mặc định 25 FLOP, hết hạn trong 24h); allowance đã
+# hết/hết hạn/thu hồi "is never renewed". Hết quota = agent KHÔNG mua thêm được nữa qua đường này,
+# không phải "chờ faucet nạp" — phải báo, không được coi là trạng thái chờ bình thường.
+EXHAUSTED_NOTE = ("allowance gateway không được cấp lại (OpenAPI /enroll/wallet); agent không mua thêm "
+                  "được qua đường này — faucet chỉ nạp số dư ví, cần backend mở kênh đứng tên ví")
+# Lệch đồng hồ cho phép giữa runner và gateway khi khớp request treo theo giờ gửi. Nhỏ hơn khoảng
+# cách giữa hai lần gọi (FLOP_GATEWAY_CALL_GAP_SEC mặc định 31s) để biên nhận lần gọi trước không lọt vào.
+INFLIGHT_MATCH_SKEW_SEC = 15
+
+
+def match_inflight(inf: dict, recent) -> str:
+    """Khoá biên nhận của request treo, khớp theo GIỜ GỬI; '' nếu không chắc.
+
+    OpenAPI v2 không khai báo Idempotency-Key cho /chat/completions, nên request_id của biên nhận có
+    thể KHÔNG phải khoá ta gửi -> trước đây mỗi lần timeout đều chờ hết INFLIGHT_TTL_SEC. Credential chỉ
+    agent này dùng và không gọi mới khi còn request treo, nên biên nhận của nó là biên nhận cùng model
+    tạo trong [giờ gửi - lệch, giờ gửi + max_wait + 120s]. Chỉ nhận khi có ĐÚNG MỘT ứng viên — hai trở
+    lên thì không đoán. `recent` = [(created_at giây | None, model, khoá)]."""
+    sent = inf.get("sent")
+    if not isinstance(sent, (int, float)) or sent <= 0:
+        return ""
+    hi = sent + int(inf.get("max_wait") or 0) / 1000 + 120
+    model = str(inf.get("model") or "")
+    cands = [k for t, m, k in recent or []
+             if t is not None and sent - INFLIGHT_MATCH_SKEW_SEC <= t <= hi and (not m or not model or m == model)]
+    return cands[0] if len(cands) == 1 else ""
 
 
 def probe_up(tok_cap: int, cap: int, tok_bad, tok_bad_ts, now: int) -> int:
@@ -484,10 +512,16 @@ def settled_amount(rc: dict):
 
     Trạng thái LẠ không bao giờ là "đã settle", kể cả khi có settled_spend > 0: gateway có thể điền
     số tạm trước khi chốt, mà biên nhận đã ghi thì vào receipts_seen và không bao giờ được ghi lại
-    theo số cuối. Chỉ biên nhận KHÔNG có trường state (dạng cũ) mới được tin theo số tiền."""
+    theo số cuối. Chỉ biên nhận KHÔNG có trường state (dạng cũ) mới được tin theo số tiền.
+
+    `settled` mà settled_spend và settled_spend_raw đều null -> CHƯA biết số (OpenAPI: null là
+    "unknown", "never an inferred zero"): trả None để chờ gateway điền. Trước đây trả 0 -> biên
+    nhận vào receipts_seen với 0 FLOP và không bao giờ được ghi sổ khi số tiền xuất hiện."""
     st = _state(rc)
     amt = _spend_value(rc)
-    if rc.get("block_number") is not None or st in _SETTLED_STATES:
+    if st in _SETTLED_STATES:
+        return amt
+    if rc.get("block_number") is not None:          # dạng OpenAPI cũ: có block mà không có số tiền
         return amt or 0.0
     if amt and amt > 0 and not st:
         return amt
@@ -504,7 +538,7 @@ _LAG_HINTS = {
     "payment_required": "402: gateway đòi thanh toán x402 — agent KHÔNG tự trả, cần chỉnh tay",
     "unfunded": "ví chưa đủ số dư tối thiểu — kiểm tra faucet",
     "forbidden": "403 — allowance bị thu hồi/hết hạn",
-    "exhausted": "quota/allowance đã hết",
+    "exhausted": "quota/allowance đã hết — theo OpenAPI không được cấp lại",
     "auth_reset": "401 — bearer hỏng, đang đăng ký lại",
     "network_mismatch": "gateway báo sai mạng — kiểm FLOP_GATEWAY_URL / FLOP_GATEWAY_NETWORK",
     "error_network": "không đọc được /health của gateway",
@@ -625,6 +659,7 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
     không có miner). Kết quả có `miners` và `foreign_channels` = số kênh KHÔNG đứng tên ví mình."""
     import uuid
     new_key = new_key or (lambda: str(uuid.uuid4()))
+    t0 = clock()                             # mốc đồng hồ đầu lượt: giờ gửi = now + (clock() - t0)
     g = state.get(KEY) if isinstance(state.get(KEY), dict) else {}
     g = dict(g)
     # Đổi gateway/mạng (vd tập devnet -> testnet thật): bắt đầu SẠCH. Không thì lịch nghỉ, cửa
@@ -733,6 +768,7 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
         model = models[model_id]
         rids = set()                        # request_id của các biên nhận gateway vừa trả
         settled_rids = set()                # ... trong đó đã settle
+        recent = []                         # (created_at giây, model, khoá) — đối soát request treo theo giờ
 
         def collect(prev_calls: int) -> dict:
             """Đọc biên nhận; ghi sổ (book_fn) MỖI biên nhận mới ĐÃ SETTLE theo settled_spend —
@@ -750,7 +786,10 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
             settled_rids.clear()
             settled_rids.update(str(rc.get("request_id")) for rc in items
                                 if rc.get("request_id") and settled_amount(rc) is not None)
-            odd = set()
+            recent.clear()
+            recent.extend((epoch_s(rc.get("created_at")), str(rc.get("model") or ""), _receipt_key(rc))
+                          for rc in items)
+            odd, unpriced = set(), 0
             for rc in items:
                 key = f"{rc.get('state')}/{rc.get('response_status')}"
                 hist[key] = hist.get(key, 0) + 1
@@ -758,9 +797,12 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
                 a = settled_amount(rc)
                 if unknown_state(rc):
                     odd.add(_state(rc)[:24])
-                # Trạng thái lạ = chưa chốt: theo dõi như biên nhận đang chờ (tính vào exposure của cổng
-                # đứng tên, và vào "rời phản hồi khi chưa settle" nếu biến mất) thay vì bỏ qua im lặng.
-                if a is None and (_state(rc) in _WAITING_STATES or unknown_state(rc)):
+                if a is None and _state(rc) in _SETTLED_STATES:
+                    unpriced += 1
+                # Trạng thái lạ / settled chưa có số = chưa chốt: theo dõi như biên nhận đang chờ (tính
+                # vào exposure của cổng đứng tên, và vào "rời phản hồi khi chưa settle" nếu biến mất).
+                if a is None and (_state(rc) in _WAITING_STATES or _state(rc) in _SETTLED_STATES
+                                  or unknown_state(rc)):
                     waiting.setdefault(k, [now, _num(rc.get("reserved_spend")) or _spend_value(rc) or 0.0])
                 else:
                     waiting.pop(k, None)
@@ -778,6 +820,8 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
             # còn đọc được số tiền. Không ghi sổ theo ước tính — đếm và báo để đối soát tay.
             if odd:
                 log(f"[gateway] ⚠️ biên nhận ở trạng thái lạ {sorted(odd)} — chưa ghi sổ cho tới khi settled")
+            if unpriced:
+                log(f"[gateway] {unpriced} biên nhận đã settled nhưng gateway chưa điền số tiền — chờ, chưa ghi sổ")
             lost = [k for k in waiting if k not in live] if live else []
             lost_flop = sum(_cost(v[1]) for v in (waiting.pop(k) for k in lost) if isinstance(v, list))
             if lost:
@@ -838,6 +882,7 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
             ttl = _env_num("FLOP_GATEWAY_INFLIGHT_TTL_SEC", INFLIGHT_TTL_SEC)
             replay_max = int(_env_num("FLOP_GATEWAY_REPLAY_MAX", 0))
             wait_s = int(inf.get("max_wait") or 0) / 1000
+            by_time = "" if key in rids else match_inflight(inf, recent)
 
             def try_replay():
                 """Gửi lại ĐÚNG thân request với ĐÚNG khoá. Trả phản hồi, hoặc None nếu chưa lấy được."""
@@ -866,7 +911,7 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
             if (inf.get("prompt") and inf.get("model") == model_id
                     and int(inf.get("replays") or 0) < replay_max and age < ttl
                     and not g.get("replay_unsafe")
-                    and (key not in rids or (answer_fn and key in settled_rids))
+                    and ((key not in rids and not by_time) or (answer_fn and key in settled_rids))
                     and not (deadline and clock() + wait_s + 15 > deadline)):
                 r = try_replay()
                 try:
@@ -897,6 +942,9 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
             if key and key in rids:
                 log(f"[gateway] đối soát xong request treo {key[:8]}… — đã có biên nhận")
                 g.pop("inflight", None)
+            elif by_time:
+                log(f"[gateway] đối soát xong request treo {key[:8]}… theo giờ gửi — biên nhận {by_time[:12]}…")
+                g.pop("inflight", None)
             elif age < ttl:
                 return done("reconciling", remaining=remaining,
                             reason=(f"request {key[:8]}… gửi {age}s trước chưa rõ kết quả (timeout) — "
@@ -913,7 +961,7 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
                 return done("attribution_hold", remaining=remaining, reason=str(hold)[:200])
         if remaining <= 0:
             backoff(1800, "quota_exhausted")
-            return done("exhausted", reason="quota gateway đã hết")
+            return done("exhausted", reason=f"quota gateway đã hết — {EXHAUSTED_NOTE}")
 
         hz = horizon(now, g.get("expires_at"))
         # Ngưỡng coi là faucet NẠP (không phải hoàn tiền): >= 10 FLOP và >= 2 lần cỡ lần gọi gần nhất.
@@ -1017,8 +1065,11 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
             max_cost = min(per_call, est_cost) * 1.1
             pending = new_key()
             # Đủ để phát lại ĐÚNG thân request nếu không nhận được phản hồi.
-            g["inflight"] = {"key": pending, "ts": now, "max_cost": round(max_cost, 6),
-                             "model": model_id, "prompt": prompt, "mt": mt, "max_wait": max_wait}
+            # `sent` = giờ gửi THẬT (now + thời gian đã trôi trong lượt) để đối soát theo giờ (match_inflight);
+            # `ts` giữ mốc của lượt cho TTL.
+            g["inflight"] = {"key": pending, "ts": now, "sent": now + int(clock() - t0),
+                             "max_cost": round(max_cost, 6), "model": model_id, "prompt": prompt, "mt": mt,
+                             "max_wait": max_wait}
             if checkpoint:
                 state[KEY] = g
                 try:
@@ -1090,9 +1141,9 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
         if e.status == 401:
             g.pop("vault", None)                              # bearer chết -> enroll lại run sau
             return done("auth_reset", reason=f"401 {e.code} — enroll lại ở run sau")
-        if e.status == 402 and "exhausted" in e.code:
+        if e.status == 402 and "exhausted" in e.code.lower():   # mã có thể viết hoa
             backoff(3600, f"402 {e.code}")                    # allowance hết, không phải đòi trả tiền
-            return done("exhausted", reason=f"402 {e.code} {e.message}".strip())
+            return done("exhausted", reason=f"402 {e.code} {e.message} — {EXHAUSTED_NOTE}".strip())
         if e.status == 402:
             pay = {k: e.data.get(k) for k in ("error", "price", "asset", "destination",
                                               "timeout_blocks", "hash_lock") if k in e.data}
@@ -1101,7 +1152,7 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
             return done("payment_required", reason=f"402 {e.code or ''} {e.message}".strip(), payment=pay)
         if e.status == 403:
             backoff(3600, f"403 {e.code}")
-            return done("unfunded" if "unfunded" in e.code else "forbidden",
+            return done("unfunded" if "unfunded" in e.code.lower() else "forbidden",
                         reason=f"403 {e.code} {e.message}".strip())
         if e.status == 503 and "no admitted miner" in e.message.lower() and g.get("last_mt"):
             # Không miner nào nhận yêu cầu CỠ này -> lần sau gửi nửa cỡ (không phải mạng quá tải).

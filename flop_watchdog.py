@@ -69,13 +69,14 @@ def observe(state: dict, *, settled_onchain: int, status: str, spent_today_oncha
     w = dict(w) if isinstance(w, dict) else {}
     out = {"alert": None, "recovered": None}
     healthy_wait = str(status).endswith("pace-wait") and _num(spent_today_onchain) > 0
-    # Đường gateway (flop_gateway): "chưa tới nhịp" và "đã chi hết quota" là ĐÚNG THIẾT KẾ — với
-    # faucet 25 FLOP/ngày phần lớn các lượt là chờ. Trước đây status "…gateway/pace_wait" (gạch
-    # dưới) không khớp "pace-wait" -> mỗi lượt chờ bị đếm là "không chi" -> báo động GIẢ sau 6
-    # lượt, lặp mỗi 6h. Coi là TRUNG TÍNH: không đếm lỗi, cũng KHÔNG xoá đếm — nếu settlement hỏng
-    # thật, các lượt mua (chưa settle) xen giữa lượt chờ vẫn tích lại và báo động được.
-    # daily_cap (phanh operator đặt) và attribution_hold (có Telegram riêng) cũng là trung tính.
-    if settled_onchain <= 0 and re.search(r"gateway/(pace_wait|exhausted|daily_cap|attribution_hold)$",
+    # Đường gateway (flop_gateway): "chưa tới nhịp" là ĐÚNG THIẾT KẾ — phần lớn các lượt là chờ.
+    # Trước đây status "…gateway/pace_wait" (gạch dưới) không khớp "pace-wait" -> mỗi lượt chờ bị
+    # đếm là "không chi" -> báo động GIẢ sau 6 lượt, lặp mỗi 6h. Coi là TRUNG TÍNH: không đếm lỗi,
+    # cũng KHÔNG xoá đếm — nếu settlement hỏng thật, các lượt mua (chưa settle) xen giữa lượt chờ
+    # vẫn tích lại và báo động được. daily_cap (phanh operator đặt) và attribution_hold (có Telegram
+    # riêng) cũng là trung tính. `exhausted` thì KHÔNG: OpenAPI /enroll/wallet ghi allowance "never
+    # renewed", nên hết quota = ngừng mua vĩnh viễn trên đường này — trước đây im lặng mãi.
+    if settled_onchain <= 0 and re.search(r"gateway/(pace_wait|daily_cap|attribution_hold)$",
                                           str(status)):
         return out
     if settled_onchain > 0 or healthy_wait:

@@ -1210,6 +1210,85 @@ def test_all_providers_dead_raises_instead_of_calling(monkeypatch):
         ac._provider_reply("q", "s", 0.2)
 
 
+def _resp_status_body(status, body):
+    """requests.Response thật: raise_for_status() ném HTTPError mang response (như API thật)."""
+    import requests
+    r = requests.Response()
+    r.status_code = status
+    r._content = body.encode("utf-8")
+    r.url = "https://example.invalid/"
+    return r
+
+
+def _http_error_body(status, body):
+    import requests
+    return requests.HTTPError(f"{status} Client Error", response=_resp_status_body(status, body))
+
+
+def test_key_rejected_only_when_the_body_speaks_about_the_key():
+    assert ac._key_rejected(_http_error(401)) == 401 and ac._key_rejected(_http_error(402)) == 402
+    gem = '{"error": {"code": 400, "message": "API key not valid. Please pass a valid API key.", ' \
+          '"status": "INVALID_ARGUMENT", "details": [{"reason": "API_KEY_INVALID"}]}}'
+    assert ac._key_rejected(_http_error_body(400, gem)) == 400
+    assert ac._key_rejected(_http_error_body(403, '{"error": {"status": "PERMISSION_DENIED"}}')) == 403
+    assert ac._key_rejected(_http_error_body(400, '{"error": "max_tokens too large"}')) == 0   # request sai
+    assert ac._key_rejected(_http_error(503)) == 0 and ac._key_rejected(ValueError("x")) == 0
+
+
+def test_gemini_rejected_key_is_dead_after_one_call(monkeypatch):
+    # Google trả 400 "API key not valid" (không phải 401): trước đây mỗi câu trả lời gõ 6 model Gemini
+    # rồi mới rơi sang DeepSeek trả phí, và lặp lại ở MỌI câu.
+    gem_calls = []
+    bad = '{"error": {"code": 400, "message": "API key not valid.", "status": "INVALID_ARGUMENT"}}'
+
+    def post(url, **k):
+        if "generativelanguage" in url:
+            gem_calls.append(url)
+            return _resp_status_body(400, bad)
+        return _resp_with_body({"choices": [{"message": {"content": "ok"}}]})
+    monkeypatch.setattr(ac.requests, "post", post)
+    monkeypatch.setattr(ac.requests, "get", lambda url, **k: _resp_status_body(400, bad))
+    monkeypatch.setattr(ac, "_provider_chain", lambda: ["gemini", "deepseek"])
+    monkeypatch.setattr(ac, "GEMINI_MODEL", "gemini-flash-lite-latest")
+    monkeypatch.setattr(ac, "_gemini_model_cache", None)
+    monkeypatch.setattr(ac, "_gemini_404", set())
+    monkeypatch.setattr(ac, "_gemini_429", {})
+    for _ in range(3):
+        assert ac._provider_reply("q", "s", 0.2)[1] == "deepseek"
+    assert len(gem_calls) == 1 and ac._llm_dead == {"gemini": 400}
+
+
+def test_groq_model_walk_is_capped(monkeypatch):
+    monkeypatch.setattr(ac, "_groq_model_cache", None)
+    monkeypatch.setattr(ac, "_groq_candidates", lambda: [f"m{i}" for i in range(40)])
+    calls = []
+    monkeypatch.setattr(ac, "_groq_call", lambda m, *a, **k: calls.append(m) or (_ for _ in ()).throw(
+        _http_error(503)))
+    with pytest.raises(Exception):
+        ac._groq_reply("q", "s", 0.2)
+    assert len(calls) == ac.GROQ_MAX_TRIES                     # trước đây: cả 40 model, mỗi cái tới 20s
+
+
+def test_groq_model_walk_respects_the_run_budget(monkeypatch):
+    monkeypatch.setattr(ac, "_groq_model_cache", None)
+    monkeypatch.setattr(ac, "_groq_candidates", lambda: ["m0", "m1"])
+    monkeypatch.setattr(ac, "run_deadline", lambda: ac.time.time() + 5)   # còn < 20s
+    monkeypatch.setattr(ac, "_groq_call", lambda *a, **k: pytest.fail("không được gọi khi hết ngân sách lượt"))
+    with pytest.raises(RuntimeError):
+        ac._groq_reply("q", "s", 0.2)
+
+
+def test_groq_rejected_key_stops_the_model_walk(monkeypatch):
+    monkeypatch.setattr(ac, "_groq_model_cache", None)
+    monkeypatch.setattr(ac, "_groq_candidates", lambda: ["m0", "m1", "m2"])
+    calls = []
+    monkeypatch.setattr(ac, "_groq_call", lambda m, *a, **k: calls.append(m) or (_ for _ in ()).throw(
+        _http_error(401)))
+    with pytest.raises(Exception):
+        ac._groq_reply("q", "s", 0.2)
+    assert calls == ["m0"]
+
+
 def test_provider_chain_pinned_without_key_is_empty(monkeypatch):
     _keys(monkeypatch, deepseek="dk", mode="gemini")   # ghim gemini nhưng thiếu key
     assert ac._provider_chain() == []
@@ -3758,7 +3837,9 @@ def test_durable_inflight_copy_never_carries_the_prompt(monkeypatch):
     monkeypatch.delenv("TESTNET_ENABLED", raising=False)
     st = {}
     ac.gateway_session_step(st, _real_key(), 1_800_000_000)
-    assert st["gateway_inflight"]["inflight"] == {"key": "k-1", "ts": 5, "max_cost": 1.0}
+    # Không có đề bài; có model/max_wait để vẫn đối soát được theo giờ gửi khi mất state.json.
+    assert st["gateway_inflight"]["inflight"] == {"key": "k-1", "ts": 5, "max_cost": 1.0, "model": "m",
+                                                  "max_wait": 1000}
 
 
 def test_cleared_inflight_in_state_json_wins_over_a_stale_kv_copy(monkeypatch):
