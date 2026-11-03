@@ -469,13 +469,27 @@ def _spend_value(rc: dict):
     return raw / 1e18 if raw is not None else None
 
 
+def _state(rc: dict) -> str:
+    return str(rc.get("state") or "").strip().lower()
+
+
+def unknown_state(rc: dict) -> bool:
+    """Biên nhận có trạng thái KHÔNG nằm trong các nhóm đã biết (vd "streaming", "processing")."""
+    st = _state(rc)
+    return bool(st) and st not in _SETTLED_STATES and st not in _OPEN_STATES
+
+
 def settled_amount(rc: dict):
-    """FLOP đã settle của 1 biên nhận, hoặc None nếu chưa settle."""
-    st = str(rc.get("state") or "").strip().lower()
+    """FLOP đã settle của 1 biên nhận, hoặc None nếu chưa settle.
+
+    Trạng thái LẠ không bao giờ là "đã settle", kể cả khi có settled_spend > 0: gateway có thể điền
+    số tạm trước khi chốt, mà biên nhận đã ghi thì vào receipts_seen và không bao giờ được ghi lại
+    theo số cuối. Chỉ biên nhận KHÔNG có trường state (dạng cũ) mới được tin theo số tiền."""
+    st = _state(rc)
     amt = _spend_value(rc)
     if rc.get("block_number") is not None or st in _SETTLED_STATES:
         return amt or 0.0
-    if amt and amt > 0 and st not in _OPEN_STATES:
+    if amt and amt > 0 and not st:
         return amt
     return None
 
@@ -736,13 +750,18 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
             settled_rids.clear()
             settled_rids.update(str(rc.get("request_id")) for rc in items
                                 if rc.get("request_id") and settled_amount(rc) is not None)
+            odd = set()
             for rc in items:
                 key = f"{rc.get('state')}/{rc.get('response_status')}"
                 hist[key] = hist.get(key, 0) + 1
                 k = _receipt_key(rc)
                 a = settled_amount(rc)
-                if a is None and str(rc.get("state") or "").strip().lower() in _WAITING_STATES:
-                    waiting.setdefault(k, [now, _num(rc.get("reserved_spend")) or 0.0])
+                if unknown_state(rc):
+                    odd.add(_state(rc)[:24])
+                # Trạng thái lạ = chưa chốt: theo dõi như biên nhận đang chờ (tính vào exposure của cổng
+                # đứng tên, và vào "rời phản hồi khi chưa settle" nếu biến mất) thay vì bỏ qua im lặng.
+                if a is None and (_state(rc) in _WAITING_STATES or unknown_state(rc)):
+                    waiting.setdefault(k, [now, _num(rc.get("reserved_spend")) or _spend_value(rc) or 0.0])
                 else:
                     waiting.pop(k, None)
                 if a is None or k in seen:
@@ -757,6 +776,8 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
                         f"(keys: {sorted(rc)[:10]})")
             # /keys/me/receipts không phân trang: biên nhận rời phản hồi khi chưa settle thì không
             # còn đọc được số tiền. Không ghi sổ theo ước tính — đếm và báo để đối soát tay.
+            if odd:
+                log(f"[gateway] ⚠️ biên nhận ở trạng thái lạ {sorted(odd)} — chưa ghi sổ cho tới khi settled")
             lost = [k for k in waiting if k not in live] if live else []
             lost_flop = sum(_cost(v[1]) for v in (waiting.pop(k) for k in lost) if isinstance(v, list))
             if lost:

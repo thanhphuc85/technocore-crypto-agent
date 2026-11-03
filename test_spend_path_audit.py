@@ -306,6 +306,12 @@ def _pending(amount="30"):
     tm.record_gateway_spend(amount, "inference-session gateway m", "r-1")
 
 
+def _chain_read(raw, at=NOW):
+    """Số chi đứng tên ví trên explorer testnet, kèm mốc đọc (số không có mốc bị coi là cũ)."""
+    h = "explorer.testnet.flop.network"
+    return {"attr_spent_raw": {h: raw}, "attr_spent_at": {h: at}}
+
+
 def test_hold_stops_buying_but_keeps_reading_receipts(monkeypatch, telegram):
     _pending()
     st = fresh()
@@ -322,7 +328,7 @@ def test_hold_stops_buying_but_keeps_reading_receipts(monkeypatch, telegram):
 
 def test_hold_lifts_when_the_chain_shows_our_spend(monkeypatch, telegram):
     _pending()
-    st = {flop_radar.KEY: {"attr_spent_raw": {"explorer.testnet.flop.network": 30 * 10 ** 18}}}
+    st = {flop_radar.KEY: _chain_read(30 * 10 ** 18)}
     ac.gateway_attribution_step(st, NOW)
     assert ac.attribution_hold(st, NOW) is None
 
@@ -492,7 +498,7 @@ def test_foreign_channel_marker_is_durable():
 def test_tiny_confirmed_amount_does_not_open_the_gate(monkeypatch, telegram):
     _pending("500")
     monkeypatch.setattr(ac, "save_state", lambda d: None)
-    st = {flop_radar.KEY: {"attr_spent_raw": {"explorer.testnet.flop.network": 10 ** 16}}}
+    st = {flop_radar.KEY: _chain_read(10 ** 16)}
     assert ac.gateway_attribution_step(st, NOW) == "MISMATCH" and len(telegram) == 1
     assert "0.01" in ac.attribution_hold(st, NOW)
 
@@ -501,7 +507,7 @@ def test_large_confirmed_history_tolerates_explorer_lag():
     _pending("1000")
     tm.confirm_gateway_attribution("1000")
     tm.record_gateway_spend("50", "inference-session gateway m", "r-2")
-    st = {flop_radar.KEY: {"attr_spent_raw": {"explorer.testnet.flop.network": 1000 * 10 ** 18}}}
+    st = {flop_radar.KEY: _chain_read(1000 * 10 ** 18)}
     assert ac.attribution_hold(st, NOW) is None and ac.attribution_room(st, NOW) == pytest.approx(950)
 
 
@@ -547,8 +553,18 @@ def test_named_testnet_uses_the_testnet_explorer(monkeypatch):
     monkeypatch.setenv("FLOP_GATEWAY_NETWORK", "flop-testnet-1")
     assert ac._explorer_base("flop-testnet-1") == "https://explorer.testnet.flop.network"
     _pending()
-    st = {flop_radar.KEY: {"attr_spent_raw": {"explorer.testnet.flop.network": 30 * 10 ** 18}}}
+    st = {flop_radar.KEY: _chain_read(30 * 10 ** 18)}
     assert ac.onchain_spent(st, NOW) == 30
+
+
+def test_chain_reading_without_a_read_time_is_stale_not_fresh():
+    # Trước đây số không có mốc đọc được coi là vừa đọc -> xác nhận "đứng tên ví" bằng số không rõ tuổi.
+    _pending()
+    st = {flop_radar.KEY: {"attr_spent_raw": {"explorer.testnet.flop.network": 30 * 10 ** 18}}}
+    assert ac.onchain_spent(st, NOW) is None
+    assert ac.gateway_attribution_step(st, NOW) == "UNVERIFIED"
+    assert tm.gateway_attribution()["attributed"] == 0
+    assert ac.attribution_hold(st, NOW)                         # cổng vẫn đóng
 
 
 def test_report_does_not_count_gateway_calls_as_metering():

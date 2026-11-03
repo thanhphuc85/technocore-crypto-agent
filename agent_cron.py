@@ -1211,35 +1211,83 @@ def _radar_fetch(url: str):
     except requests.RequestException:
         return None
 
+def _radar_wallet(private_key):
+    """Địa chỉ SS58 của ví FLOP (ví gateway) để đọc trên explorer; None nếu chưa có ví."""
+    if private_key is None:
+        return None
+    try:
+        import flop_gateway
+        _wk = flop_gateway.wallet_key(private_key)
+        return flop_gateway.wallet_address(_wk) if _wk else None
+    except Exception:
+        return None
+
+
+def _radar_explorers() -> tuple:
+    import flop_radar
+    explorers = flop_radar.EXPLORERS
+    if RADAR_EXPLORER.startswith("https://") and RADAR_EXPLORER not in explorers:
+        explorers = explorers + (RADAR_EXPLORER,)
+    return explorers
+
+
+def attribution_read_step(state: dict, now: int, private_key=None) -> str:
+    """Radar TẮT (FLOP_TESTNET_RADAR=off) mà đang testnet: cổng đứng tên (attribution_room) vẫn cần số
+    chi/số dư của ví trên explorer — không có thì số cũ quá 6 giờ và agent ngừng mua mà không rõ vì
+    sao. Chỉ đọc 2 endpoint của ví, cùng nhịp radar; không canh issue/docs. Không ném lỗi."""
+    import token_manager as _tm
+    if not _tm.testnet_enabled():
+        return "off"
+    if not _due(state, "last_attrib_read", TESTNET_RADAR_H, now):
+        return "off+attrib-skip"
+    try:
+        import flop_radar
+        wallet = _radar_wallet(private_key)
+        if not wallet:
+            return "off"
+        r = dict(state.get(flop_radar.KEY) or {})
+        lines = flop_radar.read_wallet(r, _radar_fetch, wallet, _radar_explorers())
+        state[flop_radar.KEY] = r
+        _ab = gateway_attribution_step(state, now)
+        if _ab not in ("off", "ok"):
+            print(f"[attrib] {_ab}")
+        if lines:
+            msg = "🚨 FLOP — ví đứng tên:\n" + "\n".join(lines)
+            print(f"[attrib] {msg}")
+            _telegram_send(msg)
+        save_state({"last_attrib_read": now, flop_radar.KEY: r})
+        state["last_attrib_read"] = now
+        return "off+attrib"
+    except Exception as e:
+        print(f"[attrib] đọc ví bỏ qua ({str(e)[:80]})")
+        return "error"
+
+
 def testnet_radar_step(state: dict, now: int, private_key=None) -> str:
     """Một nhịp radar testnet (xem flop_radar). Trả trạng thái cho dòng [run]. Gửi Telegram
-    thất bại thì KHÔNG ghi nhận "đã thấy" và KHÔNG đóng cổng giờ -> lần sau báo lại."""
+    thất bại thì KHÔNG ghi nhận "đã thấy" và KHÔNG đóng cổng giờ -> lần sau báo lại — nhưng số
+    đọc được của ví vẫn được GIỮ (cổng đứng tên dựa vào nó; Telegram hỏng không được làm agent
+    ngừng mua). Radar tắt -> chỉ đọc ví (attribution_read_step)."""
     if not TESTNET_RADAR:
-        return "off"
+        return attribution_read_step(state, now, private_key)
     if not _due(state, "last_radar", TESTNET_RADAR_H, now):
         return "skip"
     try:
         import flop_radar
         prev = state.get(flop_radar.KEY)
-        wallet = None
-        if private_key is not None:
-            try:
-                import flop_gateway
-                _wk = flop_gateway.wallet_key(private_key)
-                wallet = flop_gateway.wallet_address(_wk) if _wk else None
-            except Exception:
-                wallet = None
-        explorers = flop_radar.EXPLORERS
-        if RADAR_EXPLORER.startswith("https://") and RADAR_EXPLORER not in explorers:
-            explorers = explorers + (RADAR_EXPLORER,)
-        alert = flop_radar.check(state, _radar_fetch, wallet=wallet, explorers=explorers)
+        alert = flop_radar.check(state, _radar_fetch, wallet=_radar_wallet(private_key),
+                                 explorers=_radar_explorers())
         _ab = gateway_attribution_step(state, now)
         if _ab not in ("off", "ok"):
             print(f"[attrib] {_ab}")
         if alert:
             print(f"[radar] {alert}")
             if not _telegram_send(alert):
-                state[flop_radar.KEY] = prev
+                new = state.get(flop_radar.KEY) or {}
+                keep = {k: new[k] for k in flop_radar.WALLET_READ_KEYS if new.get(k)}
+                state[flop_radar.KEY] = {**(prev or {}), **keep} if keep else prev
+                if keep:
+                    save_state({flop_radar.KEY: state[flop_radar.KEY]})
                 return "alert-unsent"
         save_state({"last_radar": now, flop_radar.KEY: state.get(flop_radar.KEY)})
         state["last_radar"] = now
@@ -1599,7 +1647,7 @@ def primary_alive(now: int, within_min: float, private_key=None) -> bool:
 _TS_DURABLE_KEYS = ("last_seq", "last_telemetry", "last_manifest", "last_digest",
                     "last_status_feed", "last_recap", "last_weekly_sample",
                     "last_daily_report", "last_radar", "last_state_loss_alert",
-                    "gateway_foreign_seen")
+                    "gateway_foreign_seen", "last_attrib_read")
 # gateway_inflight: request gateway đang treo (timeout/5xx mơ hồ) + trần ngày + cờ cấm phát lại — mất
 # Actions cache vẫn đối soát được và không tự đặt lại phanh an toàn.
 _BLOB_DURABLE_KEYS = ("weekly_samples", "last_alert_price", "testnet_radar", "gateway_inflight", "llm_paid")
@@ -3437,10 +3485,10 @@ def _faucet_claim_fn(req: dict) -> dict:
     # "thiếu trường" -> trước đây rơi về lượng XIN và ghi khống vào sổ.
     amt = next((data[k] for k in ("amount", "granted", "value") if data.get(k) is not None), None)
     if amt is None:
-        # Ghi theo lượng XIN là đoán: sổ có thể lệch số dư thật trên chain. Báo to + in khoá.
-        print(f"[faucet] ⚠️ phản hồi không có trường số lượng — tạm ghi theo yêu cầu "
+        # KHÔNG ghi theo lượng XIN (FLOP_FAUCET_AMOUNT mặc định 100, mức quick thật là 25): sổ sẽ có
+        # FLOP không tồn tại. Lần claim vẫn được tính; số dư thật lấy từ chain (dòng báo cáo).
+        print(f"[faucet] ⚠️ phản hồi không có trường số lượng — KHÔNG ghi sổ, đối chiếu số dư trên chain "
               f"(keys: {sorted(data)[:15]})")
-        amt = req.get("amount")
     out = {"amount": amt}
     if flop_format and data.get("txHash"):
         out["tx"] = str(data["txHash"])[:80]
@@ -4482,7 +4530,9 @@ FOREIGN_SEEN_KEY = "gateway_foreign_seen"
 
 
 def onchain_spent(state: dict, now: int):
-    """Chi tiêu đứng tên ví mình trên explorer đúng mạng (FLOP), đọc còn mới; None nếu không biết."""
+    """Chi tiêu đứng tên ví mình trên explorer đúng mạng (FLOP), đọc còn mới; None nếu không biết.
+    Số KHÔNG có mốc đọc (bản radar cũ, bản ghi hỏng) là cũ — như chain_balance: xác nhận "đứng tên ví
+    mình" từ một số không biết đọc lúc nào sẽ mở cổng mua bằng bằng chứng hết hạn."""
     import flop_radar
     from decimal import Decimal
     net = _attrib_net()
@@ -4491,7 +4541,7 @@ def onchain_spent(state: dict, now: int):
     at = r.get("attr_spent_at") or {}
     seen = [v for h, v in (r.get("attr_spent_raw") or {}).items()
             if isinstance(v, int) and (h == own or f".{net}." in h)
-            and now - int(at.get(h) or now) <= ATTRIB_FRESH_SEC]
+            and now - int(at.get(h) or 0) <= ATTRIB_FRESH_SEC]
     return Decimal(max(seen)) / Decimal(10 ** 18) if seen else None
 
 

@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Gateway receipts in an unknown state (for example `streaming`) are no longer booked as settled just
+  because they carry `settled_spend`; they are tracked as open (counted by the attribution gate) and
+  booked once settled. Only receipts with no `state` field are trusted by amount.
+- A faucet reply with no amount is counted as a claim but never booked at `FLOP_FAUCET_AMOUNT` (default
+  100, while the quick tier grants 25); the chain balance is the reference.
+- Wallet readings from the explorer survive a failed radar Telegram alert, and are still taken every
+  radar period on testnet when `FLOP_TESTNET_RADAR=off`, so the attribution gate does not stop buying on
+  stale data.
+- An explorer spend reading with no read time is treated as stale, not fresh, when confirming that
+  gateway spend stands under the wallet.
 - Daily report labels: simulated compute, seed credits and miners are named as simulated, and confirmed
   testnet compute no longer reads as "counted". The day count and projection need testnet mode plus
   `FLOP_TESTNET_START`. `kibble` and `session` lines say they are the last run, and room share names

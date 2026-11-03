@@ -389,8 +389,33 @@ def test_settled_amount_rules():
     assert gw.settled_amount({"state": "settled", "settled_spend": "6.5"}) == 6.5
     assert gw.settled_amount({"state": "pending", "settled_spend": 0}) is None
     assert gw.settled_amount({"state": "failed", "settled_spend": 3}) is None
-    assert gw.settled_amount({"state": "weird", "settled_spend": 2}) == 2       # có settle > 0, trạng thái lạ
+    assert gw.settled_amount({"state": "weird", "settled_spend": 2}) is None    # trạng thái lạ: chưa chốt
+    assert gw.settled_amount({"state": "streaming", "settled_spend_raw": str(2 * 10**18)}) is None
+    assert gw.settled_amount({"settled_spend": 2}) == 2                          # không có state: tin số tiền
     assert gw.settled_amount({"block_number": 7}) == 0.0                         # dạng OpenAPI cũ
+
+
+def test_unknown_state_is_tracked_as_open_and_booked_only_once_settled():
+    fake, booked, state, logs = FakeGateway(expires_ms=SOON), [], {}, []
+    fake.receipts = []
+    fake.receipt_state = "streaming"          # gateway điền settled_spend trước khi chốt
+    r1 = _run(state, fake, booked)
+    assert r1["calls"] == 2 and booked == []
+    fake.override[("POST", "/v1/chat/completions")] = Resp(429, {"error": "busy"}, {"Retry-After": "1"})
+
+    def again(now, log=lambda *a: None):
+        state[gw.KEY]["wait_until"] = 0
+        return gw.run_step(state, agent_key=_key("22"), http=fake, now=now, prompts=["q"],
+                           expect_network="devnet", book_fn=lambda c, ref, m: booked.append((c, ref)),
+                           sleep=lambda s: None, log=log)
+    again(NOW + 300, logs.append)
+    assert booked == [] and len(state[gw.KEY]["receipts_open"]) == 2      # vào exposure của cổng
+    assert gw.unsettled_exposure(state[gw.KEY]) > 0
+    assert any("trạng thái lạ" in x and "streaming" in x for x in logs)
+    for rc in fake.receipts:
+        rc["state"] = "settled"
+    again(NOW + 900)
+    assert len(booked) == 2 and state[gw.KEY]["receipts_open"] == {}
 
 
 def test_real_devnet_states_estimated_and_released_are_not_settled():

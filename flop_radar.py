@@ -276,11 +276,6 @@ def check_attribution(r: dict, fetch_fn, wallet=None, explorers=EXPLORERS) -> li
                           "attr_i208_state", "attr_i208_seen")
     lines += _watch_network(r, fetch_fn)
     offers = dict(r.get("attr_offers") or {})
-    spent = dict(r.get("attr_spent") or {})
-    spent_raw = dict(r.get("attr_spent_raw") or {})      # số raw (1e18) — so với sổ cái
-    spent_at = dict(r.get("attr_spent_at") or {})        # lúc đọc được: số cũ không còn là bằng chứng
-    balance_raw = dict(r.get("attr_balance_raw") or {})  # số dư ví thật, đối chiếu với sổ
-    balance_at = dict(r.get("attr_balance_at") or {})
     for base in explorers:
         h = _host(base)
         t = parse_total(fetch_fn(f"{base}/api/session-offers"))
@@ -289,18 +284,39 @@ def check_attribution(r: dict, fetch_fn, wallet=None, explorers=EXPLORERS) -> li
                 lines.append(f"• {h}: miner bắt đầu có OFFER công khai ({t}) — mua trực tiếp đứng "
                              "tên ví mình (flop session run) có thể khả thi")
             offers[h] = t
-        if wallet:
-            v = parse_spent(fetch_fn(f"{base}/api/accounts/{wallet}/inference-spend"))
-            if v is not None:
-                if spent.get(h) == 0 and v > 0:
-                    lines.append(f"• {h}: VÍ MÌNH {wallet[:6]}…{wallet[-4:]} đã có chi tiêu ghi trên "
-                                 f"chain ({v / 1e18:.4g} FLOP) — chi tiêu đang đứng tên mình")
-                spent[h] = 0 if v == 0 else 1
-                spent_raw[h], spent_at[h] = v, int(time.time())
-            b = parse_balance(fetch_fn(f"{base}/api/accounts/{wallet}"))
-            if b is not None:
-                balance_raw[h], balance_at[h] = b, int(time.time())
-    r["attr_offers"], r["attr_spent"], r["attr_spent_raw"] = offers, spent, spent_raw
+    r["attr_offers"] = offers
+    return lines + read_wallet(r, fetch_fn, wallet, explorers)
+
+
+# Số đọc được của ví (kèm mốc đọc) — thứ cổng đứng tên của agent dựa vào. Tách khỏi phần canh issue/
+# docs để radar tắt hay gửi Telegram lỗi KHÔNG làm số này cũ đi (cũ quá 6 giờ thì cổng dừng mua).
+WALLET_READ_KEYS = ("attr_spent_raw", "attr_spent_at", "attr_balance_raw", "attr_balance_at")
+
+
+def read_wallet(r: dict, fetch_fn, wallet=None, explorers=EXPLORERS) -> list:
+    """Chi tiêu + số dư của ví trên từng explorer -> ghi vào r (WALLET_READ_KEYS + cờ attr_spent).
+    Trả dòng báo khi chi tiêu của ví đổi từ 0 sang > 0. Không có ví / nguồn lỗi -> bỏ qua."""
+    lines = []
+    if not wallet:
+        return lines
+    spent = dict(r.get("attr_spent") or {})
+    spent_raw = dict(r.get("attr_spent_raw") or {})      # số raw (1e18) — so với sổ cái
+    spent_at = dict(r.get("attr_spent_at") or {})        # lúc đọc được: số cũ không còn là bằng chứng
+    balance_raw = dict(r.get("attr_balance_raw") or {})  # số dư ví thật, đối chiếu với sổ
+    balance_at = dict(r.get("attr_balance_at") or {})
+    for base in explorers:
+        h = _host(base)
+        v = parse_spent(fetch_fn(f"{base}/api/accounts/{wallet}/inference-spend"))
+        if v is not None:
+            if spent.get(h) == 0 and v > 0:
+                lines.append(f"• {h}: VÍ MÌNH {wallet[:6]}…{wallet[-4:]} đã có chi tiêu ghi trên "
+                             f"chain ({v / 1e18:.4g} FLOP) — chi tiêu đang đứng tên mình")
+            spent[h] = 0 if v == 0 else 1
+            spent_raw[h], spent_at[h] = v, int(time.time())
+        b = parse_balance(fetch_fn(f"{base}/api/accounts/{wallet}"))
+        if b is not None:
+            balance_raw[h], balance_at[h] = b, int(time.time())
+    r["attr_spent"], r["attr_spent_raw"] = spent, spent_raw
     r["attr_spent_at"], r["attr_balance_raw"], r["attr_balance_at"] = spent_at, balance_raw, balance_at
     return lines
 
