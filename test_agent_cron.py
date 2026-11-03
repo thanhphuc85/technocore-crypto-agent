@@ -3037,11 +3037,11 @@ def test_mempool_adapter_reports_real_field_names(monkeypatch):
     assert out["_raw_keys"] == ["channel", "miner", "sessionId"]
 
 
-def test_faucet_adapter_warns_when_amount_field_missing(monkeypatch, capsys):
+def test_faucet_adapter_does_not_substitute_the_requested_amount(monkeypatch, capsys):
     monkeypatch.setattr(ac.requests, "post", lambda *a, **k: _resp_with_body({"tx": "0xabc"}))
     out = ac._faucet_claim_fn({"faucet_url": "http://f", "signed": {}, "amount": "100"})
-    assert out["amount"] == "100"
-    assert "không có trường số lượng" in capsys.readouterr().out
+    assert out["amount"] is None                          # không phải "100" (lượng xin, không phải lượng nhận)
+    assert "KHÔNG ghi sổ" in capsys.readouterr().out
 
 
 # --- workflow_dispatch KHÔNG có nghĩa là "chạy tay": cron-job.org cũng dispatch -------------
@@ -3217,8 +3217,66 @@ def test_radar_step_keeps_alert_when_telegram_fails(monkeypatch):
 
 def test_radar_step_off_and_durable(monkeypatch):
     monkeypatch.setattr(ac, "TESTNET_RADAR", False)
+    monkeypatch.delenv("TESTNET_ENABLED", raising=False)
     assert ac.testnet_radar_step({}, 1) == "off"
     assert "last_radar" in ac._TS_DURABLE_KEYS and "testnet_radar" in ac._BLOB_DURABLE_KEYS
+    assert "last_attrib_read" in ac._TS_DURABLE_KEYS
+
+
+_TN = "https://explorer.testnet.flop.network"
+
+
+def _wallet_pages(spent_raw, balance_raw=25 * 10 ** 18):
+    def fetch(url):
+        if url.endswith("/inference-spend"):
+            return json.dumps({"totalSpentRaw": str(spent_raw)})
+        if "/api/accounts/" in url:
+            return json.dumps({"balance": str(balance_raw)})
+        return None
+    return fetch
+
+
+def test_radar_keeps_wallet_readings_when_telegram_fails(monkeypatch):
+    # Telegram hỏng trước đây hoàn TOÀN BỘ state radar -> số đọc của ví cũ quá 6h -> cổng đứng tên
+    # dừng mua, và tin "đã dừng mua" cũng đi qua Telegram nên không ai biết.
+    import flop_radar
+    monkeypatch.setattr(ac, "TESTNET_RADAR", True)
+    monkeypatch.setattr(ac, "_radar_wallet", lambda pk: "5Wallet")
+    monkeypatch.setattr(ac, "_radar_explorers", lambda: (_TN,))
+    monkeypatch.setattr(ac, "gateway_attribution_step", lambda st, now: "ok")
+    real_check = flop_radar.check
+    monkeypatch.setattr(flop_radar, "check", lambda st, f, **k: real_check(st, f, **k) or "🚨 x")
+    monkeypatch.setattr(ac, "_radar_fetch", _wallet_pages(3 * 10 ** 18))
+    saved = {}
+    monkeypatch.setattr(ac, "save_state", lambda d: saved.update(d))
+    monkeypatch.setattr(ac, "_telegram_send", lambda t: False)
+    st = {flop_radar.KEY: {"status": "planned"}}
+    assert ac.testnet_radar_step(st, 10_000) == "alert-unsent"
+    r = st[flop_radar.KEY]
+    h = "explorer.testnet.flop.network"
+    assert r["attr_spent_raw"][h] == 3 * 10 ** 18 and r["attr_spent_at"][h] > 0      # số đọc được GIỮ
+    assert r["status"] == "planned" and "attr_spent" not in r      # phần còn lại hoàn về: lần sau báo lại
+    assert "last_radar" not in saved and saved[flop_radar.KEY] is r
+
+
+def test_radar_off_still_reads_the_wallet_on_testnet(monkeypatch, tmp_path):
+    import flop_radar
+    monkeypatch.setattr(ac, "TESTNET_RADAR", False)
+    monkeypatch.setenv("TESTNET_ENABLED", "true")
+    monkeypatch.setenv("TOKEN_LEDGER_FILE", str(tmp_path / "ledger.json"))
+    monkeypatch.setattr(ac, "_radar_wallet", lambda pk: "5Wallet")
+    monkeypatch.setattr(ac, "_radar_explorers", lambda: (_TN,))
+    fetched = []
+    pages = _wallet_pages(0)
+    monkeypatch.setattr(ac, "_radar_fetch", lambda u: fetched.append(u) or pages(u))
+    monkeypatch.setattr(ac, "save_state", lambda d: None)
+    monkeypatch.setattr(ac, "_telegram_send", lambda t: True)
+    st = {}
+    assert ac.testnet_radar_step(st, 1_800_000_000) == "off+attrib"
+    assert fetched and all("/api/accounts/5Wallet" in u for u in fetched)   # chỉ đọc ví, không canh docs/issue
+    read_at = st[flop_radar.KEY]["attr_spent_at"]["explorer.testnet.flop.network"]   # giờ đọc thật
+    assert ac.chain_balance(st, read_at) == 25 and ac.onchain_spent(st, read_at) == 0
+    assert ac.testnet_radar_step(st, 1_800_000_060) == "off+attrib-skip"     # cùng nhịp radar
 
 
 # --- faucet: trạng thái phải sống qua run (runner mới = file trống) ------------------------
@@ -3738,7 +3796,8 @@ def test_attribution_mismatch_alerts_once_a_day(monkeypatch, tmp_path):
     sent = []
     monkeypatch.setattr(ac, "_telegram_send", lambda m: sent.append(m) or True)
     monkeypatch.setattr(ac, "save_state", lambda d: None)
-    st = {flop_radar.KEY: {"attr_spent_raw": {"explorer.testnet.flop.network": 0}}}
+    h = "explorer.testnet.flop.network"
+    st = {flop_radar.KEY: {"attr_spent_raw": {h: 0}, "attr_spent_at": {h: 1_800_000_000}}}
     assert ac.gateway_attribution_step(st, 1_800_000_000) == "MISMATCH"
     assert ac.gateway_attribution_step(st, 1_800_000_600) == "ok"           # đã báo trong 24h
     assert len(sent) == 1 and "broker" in sent[0]
@@ -3748,7 +3807,8 @@ def test_attribution_confirmed_onchain_unlocks_and_stays_quiet(monkeypatch, tmp_
     import flop_radar
     tm = _testnet_ledger(monkeypatch, tmp_path, gateway_spend=30)
     monkeypatch.setattr(ac, "_telegram_send", lambda m: pytest.fail("không được báo"))
-    st = {flop_radar.KEY: {"attr_spent_raw": {"explorer.testnet.flop.network": 12 * 10 ** 18}}}
+    h = "explorer.testnet.flop.network"
+    st = {flop_radar.KEY: {"attr_spent_raw": {h: 12 * 10 ** 18}, "attr_spent_at": {h: 1_800_000_000}}}
     assert ac.gateway_attribution_step(st, 1_800_000_000) == "ok"
     assert tm.unlock_status()["spent_testnet"] == "12"
 
