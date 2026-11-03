@@ -284,6 +284,24 @@ def test_exhausted_allowance_is_not_mistaken_for_a_payment_request():
     fake.override[("POST", "/v1/enroll/wallet")] = Resp(402, {"error": "devnet_allowance_exhausted"})
     r = _run(state, fake)
     assert r["outcome"] == "exhausted" and "payment" not in r and state[gw.KEY]["wait_until"] > NOW
+    assert "không được cấp lại" in r["reason"]
+
+
+def test_exhausted_code_matches_regardless_of_case():
+    for code in ("DEVNET_ALLOWANCE_EXHAUSTED", "Allowance_Exhausted"):
+        fake, state = FakeGateway(expires_ms=SOON), {}
+        fake.override[("POST", "/v1/chat/completions")] = Resp(402, {"error": code})
+        r = _run(state, fake)
+        assert r["outcome"] == "exhausted" and "payment" not in r      # trước đây: payment_required (x402)
+    fake, state = FakeGateway(expires_ms=SOON), {}
+    fake.override[("POST", "/v1/chat/completions")] = Resp(403, {"error": "WALLET_UNFUNDED"})
+    assert _run(state, fake)["outcome"] == "unfunded"
+
+
+def test_zero_quota_reason_says_the_allowance_is_not_renewed():
+    fake, state = FakeGateway(quota=0.0, expires_ms=SOON), {}
+    r = _run(state, fake)
+    assert r["outcome"] == "exhausted" and "không được cấp lại" in r["reason"]
 
 
 def test_empty_prompts_make_no_requests():
@@ -393,6 +411,32 @@ def test_settled_amount_rules():
     assert gw.settled_amount({"state": "streaming", "settled_spend_raw": str(2 * 10**18)}) is None
     assert gw.settled_amount({"settled_spend": 2}) == 2                          # không có state: tin số tiền
     assert gw.settled_amount({"block_number": 7}) == 0.0                         # dạng OpenAPI cũ
+    # OpenAPI: null = "unknown", không bao giờ là 0 -> chờ gateway điền số.
+    assert gw.settled_amount({"state": "settled", "settled_spend": None, "settled_spend_raw": None}) is None
+    assert gw.settled_amount({"state": "settled", "settled_spend": None, "settled_spend_raw": "5" + "0" * 17}) == 0.5
+
+
+def test_settled_receipt_without_amount_waits_and_is_booked_once_priced():
+    fake, booked, state, logs = FakeGateway(expires_ms=SOON), [], {}, []
+    fake.receipts = []
+    _run(state, fake, booked)
+    for rc in fake.receipts:
+        rc.update(state="settled", settled_spend=None, settled_spend_raw=None)
+    fake.override[("POST", "/v1/chat/completions")] = Resp(429, {"error": "busy"}, {"Retry-After": "1"})
+
+    def again(now, log=lambda *a: None):
+        state[gw.KEY]["wait_until"] = 0
+        return gw.run_step(state, agent_key=_key("22"), http=fake, now=now, prompts=["q"],
+                           expect_network="devnet", book_fn=lambda c, ref, m: booked.append((c, ref)),
+                           sleep=lambda s: None, log=log)
+    again(NOW + 300, logs.append)
+    assert booked == [] and len(state[gw.KEY]["receipts_open"]) == 2       # chờ, tính vào exposure
+    assert state[gw.KEY]["receipts_seen"] == []
+    assert any("chưa điền số tiền" in x for x in logs)
+    for rc in fake.receipts:
+        rc.update(settled_spend=fake.cost, settled_spend_raw=str(int(fake.cost * 10**18)))
+    again(NOW + 900)
+    assert len(booked) == 2 and state[gw.KEY]["receipts_open"] == {}
 
 
 def test_unknown_state_is_tracked_as_open_and_booked_only_once_settled():
@@ -777,17 +821,48 @@ def test_timeout_after_processing_is_not_resent_and_reconciles_by_receipt(monkey
     assert r2["outcome"] == "spent"
 
 
-def test_unreconciled_inflight_blocks_new_calls_until_ttl(monkeypatch):
+def test_inflight_without_idempotent_request_id_reconciles_by_send_time(monkeypatch):
+    # OpenAPI v2 không khai báo Idempotency-Key cho /chat/completions: request_id của biên nhận do gateway
+    # tự cấp. Trước đây không khớp được -> mỗi lần timeout chờ hết INFLIGHT_TTL_SEC (30 phút).
     monkeypatch.setenv("FLOP_GATEWAY_MAX_CALLS_PER_RUN", "1")
-    monkeypatch.setenv("FLOP_GATEWAY_REPLAY_MAX", "0")              # chỉ đối soát bằng biên nhận
+    monkeypatch.setenv("FLOP_GATEWAY_REPLAY_MAX", "0")
     fake = FakeGateway(quota=25.0, expires_ms=LATER)                # server BỎ QUA Idempotency-Key
     state = {}
     _step(state, _timeout_after_processing(fake), NOW)
+    assert state[gw.KEY]["inflight"]["sent"] == NOW                 # giờ gửi được ghi
     r2 = _step(state, fake, NOW + 1000)
-    assert r2["outcome"] == "reconciling" and _chat_prompts(fake) == ["q1"]
+    assert "inflight" not in state[gw.KEY] and r2["outcome"] == "spent"
+    assert _chat_prompts(fake) == ["q1", "q2"]                       # KHÔNG gửi lại q1
+
+
+def test_inflight_with_no_receipt_still_blocks_until_ttl(monkeypatch):
+    monkeypatch.setenv("FLOP_GATEWAY_MAX_CALLS_PER_RUN", "1")
+    monkeypatch.setenv("FLOP_GATEWAY_REPLAY_MAX", "0")
+    fake = FakeGateway(quota=25.0, expires_ms=LATER)
+    real = fake.__call__
+
+    def lost(method, url, headers=None, json=None, timeout=None):  # timeout TRƯỚC khi tới server
+        if url.endswith("/chat/completions"):
+            raise TimeoutError("connect timed out")
+        return real(method, url, headers=headers, json=json, timeout=timeout)
+    state = {}
+    _step(state, lost, NOW)
+    r2 = _step(state, fake, NOW + 1000)
+    assert r2["outcome"] == "reconciling" and _chat_prompts(fake) == []
     r3 = _step(state, fake, NOW + gw.INFLIGHT_TTL_SEC + 1)
-    assert "inflight" not in state[gw.KEY] and _chat_prompts(fake) == ["q1", "q2"]
-    assert r3["outcome"] == "spent"
+    assert "inflight" not in state[gw.KEY] and r3["outcome"] == "spent"
+
+
+def test_match_inflight_only_accepts_one_unambiguous_receipt():
+    inf = {"sent": NOW, "max_wait": 180000, "model": "m1"}
+    assert gw.match_inflight(inf, [(NOW + 2, "m1", "a")]) == "a"
+    assert gw.match_inflight(inf, [(NOW + 2, "", "a")]) == "a"                          # biên nhận không ghi model
+    assert gw.match_inflight(inf, [(NOW + 2, "m1", "a"), (NOW + 9, "m1", "b")]) == ""   # hai ứng viên: không đoán
+    assert gw.match_inflight(inf, [(NOW - 40, "m1", "prev")]) == ""                     # lần gọi trước (cách >= 31s)
+    assert gw.match_inflight(inf, [(NOW + 2, "m2", "a")]) == ""                         # model khác
+    assert gw.match_inflight(inf, [(NOW + 400, "m1", "late")]) == ""                    # quá max_wait + 120s
+    assert gw.match_inflight(inf, [(None, "m1", "a")]) == ""                            # không có created_at
+    assert gw.match_inflight({"key": "k"}, [(NOW, "m1", "a")]) == ""                    # inflight cũ, không có giờ gửi
 
 
 def test_http_error_reply_is_a_known_outcome_not_inflight(monkeypatch):

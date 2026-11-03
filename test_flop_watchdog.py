@@ -112,9 +112,19 @@ def test_gateway_waiting_is_neutral_not_a_miss():
         r = wd.observe(st, settled_onchain=0, status="0✓ gateway/pace_wait", spent_today_onchain=0,
                        now=now + i * 300)
         assert r["alert"] is None
-    for i in range(10):
-        assert wd.observe(st, settled_onchain=0, status="0✓ gateway/exhausted", spent_today_onchain=5,
-                          now=now + 9000 + i * 300)["alert"] is None
+
+
+def test_exhausted_allowance_alerts_instead_of_staying_silent():
+    # OpenAPI /enroll/wallet: allowance "never renewed" -> hết quota là ngừng mua vĩnh viễn. Trước đây
+    # coi là trung tính: 200 lượt liền "exhausted" không một báo động.
+    st, now, alerts = {}, 1_800_000_000, []
+    for i in range(12):
+        status = "0✓ gateway/exhausted" if i % 6 == 0 else "0✓ gateway/backoff"   # backoff 30' giữa hai lần
+        r = wd.observe(st, settled_onchain=0, status=status, spent_today_onchain=0, now=now + i * 300,
+                       reason="quota gateway đã hết — allowance gateway không được cấp lại")
+        if r["alert"]:
+            alerts.append(r["alert"])
+    assert len(alerts) == 1 and "exhausted" in alerts[0] and "không được cấp lại" in alerts[0]
 
 
 def test_broken_settlement_still_alerts_through_waiting_runs():
