@@ -682,7 +682,11 @@ def _flop_budget(g: dict, quota: float, balance_fn, addr: str, log):
     """Ngân sách FLOP của allowance hiện tại khi quota KHÔNG tính bằng FLOP; None nếu quota là FLOP.
     Trần = FLOP_GATEWAY_BUDGET_FLOP nếu đặt, không thì số dư ví lúc thấy allowance (lần đọc gần
     nhất nếu explorer lỗi; chưa từng đọc được -> allowance mặc định). Mỗi allowance (enrolled_at)
-    một ngân sách; đã chi đếm bằng FLOP. Còn lại = trần - đã chi, không quá số dư ví hiện tại."""
+    một ngân sách; đã chi đếm bằng FLOP. Còn lại = trần - đã chi, không quá số dư ví hiện tại.
+
+    Quyết định "quota không phải FLOP" GIỮ NGUYÊN suốt allowance: số dư lớn dần (faucet 2000/ngày) từng
+    làm quota 20000 trông như FLOP trở lại -> đo chi bằng quota, phanh ngày chặn sau vài FLOP thật.
+    Allowance mới: tỉ lệ quota/FLOP đã đo (quota_per_flop) thắng phép so với số dư."""
     try:
         bal = balance_fn(addr)
         bal = float(bal) if bal is not None else None
@@ -692,10 +696,11 @@ def _flop_budget(g: dict, quota: float, balance_fn, addr: str, log):
         g["wallet_balance"] = round(bal, 6)
     ref = g.get("wallet_balance")
     ref = float(ref) if ref is not None else _env_num("FLOP_GATEWAY_ALLOWANCE_FLOP", DEFAULT_ALLOWANCE_FLOP)
-    if quota <= max(ref, 1e-9) * QUOTA_FLOP_MAX_RATIO:
+    fb = g.get("flop_budget") if isinstance(g.get("flop_budget"), dict) else {}
+    if not (fb and fb.get("enrolled_at") == g.get("enrolled_at")) and quota_is_flop(
+            quota, ref, g.get("quota_per_flop")):
         g.pop("flop_budget", None)
         return None
-    fb = g.get("flop_budget") if isinstance(g.get("flop_budget"), dict) else {}
     var = _env_num("FLOP_GATEWAY_BUDGET_FLOP", 0)
     src = "var" if var else ("balance" if g.get("wallet_balance") is not None else "default")
     if not fb or fb.get("enrolled_at") != g.get("enrolled_at"):
@@ -722,6 +727,21 @@ def _flop_budget(g: dict, quota: float, balance_fn, addr: str, log):
     fb["avail"] = round(avail, 9)
     g["flop_budget"] = {k: v for k, v in fb.items() if k != "avail"}
     return fb
+
+
+QUOTA_FLOP_UNIT_BAND = (0.5, 2.0)        # quota/FLOP đo được trong khoảng này = quota tính bằng FLOP
+
+
+def quota_is_flop(quota: float, ref_flop: float, quota_per_flop=None) -> bool:
+    """Quota có tính bằng FLOP không. Đã đo được tỉ lệ quota/FLOP (lần gọi thành công) -> theo tỉ lệ;
+    chưa đo -> quota không quá QUOTA_FLOP_MAX_RATIO lần số FLOP tham chiếu (số dư ví)."""
+    try:
+        ratio = float(quota_per_flop) if quota_per_flop is not None else None
+    except (TypeError, ValueError):
+        ratio = None
+    if ratio and ratio > 0:
+        return QUOTA_FLOP_UNIT_BAND[0] <= ratio <= QUOTA_FLOP_UNIT_BAND[1]
+    return quota <= max(ref_flop, 1e-9) * QUOTA_FLOP_MAX_RATIO
 
 
 def _fb_charge(g: dict, fb: dict, amount: float) -> None:

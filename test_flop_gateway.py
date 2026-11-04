@@ -1285,3 +1285,34 @@ def test_faucet_topup_raises_the_flop_budget_but_a_falling_balance_does_not_lowe
                     sleep=lambda s: None, log=logs.append, balance_fn=_bal(bal))
     assert state[gw.KEY]["flop_budget"]["cap"] == pytest.approx(50.0)
     assert any("được nạp +25" in m for m in logs)
+
+
+def test_flop_budget_mode_sticks_for_the_allowance_when_the_balance_grows():
+    # Faucet 2000/ngày: sau ~3 ngày ví > 5000 thì quota 20000 không còn "lớn hơn 4× số dư". Trước bản
+    # sửa, agent quay lại đo chi bằng quota (vd ~800 quota/FLOP) và phanh ngày chặn sau vài FLOP thật.
+    fake, state = _quota_gw(expires_ms=SOON), {}
+    _run(state, fake, balance_fn=_bal(25.0))
+    assert state[gw.KEY]["flop_budget"]["cap"] == 25.0
+    for bal in (2025.0, 4025.0, 6025.0):
+        state[gw.KEY]["wait_until"] = 0
+        r = _run(state, fake, balance_fn=_bal(bal))
+        assert state[gw.KEY]["window"]["unit"] == "flop" and r.get("budget") is not None
+    assert state[gw.KEY]["flop_budget"]["cap"] == pytest.approx(6025.0)        # nâng theo phần nạp
+
+
+def test_a_new_allowance_trusts_the_measured_quota_per_flop_over_the_balance():
+    fake, state = _quota_gw(expires_ms=SOON), {}
+    _run(state, fake, balance_fn=_bal(25.0))
+    assert state[gw.KEY]["quota_per_flop"] == pytest.approx(10 / 0.72, rel=1e-3)   # đo từ lần gọi thật
+    state[gw.KEY].update(enrolled_at=NOW + 500, wait_until=0)                      # allowance mới
+    _run(state, fake, balance_fn=_bal(100000.0))                                   # ví rất lớn
+    assert state[gw.KEY]["flop_budget"]["enrolled_at"] == NOW + 500                # vẫn đo bằng FLOP
+    assert state[gw.KEY]["window"]["unit"] == "flop"
+
+
+def test_quota_is_flop_rules():
+    assert gw.quota_is_flop(25, 25) and not gw.quota_is_flop(20000, 25)
+    assert gw.quota_is_flop(20000, 6000)                                           # chưa đo: theo số dư
+    assert not gw.quota_is_flop(20000, 6000, quota_per_flop=800)                   # đã đo: theo tỉ lệ
+    assert gw.quota_is_flop(20000, 25, quota_per_flop=1.0)
+    assert gw.quota_is_flop(20000, 6000, quota_per_flop="x")                       # rác -> bỏ qua tỉ lệ
