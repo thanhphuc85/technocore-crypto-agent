@@ -328,6 +328,10 @@ jobs:
           # Trần chi tuyệt đối của gateway, FLOP (mặc định 100/lượt, 2500/ngày UTC; 0 = tắt).
           FLOP_GATEWAY_MAX_PER_RUN: ${{ vars.FLOP_GATEWAY_MAX_PER_RUN }}
           FLOP_GATEWAY_MAX_PER_DAY: ${{ vars.FLOP_GATEWAY_MAX_PER_DAY }}
+          # Ngân sách FLOP mỗi allowance khi quota gateway KHÔNG tính bằng FLOP (devnet: quota 20000,
+          # ví 25 FLOP). Mặc định = số dư ví; ALLOWANCE_FLOP (25) chỉ dùng khi chưa đọc được ví.
+          FLOP_GATEWAY_BUDGET_FLOP: ${{ vars.FLOP_GATEWAY_BUDGET_FLOP }}
+          FLOP_GATEWAY_ALLOWANCE_FLOP: ${{ vars.FLOP_GATEWAY_ALLOWANCE_FLOP }}
           # Báo khi sổ đã ghi >= ngần này FLOP chi qua gateway mà explorer vẫn ghi ví mình 0 (mặc định 20).
           FLOP_ATTRIB_ALERT_MIN: ${{ vars.FLOP_ATTRIB_ALERT_MIN }}
           # Dừng mua khi sổ có >= GATE_MIN FLOP gateway settle mà chain chưa ghi cho ví (mặc định bật,

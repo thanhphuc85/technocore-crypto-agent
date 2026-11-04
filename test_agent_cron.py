@@ -4345,3 +4345,25 @@ def test_brief_digest_fits_telegram_and_prefers_newest():
          "items": [{"q": f"Q{i}", "a": "x" * 690} for i in range(20)]}
     msg = ac.brief_digest(b)
     assert len(msg) <= 4096 and "Q19" in msg and "Q0\n" not in msg and "mục mới nhất" in msg
+
+
+def test_wallet_balance_reads_the_explorer_account_in_flop(monkeypatch):
+    seen = []
+
+    class R:
+        def __init__(self, status, text):
+            self.status_code, self.text = status, text
+
+    def get(url, headers=None, timeout=None):
+        seen.append(url)
+        if url.endswith("/api/accounts/5Good"):
+            return R(200, '{"address":"5Good","balance":"25000000000000000000","nonce":0}')
+        if url.endswith("/api/accounts/5Down"):
+            raise ac.requests.ConnectionError("x")
+        return R(404, "{}")
+    monkeypatch.setattr(ac.requests, "get", get)
+    monkeypatch.setattr(ac, "RADAR_EXPLORER", "")
+    assert ac.wallet_balance_flop("devnet", "5Good") == 25.0
+    assert seen[-1] == "https://explorer.devnet.flop.network/api/accounts/5Good"
+    assert ac.wallet_balance_flop("devnet", "5Missing") is None
+    assert ac.wallet_balance_flop("devnet", "5Down") is None

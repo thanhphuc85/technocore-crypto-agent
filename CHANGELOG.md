@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Gateway pacing no longer treats `remaining_quota` as FLOP when it plainly is not (devnet 2026-11-04:
+  every key gets 20000 while the wallet holds 25 FLOP). With a readable wallet balance, a quota more than
+  4x the balance switches pacing to a FLOP budget per allowance (wallet balance, or
+  `FLOP_GATEWAY_BUDGET_FLOP`; `FLOP_GATEWAY_ALLOWANCE_FLOP`, default 25, until the balance is read).
+  Spend is priced from usage tokens instead of the quota drop, and the quota-per-FLOP ratio is logged.
+  Before, the pacer targeted ~11,000 FLOP a day and would have spent the whole balance within hours of
+  the gateway recovering.
+- The default completion size is 512 tokens instead of the model limit (8192); `FLOP_GATEWAY_MAX_TOKENS`
+  still raises it up to the model limit.
+- `429 overloaded` / "gateway channel pool is full" (flop-labs/network#31) is its own `overloaded`
+  outcome. It backs off for 240 s so the next run retries, is neutral for the real-spend watchdog, and
+  never sends the spend-lag Telegram alert (it is still logged).
+- Failed gateway requests log `req=<id>` (the gateway `request_id`, else our `Idempotency-Key`), and the
+  last 20 are kept in state for bug reports.
 - A `settled` gateway receipt whose `settled_spend` and `settled_spend_raw` are still null (OpenAPI:
   "unknown", never zero) is kept open and booked once the gateway fills the amount; it was marked seen
   at 0 FLOP and never booked.

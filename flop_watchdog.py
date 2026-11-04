@@ -76,8 +76,11 @@ def observe(state: dict, *, settled_onchain: int, status: str, spent_today_oncha
     # vẫn tích lại và báo động được. daily_cap (phanh operator đặt) và attribution_hold (có Telegram
     # riêng) cũng là trung tính. `exhausted` thì KHÔNG: OpenAPI /enroll/wallet ghi allowance "never
     # renewed", nên hết quota = ngừng mua vĩnh viễn trên đường này — trước đây im lặng mãi.
-    if settled_onchain <= 0 and re.search(r"gateway/(pace_wait|daily_cap|attribution_hold)$",
-                                          str(status)):
+    # `overloaded` (gateway hết kênh với miner, flop-labs/network#31) và lượt nghỉ ngay sau nó cũng
+    # trung tính: lỗi phía FLOP, agent không sửa được, và sẽ tự mua lại khi gateway thông.
+    if settled_onchain <= 0 and (
+            re.search(r"gateway/(pace_wait|daily_cap|attribution_hold|overloaded)$", str(status))
+            or (str(status).endswith("gateway/backoff") and "overloaded" in str(reason).lower())):
         return out
     if settled_onchain > 0 or healthy_wait:
         if w.get("alerted_ts") and settled_onchain > 0:
