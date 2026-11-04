@@ -114,6 +114,23 @@ def test_gateway_waiting_is_neutral_not_a_miss():
         assert r["alert"] is None
 
 
+def test_gateway_overload_and_its_backoff_are_neutral():
+    # flop-labs/network#31: "gateway channel pool is full" kéo dài hàng giờ — lỗi phía FLOP, không báo động.
+    st, now = {}, 1_800_000_000
+    for i in range(30):
+        overloaded = i % 2 == 0
+        r = wd.observe(st, settled_onchain=0, now=now + i * 300, spent_today_onchain=0,
+                       status="0✓ gateway/overloaded" if overloaded else "0✓ gateway/backoff",
+                       reason=("429 overloaded: gateway hết kênh" if overloaded
+                               else "chờ tới 1800000240 (429 overloaded)"))
+        assert r["alert"] is None
+    # backoff vì lý do KHÁC vẫn bị đếm như trước
+    for i in range(6):
+        r = wd.observe(st, settled_onchain=0, status="0✓ gateway/backoff", spent_today_onchain=0,
+                       now=now + 9000 + i * 300, reason="chờ tới 1 (403 forbidden)")
+    assert r["alert"]
+
+
 def test_exhausted_allowance_alerts_instead_of_staying_silent():
     # OpenAPI /enroll/wallet: allowance "never renewed" -> hết quota là ngừng mua vĩnh viễn. Trước đây
     # coi là trung tính: 200 lượt liền "exhausted" không một báo động.
