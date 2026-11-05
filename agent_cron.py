@@ -4543,22 +4543,6 @@ def _first_str(d: dict, keys) -> str:
     return ""
 
 
-def wallet_balance_flop(net: str, address: str):
-    """Số dư ví (FLOP) từ explorer đúng mạng (GET công khai, chỉ đọc); None nếu không đọc được.
-    flop_gateway dùng nó để biết quota gateway có tính bằng FLOP không (devnet 2026-11-04: quota
-    20000 trong khi ví 25 FLOP)."""
-    try:
-        import flop_radar
-        r = requests.get(f"{_explorer_base(net)}/api/accounts/{address}",
-                         headers={"User-Agent": UA}, timeout=10)
-        if r.status_code != 200:
-            return None
-        raw = flop_radar.parse_balance(r.text)
-        return raw / 10 ** 18 if raw is not None else None
-    except Exception:
-        return None
-
-
 def channel_info(net: str, channel_id: str) -> dict:
     """{miner, agent} của một kênh compute từ explorer (GET công khai, chỉ đọc). `agent` = tài
     khoản ĐỨNG TÊN kênh — thứ Yellowpaper R8.4 tính chi tiêu. Lỗi/không rõ -> {}."""
@@ -4839,7 +4823,6 @@ def gateway_session_step(state: dict, private_key, now: int):
         # chừng (timeout 20') thì lượt sau vẫn biết để đối soát thay vì gửi lại cùng đề.
         checkpoint=lambda: save_state({flop_gateway.KEY: state.get(flop_gateway.KEY)}),
         channel_fn=lambda cid: channel_info(expect, cid),
-        balance_fn=lambda addr: wallet_balance_flop(expect, addr),
         gate=lambda: (attribution_hold(state, now), attribution_room(state, now)),
         # Lưu sổ NGAY khi có biên nhận mới, TRƯỚC khi checkpoint ghi "đã thấy" xuống state.json.
         after_book=(lambda: persist_ledger_to_kv(private_key, did_of(private_key))) if testnet else None)

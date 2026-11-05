@@ -153,3 +153,11 @@ def test_broken_settlement_still_alerts_through_waiting_runs():
         if r["alert"]:
             alerts.append(r["alert"])
     assert len(alerts) == 1 and "gateway/spent" in alerts[0]
+
+
+def test_operator_budget_spent_is_neutral():
+    st, now = {}, 1_800_000_000
+    for i in range(12):
+        r = wd.observe(st, settled_onchain=0, status="0✓ gateway/budget_spent", spent_today_onchain=0,
+                       now=now + i * 300)
+        assert r["alert"] is None

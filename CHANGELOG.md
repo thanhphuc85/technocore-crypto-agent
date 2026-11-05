@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- The gateway quota is FLOP again. `flop.network/llms.txt` says each address gets "a quota of up to
+  20,000 devnet FLOP that expires after 24 hours", gateway credit rather than the wallet balance. The
+  earlier heuristic (quota more than 4x the wallet balance means it is not FLOP) capped the allowance at
+  the wallet's 25 FLOP, so it is removed together with the explorer balance read and
+  `FLOP_GATEWAY_ALLOWANCE_FLOP`. `FLOP_GATEWAY_BUDGET_FLOP` stays as an optional per-allowance cap (a
+  neutral `budget_spent` outcome). After each paid call the charged amount is compared with token x
+  list price, to settle whether the price is per token or per 1K tokens.
 - Once an allowance is paced by a FLOP budget, it stays that way until the next enrollment. A growing
   wallet (2000 FLOP a day from the verified faucet tier) used to make a 20000 quota look like FLOP again
   after about three days, so spend was measured in quota units and the daily cap stopped after a few
