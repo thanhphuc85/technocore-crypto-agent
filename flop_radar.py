@@ -24,6 +24,9 @@ trả lời chính thức, nên radar canh 3 tín hiệu sẽ đổi quyết đ�
   · <explorer>/api/accounts/<ví>/inference-spend — ví mình có chi tiêu ghi trên chain (0 -> >0).
   · yellowpaper#31                    — airdrop tính theo ví chủ / khoá uỷ quyền / danh tính agent
                                          (quyết định có cần lập ví agent có trần hay không).
+  · COMMIT mới vào flop-labs/yellowpaper — Arthur Hayes 2026-11-05: "We are ironing out some things and
+                                         changing parts of the protocol. Please have your agent monitor
+                                         the yellow paper git repo for changes." Báo kèm file đổi + link so sánh.
 
 DEVNET CÔNG KHAI (Arthur Hayes 26/10: "open up Devnet … before we graduate to Testnet"):
   · docs.flop.network/docs/network-devnet — trạng thái devnet ("development" -> khác).
@@ -57,6 +60,11 @@ NETWORK_COMMENTS_URL = ("https://api.github.com/repos/flop-labs/network/issues/c
 NETWORK_SEEN_KEEP = 40
 NETWORK_ALERT_LINES = 5
 UNIT_ISSUE_URL = "https://api.github.com/repos/flop-labs/yellowpaper/issues/31"
+YP_REPO = "flop-labs/yellowpaper"
+YP_COMMITS_URL = f"https://api.github.com/repos/{YP_REPO}/commits?per_page=10"
+YP_COMPARE_URL = "https://api.github.com/repos/" + YP_REPO + "/compare/{base}...{head}"
+YP_ALERT_LINES = 5                   # số commit liệt kê trong một tin
+YP_FILES_SHOWN = 8                   # số file đổi liệt kê
 DEVNET_STATUS_URL = "https://docs.flop.network/docs/network-devnet"
 BASE_DEVNET_STATUS = "development"
 EXPLORERS = ("https://explorer.devnet.flop.network", "https://explorer.testnet.flop.network")
@@ -191,6 +199,32 @@ def parse_maintainer_comments(text):
     return out
 
 
+def parse_commits(text):
+    """[(sha, ngày ISO, dòng đầu message)] từ GET /repos/.../commits (mới nhất trước); None nếu hỏng."""
+    d = _json(text)
+    if not isinstance(d, list):
+        return None
+    out = []
+    for c in d:
+        sha = c.get("sha") if isinstance(c, dict) else None
+        if not (isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{40}", sha)):
+            continue
+        commit = c.get("commit") if isinstance(c.get("commit"), dict) else {}
+        who = commit.get("committer") if isinstance(commit.get("committer"), dict) else {}
+        msg = str(commit.get("message") or "").strip().splitlines()
+        out.append((sha, str(who.get("date") or "")[:16], (msg[0] if msg else "")[:120]))
+    return out
+
+
+def parse_compare_files(text):
+    """Tên các file đổi từ GET /repos/.../compare/a...b; None nếu hỏng."""
+    d = _json(text)
+    files = d.get("files") if isinstance(d, dict) else None
+    if not isinstance(files, list):
+        return None
+    return [str(f.get("filename"))[:120] for f in files if isinstance(f, dict) and f.get("filename")]
+
+
 def parse_total(text):
     """pagination.total của một danh sách explorer; None nếu hỏng."""
     d = _json(text)
@@ -264,6 +298,32 @@ def _watch_network(r, fetch_fn) -> list:
     return lines
 
 
+def _watch_yellowpaper(r, fetch_fn) -> list:
+    """Commit mới vào flop-labs/yellowpaper (FLOP đổi giao thức trước testnet). Lần đầu chỉ ghi mốc
+    (commit mới nhất). Mốc cũ không còn trong 10 commit gần nhất (đẩy nhiều hoặc viết lại lịch sử)
+    -> vẫn báo, ghi rõ. Nguồn lỗi -> giữ mốc, không báo."""
+    commits = parse_commits(fetch_fn(YP_COMMITS_URL))
+    if not commits:
+        return []
+    head, known = commits[0][0], r.get("attr_yp_head")
+    r["attr_yp_head"] = head
+    if not known or known == head:
+        return []
+    shas = [c[0] for c in commits]
+    new, partial = (commits[:shas.index(known)], False) if known in shas else (commits, True)
+    n = f"{len(new)}+" if partial else str(len(new))
+    lines = [f"• {YP_REPO} có {n} commit MỚI (FLOP đang đổi giao thức) — xem thay đổi: "
+             f"https://github.com/{YP_REPO}/compare/{known[:12]}...{head[:12]}"]
+    if partial:
+        lines.append("  (mốc cũ không còn trong 10 commit gần nhất: đẩy nhiều commit hoặc lịch sử bị viết lại)")
+    lines += [f"  - {date} {sha[:7]} {msg}" for sha, date, msg in new[:YP_ALERT_LINES]]
+    files = parse_compare_files(fetch_fn(YP_COMPARE_URL.format(base=known, head=head)))
+    if files:
+        more = len(files) - YP_FILES_SHOWN
+        lines.append("  file đổi: " + ", ".join(files[:YP_FILES_SHOWN]) + (f" (+{more})" if more > 0 else ""))
+    return lines
+
+
 def check_attribution(r: dict, fetch_fn, wallet=None, explorers=EXPLORERS) -> list:
     """3 tín hiệu ĐỨNG TÊN AI (xem docstring module). Ghi mốc vào r, trả các dòng báo động.
     Lần đầu thấy một nguồn chỉ ghi mốc (không báo). Nguồn lỗi -> bỏ qua."""
@@ -275,6 +335,7 @@ def check_attribution(r: dict, fetch_fn, wallet=None, explorers=EXPLORERS) -> li
     lines += _watch_issue(r, fetch_fn, CREDIT_ISSUE_URL, "208", "cơ sở tính điểm chi tiêu của agent",
                           "attr_i208_state", "attr_i208_seen")
     lines += _watch_network(r, fetch_fn)
+    lines += _watch_yellowpaper(r, fetch_fn)
     offers = dict(r.get("attr_offers") or {})
     for base in explorers:
         h = _host(base)

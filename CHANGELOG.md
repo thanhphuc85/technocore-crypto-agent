@@ -93,6 +93,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `test_packaging` keeps the list in sync.
 
 ### Added
+- The testnet radar reports new commits to `flop-labs/yellowpaper` (Arthur Hayes, 2026-11-05: "have your agent monitor the yellow paper git repo for changes"), with the commit messages,
+  the changed files and a compare link. The first run only records the current head.
 - **Multi-room listen & respond (`AGENT_ROOMS`).** `auto_respond` can now listen and reply across
   a CSV list of rooms (e.g. `lobby,meta,flop`) in one run, each reply routed back to the room it
   came from. Kept **synchronous** (the codebase is `requests` + 5-min cron — fetching a few rooms

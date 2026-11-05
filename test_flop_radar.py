@@ -328,3 +328,71 @@ def test_gateway_reporting_testnet_carries_the_checklist_but_devnet_does_not():
     st[rd.KEY]["network"] = "older"
     alert = rd.check(st, _fetcher2())
     assert alert and "Checklist" not in alert
+
+
+# --- commit mới vào flop-labs/yellowpaper (Arthur Hayes 2026-11-05) -----------------------------
+
+def _sha(i):
+    return f"{i:040x}"
+
+
+def _commits(*ids):
+    return json.dumps([{"sha": _sha(i), "commit": {"message": f"docs: change {i}\n\nbody",
+                                                    "committer": {"date": f"2026-11-0{i % 9 + 1}T10:00:00Z"}}}
+                       for i in ids])
+
+
+def _yp(commits, files=None, base=None, head=None):
+    pages = {rd.YP_COMMITS_URL: commits}
+    if files is not None:
+        pages[rd.YP_COMPARE_URL.format(base=base, head=head)] = json.dumps(
+            {"files": [{"filename": f} for f in files]})
+    return lambda u: pages.get(u)
+
+
+def test_yellowpaper_first_sight_only_records_the_head():
+    r = {}
+    assert rd._watch_yellowpaper(r, _yp(_commits(3, 2, 1))) == []
+    assert r["attr_yp_head"] == _sha(3)
+
+
+def test_yellowpaper_new_commits_alert_once_with_files_and_compare_link():
+    r = {"attr_yp_head": _sha(3)}
+    f = _yp(_commits(5, 4, 3, 2), files=["yellowpaper.md", "decisions/R8.md"], base=_sha(3), head=_sha(5))
+    lines = rd._watch_yellowpaper(r, f)
+    assert "2 commit MỚI" in lines[0] and f"compare/{_sha(3)[:12]}...{_sha(5)[:12]}" in lines[0]
+    assert any("docs: change 5" in x for x in lines) and any("docs: change 4" in x for x in lines)
+    assert not any("docs: change 3" in x for x in lines)                    # commit đã thấy không báo lại
+    assert any("file đổi: yellowpaper.md, decisions/R8.md" in x for x in lines)
+    assert r["attr_yp_head"] == _sha(5) and rd._watch_yellowpaper(r, f) == []
+
+
+def test_yellowpaper_rewrite_or_many_commits_still_alert():
+    r = {"attr_yp_head": _sha(99)}
+    lines = rd._watch_yellowpaper(r, _yp(_commits(*range(20, 10, -1))))
+    assert "10+ commit MỚI" in lines[0] and "viết lại" in lines[1]
+    assert len([x for x in lines if x.startswith("  - ")]) == rd.YP_ALERT_LINES
+
+
+def test_yellowpaper_outage_or_junk_keeps_the_mark():
+    r = {"attr_yp_head": _sha(3)}
+    for junk in (None, "not json", "{}", json.dumps([{"sha": "nothex"}])):
+        assert rd._watch_yellowpaper(r, lambda u, j=junk: j) == []
+        assert r["attr_yp_head"] == _sha(3)
+
+
+def test_yellowpaper_compare_failure_still_alerts_without_files():
+    r = {"attr_yp_head": _sha(1)}
+    lines = rd._watch_yellowpaper(r, _yp(_commits(2, 1)))
+    assert "1 commit MỚI" in lines[0] and not any("file đổi" in x for x in lines)
+
+
+def test_yellowpaper_change_reaches_the_radar_alert():
+    st = {}
+    pages = {rd.YP_COMMITS_URL: _commits(1)}
+    assert rd.check(st, _pages(_fetcher(), pages)) is None                  # lần đầu: chỉ ghi mốc
+    assert st[rd.KEY]["attr_yp_head"] == _sha(1)
+    pages[rd.YP_COMMITS_URL] = _commits(2, 1)
+    alert = rd.check(st, _pages(_fetcher(), pages))
+    assert alert and "flop-labs/yellowpaper có 1 commit MỚI" in alert and "Checklist" not in alert
+    assert rd.check(st, _pages(_fetcher(), pages)) is None
