@@ -101,9 +101,6 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(ac, "kv_set", lambda *a, **k: True)
     monkeypatch.setattr(ac, "build_market_context", lambda *a, **k: "")
     monkeypatch.setattr(ac, "RADAR_EXPLORER", "")
-    # Quota của các gateway giả ở đây tính bằng FLOP: ví đủ lớn để flop_gateway không chuyển sang ngân
-    # sách theo số dư (có test riêng trong test_flop_gateway.py). Cũng chặn gọi explorer thật.
-    monkeypatch.setattr(ac, "wallet_balance_flop", lambda net, addr: 10.0 ** 9)
 
 
 @pytest.fixture

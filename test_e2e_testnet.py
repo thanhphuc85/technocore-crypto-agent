@@ -40,7 +40,6 @@ def test_three_testnet_runs_end_to_end(monkeypatch, tmp_path):
     monkeypatch.setattr(ac, "_telegram_send", lambda t: tg.append(t) or True)
     monkeypatch.setattr(ac, "_server_ok_count", 1)
     monkeypatch.setattr(ac, "build_market_context", lambda *a, **k: "BTC $1")
-    monkeypatch.setattr(ac, "wallet_balance_flop", lambda net, addr: 10.0 ** 9)   # quota giả tính bằng FLOP
     # Gateway giả: mạng testnet, quota 300, biên nhận settle ngay lượt sau
     fake = FakeGateway(network="testnet", quota=300.0, expires_ms=0, cost=6.5)
     fake.receipts, fake.receipt_state = [], "settled"
