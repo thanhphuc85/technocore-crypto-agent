@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Switching the gateway wallet on the same network (a new rehearsal seed) now starts that wallet
+  clean. The old wallet's bearer, allowance window, lag episode, backoff, receipts and learned request
+  size used to carry over. On devnet (2026-11-06) the old 128-token cap truncated every answer of the new
+  wallet although `FLOP_GATEWAY_MAX_TOKENS` was 512, and a stale "20000 FLOP behind" line kept being
+  logged. Cumulative stats, prompt rotation, recent error ids and the operator's daily spend are kept.
+- A learned request-size cap now expires together with the rejection it came from (one day). Before,
+  it stayed until 12 consecutive successes, which an overloaded gateway never delivers. A repeat
+  rejection at the same size refreshes the rejection's timestamp, so an expired cap is relearned rather
+  than retried at the rejected size every run.
 - The gateway quota is FLOP again. `flop.network/llms.txt` says each address gets "a quota of up to
   20,000 devnet FLOP that expires after 24 hours", gateway credit rather than the wallet balance. The
   earlier heuristic (quota more than 4x the wallet balance means it is not FLOP) capped the allowance at

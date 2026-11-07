@@ -1236,3 +1236,98 @@ def test_switching_back_from_the_old_wallet_budget_reopens_the_window():
     g = state[gw.KEY]
     assert "flop_budget" not in g and g["window"]["unit"] == "quota" and g["window"]["total"] > 19000
     assert any("đổi thước đo nhịp chi flop -> quota" in m for m in logs)
+
+
+# --- đổi ví trên cùng mạng (devnet 2026-11-06: tok_cap=128 của ví cũ kẹt sang ví mới) ----------
+
+def _old_wallet_state():
+    return {"profile": f"{gw.base_url()}|devnet", "address": gw.wallet_address(_key("44")),
+            "wait_until": NOW + 3600, "wait_why": "403 wallet_unfunded", "vault": {"n": "x", "c": "y"},
+            "expires_at": NOW + 9999, "tok_cap": 128, "tok_ok": 3, "tok_bad": 256, "tok_bad_ts": NOW - 60,
+            "window": {"start": NOW - 9999, "horizon": NOW + 99, "total": 20000.0, "spent": 5.0},
+            "lag": {"since": NOW - 30000, "reasons": {"backoff": 9}}, "receipts_seen": ["r1"],
+            "stats": {"calls": 7, "spent": 9.0}, "prompt_idx": 2, "err_ids": ["e1"],
+            "day_spent": {"day": "2027-01-15", "spent": 3.0}}
+
+
+def test_switching_wallet_drops_the_old_wallets_learned_state():
+    state, logs = {gw.KEY: _old_wallet_state()}, []
+    fake = FakeGateway(expires_ms=SOON)
+    r = gw.run_step(state, agent_key=_key("22"), http=fake, now=NOW, prompts=["q1", "q2", "q3"],
+                    expect_network="devnet", sleep=lambda s: None, log=logs.append)
+    g = state[gw.KEY]
+    assert r["outcome"] != "backoff" and "/v1/enroll/wallet" in fake.paths()   # không chờ lịch nghỉ ví cũ
+    assert any("đổi ví" in x for x in logs)
+    assert g["address"] == gw.wallet_address(_key("11"))
+    for k in ("tok_cap", "tok_bad", "wait_why", "lag"):
+        assert k not in g or not g[k], k
+    assert "r1" not in (g.get("receipts_seen") or [])
+    assert g["stats"]["calls"] >= 7 and g["err_ids"][:1] == ["e1"]            # thống kê cộng dồn giữ lại
+    sent = [c[3] for c in fake.calls if c[1] == "/v1/chat/completions" and isinstance(c[3], dict)]
+    assert sent and all(b.get("max_tokens", 0) > 128 for b in sent)              # không còn kẹt ở 128
+
+
+def test_same_wallet_keeps_its_learned_state():
+    st = _old_wallet_state()
+    st["address"] = gw.wallet_address(_key("11"))                               # ví của SEED
+    state, logs = {gw.KEY: st}, []
+    r = gw.run_step(state, agent_key=_key("22"), http=FakeGateway(expires_ms=SOON), now=NOW,
+                    prompts=["q1"], expect_network="devnet", sleep=lambda s: None, log=logs.append)
+    assert r["outcome"] == "backoff" and state[gw.KEY]["tok_cap"] == 128
+    assert not any("đổi ví" in x for x in logs)
+
+
+def _chat_sizes(fake):
+    return [c[3]["max_tokens"] for c in fake.calls if c[1] == "/v1/chat/completions" and isinstance(c[3], dict)]
+
+
+def test_learned_size_cap_expires_with_the_rejection_it_came_from(monkeypatch):
+    # Devnet 2026-11-06: tok_cap=128 (cỡ bị từ chối đã quá 1 ngày / không còn nhớ) kẹt mãi -> câu trả
+    # lời bị cắt ở 128 token dù FLOP_GATEWAY_MAX_TOKENS=512.
+    monkeypatch.setenv("FLOP_GATEWAY_MAX_TOKENS", "512")
+    for stale in ({"tok_bad": 256, "tok_bad_ts": NOW - gw.TOK_BAD_TTL - 1}, {}):
+        fake, state, logs = FakeGateway(quota=20000.0, expires_ms=SOON), {}, []
+        _run(state, fake)
+        state[gw.KEY].update(tok_cap=128, tok_ok=3, wait_until=0, **stale)
+        fake.calls.clear()
+        gw.run_step(state, agent_key=_key("22"), http=fake, now=NOW, prompts=["q1", "q2"], expect_network="devnet",
+                    sleep=lambda s: None, log=logs.append)
+        assert _chat_sizes(fake) and all(s > 128 for s in _chat_sizes(fake)), stale
+        assert "tok_cap" not in state[gw.KEY] and any("bỏ trần cỡ đã học 128" in x for x in logs)
+
+
+def test_learned_size_cap_is_kept_while_the_rejection_is_fresh(monkeypatch):
+    monkeypatch.setenv("FLOP_GATEWAY_MAX_TOKENS", "512")
+    fake, state = FakeGateway(quota=20000.0, expires_ms=SOON), {}
+    _run(state, fake)
+    state[gw.KEY].update(tok_cap=128, tok_ok=0, tok_bad=256, tok_bad_ts=NOW - 3600, wait_until=0)
+    fake.calls.clear()
+    _run(state, fake)
+    assert _chat_sizes(fake) and all(s <= 128 for s in _chat_sizes(fake)) and state[gw.KEY]["tok_cap"] == 128
+
+
+def test_repeat_rejection_at_the_same_size_refreshes_its_timestamp(monkeypatch):
+    # Không làm mới mốc giờ -> trần vừa học bị coi là hết hạn ngay lượt sau và gửi lại cỡ hỏng mãi.
+    monkeypatch.setenv("FLOP_GATEWAY_MAX_TOKENS", "512")
+    fake, state = FakeGateway(quota=20000.0, expires_ms=SOON), {}
+    real = fake.__call__
+
+    def picky(method, url, headers=None, json=None, timeout=None):
+        if url.endswith("/chat/completions") and json["max_tokens"] > 256:
+            fake.calls.append((method, "/v1/chat/completions", headers or {}, json, url))
+            return Resp(503, {"error": {"code": "provider_error",
+                                        "message": "Error: no admitted miner for model 'm1' and budget"}})
+        return real(method, url, headers=headers, json=json, timeout=timeout)
+
+    later = NOW + gw.TOK_BAD_TTL + 600
+    _run(state, fake)
+    state[gw.KEY].update(tok_cap=256, tok_bad=512, tok_bad_ts=NOW - 60, wait_until=0)
+    r = gw.run_step(state, agent_key=_key("22"), http=picky, now=later, prompts=["q"], expect_network="devnet",
+                    sleep=lambda s: None, log=lambda *a: None)
+    g = state[gw.KEY]
+    assert r["outcome"] == "no_miner" and g["tok_bad"] == 512 and g["tok_bad_ts"] == later and g["tok_cap"] == 256
+    g["wait_until"] = 0
+    fake.calls.clear()
+    gw.run_step(state, agent_key=_key("22"), http=picky, now=later + 300, prompts=["q"], expect_network="devnet",
+                sleep=lambda s: None, log=lambda *a: None)
+    assert _chat_sizes(fake) and all(s <= 256 for s in _chat_sizes(fake))      # không gửi lại cỡ hỏng
