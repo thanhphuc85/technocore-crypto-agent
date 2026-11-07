@@ -714,6 +714,11 @@ def _quota_left(fb, quota_now: float, remaining: float, spent: float) -> float:
     return max(0.0, min(quota_now, remaining - spent))
 
 
+# Giữ qua lần đổi ví (cùng mạng): thống kê cộng dồn, vòng xoay đề (không gửi lặp đề), mã lỗi gần
+# đây, và số đã chi trong ngày UTC — trần ngày là trần của OPERATOR, không reset theo ví.
+WALLET_KEEP = ("profile", "network", "stats", "prompt_idx", "err_ids", "day_spent")
+
+
 def profile_of(expect_network: str) -> str:
     """Dấu nhận diện gateway + mạng: đổi dấu này thì trạng thái cũ không còn dùng được."""
     return f"{base_url()}|{expect_network}"
@@ -761,6 +766,16 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
         log(f"[gateway] đổi sang {profile} — bỏ trạng thái của {g.get('profile') or 'mạng cũ'}")
         g = {}
     g["profile"] = profile
+    # Đổi VÍ trên cùng mạng (vd seed tập mới): allowance, bearer, cửa sổ chi, lịch nghỉ, cỡ yêu cầu
+    # học được và biên nhận đều thuộc ví CŨ. Devnet 2026-11-06: tok_cap=128 học từ ví cũ kẹt sang
+    # ví mới -> mọi câu trả lời bị cắt ở 128 token dù FLOP_GATEWAY_MAX_TOKENS=512; dòng "chi tụt
+    # lại 20000 FLOP" của cửa sổ cũ; và ví mới phải chờ 1h theo lịch nghỉ 403 của ví cũ.
+    wkey = wallet_key(agent_key)
+    addr = wallet_address(wkey) if wkey is not None else None
+    if addr and g.get("address") and g["address"] != addr:
+        log(f"[gateway] đổi ví {g['address'][:8]}… -> {addr[:8]}… — bỏ trạng thái của ví cũ "
+            f"(giữ: {', '.join(k for k in WALLET_KEEP if k in g)})")
+        g = {k: g[k] for k in WALLET_KEEP if k in g}
     out = {"outcome": "?", "calls": 0, "spent": 0.0}
     calls, spent = 0, 0.0                    # giữ được cả khi lần gọi sau lỗi (báo đúng số đã gọi)
     pending = None                           # Idempotency-Key của lần gọi đang chờ phản hồi
@@ -776,13 +791,11 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
 
     if int(g.get("wait_until") or 0) > now:
         return done("backoff", reason=f"chờ tới {g['wait_until']} ({g.get('wait_why', '')})")
-    wkey = wallet_key(agent_key)
     if wkey is None:
         return done("unconfigured", reason="chưa có khoá ví (FLOP_WALLET_SEED_HEX hoặc FLOP_WALLET_USE_DID=on)")
     if not prompts:
         return done("unconfigured", reason="chưa có đề bài")
     base = base_url()
-    addr = wallet_address(wkey)
     g["address"] = addr
 
     net, why = network_detail(http, base)
@@ -1143,6 +1156,13 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
         if due < min_cost or min_cost <= 0:
             return done("pace_wait", due=round(due, 6), remaining=remaining, budget=_avail_out(fb),
                         reason=f"đến hạn {due:.4f} < giá tối thiểu 1 lần gọi {min_cost:.4f} — tích sang run sau")
+        if g.get("tok_cap") and not (g.get("tok_bad") and now - int(g.get("tok_bad_ts") or 0) < TOK_BAD_TTL):
+            # Trần cỡ học được chỉ có giá trị khi còn nhớ cỡ bị từ chối (1 ngày). Hết hạn mà vẫn giữ thì
+            # kẹt mãi: chỉ nới +25% sau 12 lần thành công liền, gateway quá tải thì không bao giờ tới
+            # (devnet 2026-11-06: kẹt 128 token, câu trả lời bị cắt dù đặt 512). Bị từ chối lại -> học lại.
+            log(f"[gateway] bỏ trần cỡ đã học {g['tok_cap']} token (cỡ bị từ chối đã quá 1 ngày) — dùng {cap}")
+            for k in ("tok_cap", "tok_ok"):
+                g.pop(k, None)
         n = min(max_calls, max(1, int(due // min_cost)))      # gọi ít mà to, không nhiều mà vụn
         per_call = min(due / n, avail)
         spent, calls, last, quota_now = 0.0, 0, {}, remaining
@@ -1291,7 +1311,10 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
         if e.status == 503 and "no admitted miner" in e.message.lower() and g.get("last_mt"):
             # Không miner nào nhận yêu cầu CỠ này -> lần sau gửi nửa cỡ (không phải mạng quá tải).
             bad = int(g["last_mt"])
-            if not g.get("tok_bad") or bad < int(g["tok_bad"]):
+            if (not g.get("tok_bad") or bad <= int(g["tok_bad"])
+                    or now - int(g.get("tok_bad_ts") or 0) >= TOK_BAD_TTL):
+                # <= : bị từ chối LẠI ở cùng cỡ thì làm mới mốc giờ, không thì trần vừa học bị coi là
+                # hết hạn ngay lượt sau và lại gửi cỡ hỏng. Mốc cũ quá hạn -> thay bằng cỡ mới.
                 g["tok_bad"], g["tok_bad_ts"] = bad, now      # cỡ NHỎ NHẤT từng bị từ chối
             g["tok_cap"] = max(int(_env_num("FLOP_GATEWAY_MIN_TOKENS", 64)) * 2, bad // 2)
             g["tok_ok"] = 0
