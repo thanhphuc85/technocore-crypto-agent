@@ -1,5 +1,6 @@
 """flop_gateway: mua compute qua api.flop.network — gateway GIẢ, không mạng thật."""
 import json
+import time
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -1331,3 +1332,66 @@ def test_repeat_rejection_at_the_same_size_refreshes_its_timestamp(monkeypatch):
     gw.run_step(state, agent_key=_key("22"), http=picky, now=later + 300, prompts=["q"], expect_network="devnet",
                 sleep=lambda s: None, log=lambda *a: None)
     assert _chat_sizes(fake) and all(s <= 256 for s in _chat_sizes(fake))      # không gửi lại cỡ hỏng
+
+
+# --- bộ đếm ngày: khoản tạm tính sau timeout/524 được thay bằng số thật khi đối soát -------------
+
+def _day(state):
+    return state[gw.KEY]["day_spent"]["spent"]
+
+
+def _held_timeout(monkeypatch, receipt_state="settled"):
+    monkeypatch.setenv("FLOP_GATEWAY_MAX_CALLS_PER_RUN", "1")
+    monkeypatch.setenv("FLOP_GATEWAY_REPLAY_MAX", "0")
+    fake = FakeGateway(quota=25.0, expires_ms=LATER)
+    fake.honor_idem, fake.receipt_state = True, receipt_state
+    state = {}
+    assert _step(state, _timeout_after_processing(fake), NOW)["outcome"] == "unknown_outcome"
+    inf = state[gw.KEY]["inflight"]
+    assert _day(state) == pytest.approx(inf["max_cost"]) and inf["day_held"][1] == pytest.approx(inf["max_cost"])
+    assert inf["max_cost"] > fake.cost                                   # tạm tính cao hơn số thật
+    state[gw.KEY]["wait_until"] = 0
+    return fake, state
+
+
+def test_reconciled_timeout_replaces_the_reserve_with_the_settled_amount(monkeypatch):
+    fake, state = _held_timeout(monkeypatch)
+    r = _step(state, fake, NOW + 600)
+    assert _day(state) == pytest.approx(fake.cost + r["spent"])          # trước: max_cost + spent
+    assert "inflight" not in state[gw.KEY] and not state[gw.KEY].get("day_holds")
+
+
+def test_reconciled_timeout_that_was_not_charged_releases_the_whole_reserve(monkeypatch):
+    fake, state = _held_timeout(monkeypatch, receipt_state="released")
+    r = _step(state, fake, NOW + 600)
+    assert _day(state) == pytest.approx(r["spent"])
+
+
+def test_reserve_waits_for_a_pending_receipt_then_settles(monkeypatch):
+    fake, state = _held_timeout(monkeypatch, receipt_state="pending")
+    held = state[gw.KEY]["inflight"]["max_cost"]
+    monkeypatch.setenv("FLOP_GATEWAY_MAX_CALLS_PER_RUN", "1")
+    fake.override[("POST", "/v1/chat/completions")] = Resp(429, {"error": {"code": "overloaded"}})
+    _step(state, fake, NOW + 600)
+    assert "inflight" not in state[gw.KEY] and len(state[gw.KEY]["day_holds"]) == 1
+    assert _day(state) == pytest.approx(held)                            # còn chờ: giữ khoản tạm tính
+    for rc in fake.receipts:
+        if rc.get("state") == "pending":
+            rc["state"] = "settled"
+    state[gw.KEY]["wait_until"] = 0
+    _step(state, fake, NOW + 1200)
+    assert _day(state) == pytest.approx(fake.cost) and not state[gw.KEY].get("day_holds")
+
+
+def test_reserve_from_a_previous_utc_day_does_not_touch_today(monkeypatch):
+    fake, state = _held_timeout(monkeypatch)
+    nxt = NOW + 86400
+    r = _step(state, fake, nxt)
+    assert state[gw.KEY]["day_spent"]["day"] == time.strftime("%Y-%m-%d", time.gmtime(nxt))
+    assert _day(state) == pytest.approx(r["spent"])                     # không trừ khoản của hôm qua
+
+
+def test_replayed_answer_is_counted_once_in_the_day(monkeypatch):
+    fake, state = _hung(monkeypatch)
+    r = _step(state, fake, NOW + 1000, answer_fn=lambda p, t, c: None)
+    assert r["outcome"] == "replayed" and _day(state) == pytest.approx(fake.cost)   # trước: max_cost + cost

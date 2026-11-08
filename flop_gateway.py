@@ -568,6 +568,19 @@ def settled_amount(rc: dict):
     return None
 
 
+_DONE_UNPAID_STATES = _OPEN_STATES - _WAITING_STATES     # failed/released/refunded...: không bị trừ tiền
+DAY_HOLDS_KEEP = 20
+
+
+def final_amount(rc: dict):
+    """Số FLOP CUỐI của biên nhận cho bộ đếm ngày: settled -> số tiền, thất bại/hoàn -> 0, còn chờ
+    (hoặc settled chưa có số) -> None."""
+    a = settled_amount(rc)
+    if a is not None:
+        return a
+    return 0.0 if _state(rc) in _DONE_UNPAID_STATES else None
+
+
 # --- cảnh báo chi tụt lại ---------------------------------------------------------------
 
 _LAG_HINTS = {
@@ -812,7 +825,34 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
         d = time.strftime("%Y-%m-%d", time.gmtime(now))
         dc = g.get("day_spent") if isinstance(g.get("day_spent"), dict) else {}
         base = float(dc.get("spent") or 0) if dc.get("day") == d else 0.0
-        g["day_spent"] = {"day": d, "spent": round(base + float(amount or 0), 6)}
+        g["day_spent"] = {"day": d, "spent": round(max(0.0, base + float(amount or 0)), 6)}
+
+    # Request KHÔNG RÕ kết quả (timeout/524): tạm tính mức tối đa vào bộ đếm ngày (an toàn: không chi
+    # vượt trần), nhớ khoản tạm tính trong inflight['day_held'] = [ngày UTC, số]. Đối soát được biên
+    # nhận -> thay bằng số thật (settled) hoặc 0 (thất bại/hoàn). Trước đây khoản tạm tính ở lại mãi:
+    # bộ đếm cao hơn thực tế ~0.3-0.8 FLOP mỗi lần (3.9 nếu bị hoàn) -> dừng sớm hơn trần.
+    def hold_day() -> None:
+        inf = g.get("inflight") if isinstance(g.get("inflight"), dict) else None
+        amt = float((inf or {}).get("max_cost") or 0)
+        charge_day(amt)
+        if inf is not None and amt > 0:
+            inf["day_held"] = [time.strftime("%Y-%m-%d", time.gmtime(now)), round(amt, 6)]
+
+    def unhold_day(held, actual: float) -> None:
+        """Thay khoản tạm tính `held` bằng `actual`. Khoản tạm tính của ngày UTC trước: chi thật thuộc
+        ngày đó, bộ đếm hôm nay không đổi."""
+        if not (isinstance(held, list) and len(held) == 2):
+            return
+        if held[0] == time.strftime("%Y-%m-%d", time.gmtime(now)):
+            charge_day(float(actual or 0) - float(held[1] or 0))
+
+    def settle_hold(held, rc) -> bool:
+        """Biên nhận đã chốt -> điều chỉnh, True. Còn chờ -> False (giữ để lượt sau đối soát)."""
+        a = final_amount(rc) if isinstance(rc, dict) else None
+        if a is None:
+            return False
+        unhold_day(held, a)
+        return True
 
     def tally(n_calls: int, amount: float, n_sent: int = None) -> None:
         """Xoay đề + cộng thống kê theo số lần gọi ĐÃ THÀNH CÔNG. Gọi cả khi lượt kết thúc bằng
@@ -874,6 +914,7 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
         fb = _flop_budget(g, remaining, log)
         avail = remaining if fb is None else fb["avail"]
         rids = set()                        # request_id của các biên nhận gateway vừa trả
+        by_key = {}                         # khoá biên nhận -> biên nhận (đối soát khoản tạm tính)
         settled_rids = set()                # ... trong đó đã settle
         recent = []                         # (created_at giây, model, khoá) — đối soát request treo theo giờ
 
@@ -896,6 +937,21 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
             recent.clear()
             recent.extend((epoch_s(rc.get("created_at")), str(rc.get("model") or ""), _receipt_key(rc))
                           for rc in items)
+            by_key.clear()
+            for rc in items:
+                by_key[_receipt_key(rc)] = rc
+                if rc.get("request_id"):
+                    by_key[str(rc["request_id"])] = rc
+            holds = dict(g.get("day_holds") or {})
+            for hk in list(holds):
+                if hk in by_key and settle_hold(holds[hk], by_key[hk]):
+                    holds.pop(hk)
+            today = time.strftime("%Y-%m-%d", time.gmtime(now))
+            holds = {k: v for k, v in holds.items() if isinstance(v, list) and v and v[0] == today}
+            if holds:
+                g["day_holds"] = dict(list(holds.items())[-DAY_HOLDS_KEEP:])
+            else:
+                g.pop("day_holds", None)
             odd, unpriced = set(), 0
             for rc in items:
                 key = f"{rc.get('state')}/{rc.get('response_status')}"
@@ -1038,7 +1094,10 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
                     cost = _cost(usage.get("cost_flop")) or drop or usage_cost(usage, *_price(model)) or 0.0
                     if fb is not None:
                         _fb_charge(g, fb, cost or float(inf.get("max_cost") or 0))
-                    charge_day(cost)
+                    if inf.get("day_held"):
+                        unhold_day(inf["day_held"], cost)    # đã tạm tính ở lượt lỗi: thay, không cộng
+                    else:
+                        charge_day(cost)
                     if answer_fn:
                         try:
                             answer_fn(inf["prompt"], answer_text(r), cost)
@@ -1048,11 +1107,15 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
                     tally(1, cost, n_sent=0)                 # đề đã xoay ở lượt gặp lỗi
                     g["remaining"] = after
                     return done("replayed", calls=1, spent=round(cost, 6), remaining=after, model=model_id)
-            if key and key in rids:
-                log(f"[gateway] đối soát xong request treo {key[:8]}… — đã có biên nhận")
-                g.pop("inflight", None)
-            elif by_time:
-                log(f"[gateway] đối soát xong request treo {key[:8]}… theo giờ gửi — biên nhận {by_time[:12]}…")
+            if (key and key in rids) or by_time:
+                rk = key if key in rids else by_time
+                if key in rids:
+                    log(f"[gateway] đối soát xong request treo {key[:8]}… — đã có biên nhận")
+                else:
+                    log(f"[gateway] đối soát xong request treo {key[:8]}… theo giờ gửi — biên nhận {by_time[:12]}…")
+                held = inf.get("day_held")
+                if held and not settle_hold(held, by_key.get(rk)):
+                    g["day_holds"] = {**(g.get("day_holds") or {}), rk: held}   # còn chờ: lượt sau
                 g.pop("inflight", None)
             elif age < ttl:
                 return done("reconciling", remaining=remaining,
@@ -1281,7 +1344,7 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
         if pending and e.status in AMBIGUOUS_STATUS:
             # Giữ g['inflight'] (đã ghi trước lần gọi) -> lượt sau đối soát theo biên nhận.
             tally(calls, spent, n_sent=calls + 1)
-            charge_day((g.get("inflight") or {}).get("max_cost"))
+            hold_day()
             if fb is not None:
                 _fb_charge(g, fb, float((g.get("inflight") or {}).get("max_cost") or 0))
             backoff(900, f"{e.status} {e.code}")
@@ -1336,7 +1399,7 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
             out.update(calls=calls, spent=round(spent, 6))
             tally(calls, spent, n_sent=calls + unknown)
         if unknown:
-            charge_day((g.get("inflight") or {}).get("max_cost"))
+            hold_day()
         backoff(900, type(e).__name__)
         if unknown:
             return done("unknown_outcome",
