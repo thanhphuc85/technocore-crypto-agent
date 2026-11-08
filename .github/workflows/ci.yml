@@ -53,7 +53,9 @@ jobs:
           /tmp/dev/bin/python -m pytest --collect-only -q | tail -1
 
   test:
-    runs-on: ubuntu-latest
+    # Ghim 24.04: ubuntu-latest chuyển sang 26.04 (2026-11-08) không còn Python 3.9 -> job 3.9 lỗi ngay
+    # ở setup-python và kéo hủy cả ma trận. pyproject vẫn hứa >=3.9; agent_cron cũng chạy 24.04.
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         python-version: ['3.9', '3.10', '3.11', '3.12']
