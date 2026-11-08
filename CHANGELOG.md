@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- The daily spend counter no longer keeps the full reserve of a request whose outcome was unknown
+  (a timeout or HTTP 524). The reserve is still counted at once, so the daily cap cannot be overrun.
+  Once the receipt is reconciled, the reserve is replaced by the settled amount, or by 0 if the request
+  was released. A receipt that is still pending keeps the reserve until it settles. Before, the counter
+  ran about 0.3-0.8 FLOP high per incident (3.9 when the request was released), and a replayed answer
+  was counted on top of its reserve. A reserve from an earlier UTC day leaves today's counter alone.
 - Switching the gateway wallet on the same network (a new rehearsal seed) now starts that wallet
   clean. The old wallet's bearer, allowance window, lag episode, backoff, receipts and learned request
   size used to carry over. On devnet (2026-11-06) the old 128-token cap truncated every answer of the new
