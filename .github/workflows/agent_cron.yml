@@ -76,7 +76,10 @@ jobs:
         run: |
           tg="OFF (chưa đặt secret nào)"
           if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
-            code=$(curl -s -m 15 -o /dev/null -w '%{http_code}' "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe" || echo 000)
+            # curl lỗi mạng/timeout vẫn tự in 000 qua -w; `|| echo 000` cũ nối thêm thành "000000" ->
+            # rơi vào nhánh HTTP lạ và khuyên "sửa secret" sai (2026-11-08). Chỉ lấy 3 ký tự đầu.
+            code=$(curl -s -m 15 -o /dev/null -w '%{http_code}' "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe" || true)
+            code=$(printf '%.3s' "${code:-000}")
             case "$code" in
               200) tg="ON (token hợp lệ)" ;;
               000) tg="FAIL (không gọi được api.telegram.org)" ;;
