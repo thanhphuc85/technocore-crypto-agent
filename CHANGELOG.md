@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- The Telegram health check in the agent workflow reports a network failure or timeout as "cannot
+  reach api.telegram.org" again. curl already prints `000` on such failures and the `|| echo 000`
+  fallback appended another one, so the code became `000000`, fell through to the unknown-status branch
+  and advised fixing the secret (seen once on 2026-11-08 while the token was valid).
 - The daily spend counter no longer keeps the full reserve of a request whose outcome was unknown
   (a timeout or HTTP 524). The reserve is still counted at once, so the daily cap cannot be overrun.
   Once the receipt is reconciled, the reserve is replaced by the settled amount, or by 0 if the request
