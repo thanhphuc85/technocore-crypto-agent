@@ -152,10 +152,23 @@ def test_offers_alert_and_every_onchain_spend_increase_alerts_with_delta():
     assert _run(st, _attr(offers=3, spent="9000000000000000000")) is None   # không đổi: im
 
 
-def test_onchain_spend_first_sight_is_quiet_even_if_already_positive():
+def test_onchain_spend_first_sight_counts_from_zero():
+    # Explorer testnet chỉ sống từ ngày testnet mở: lần đọc đầu đã có chi tiêu thì vẫn phải báo
+    # đủ từ 0, không được nuốt phần chi trước lần đọc đầu.
     st = {}
-    assert _run(st, _attr(spent="7000000000000000000")) is None             # lịch sử cũ: chỉ ghi mốc
+    alert = _run(st, _attr(spent="7000000000000000000"))
+    assert "+7 FLOP (tổng 7 FLOP)" in alert and "LẦN ĐẦU" in alert
     assert st[rd.KEY]["attr_spent_notified"] == {"explorer.devnet.flop.network": 7 * 10 ** 18}
+    assert _run(st, _attr(spent="7000000000000000000")) is None
+
+
+def test_onchain_spend_explorer_unreachable_then_up_reports_everything():
+    st = {}
+    down = _attr()
+    _run(st, lambda u: None if "inference-spend" in u else down(u))          # explorer chưa có DNS
+    assert "attr_spent_notified" not in st[rd.KEY] or not st[rd.KEY]["attr_spent_notified"]
+    alert = _run(st, _attr(spent=str(3 * 10 ** 18)))
+    assert "+3 FLOP (tổng 3 FLOP)" in alert
 
 
 def test_onchain_spend_old_state_without_notified_uses_last_reading():
@@ -168,12 +181,14 @@ def test_onchain_spend_old_state_without_notified_uses_last_reading():
     assert "+1 FLOP (tổng 4 FLOP)" in alert
 
 
-def test_onchain_spend_reset_rebaselines_quietly():
+def test_onchain_spend_reset_counts_again_from_zero():
     st = {}
     _run(st, _attr(spent=str(5 * 10 ** 18)))
-    assert _run(st, _attr(spent="0")) is None                               # mạng reset: im
+    assert _run(st, _attr(spent="0")) is None                               # reset về 0: chưa chi gì
     alert = _run(st, _attr(spent=str(10 ** 18)))
     assert "+1 FLOP (tổng 1 FLOP)" in alert
+    alert = _run(st, _attr(spent=str(4 * 10 ** 17)))                         # reset và ĐÃ chi lại
+    assert "+0.4 FLOP (tổng 0.4 FLOP)" in alert and "mạng reset" in alert
 
 
 def test_fmt_flop():
