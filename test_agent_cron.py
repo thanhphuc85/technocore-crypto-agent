@@ -3338,55 +3338,48 @@ def test_radar_keeps_wallet_readings_when_telegram_fails(monkeypatch):
     assert "last_radar" not in saved and saved[flop_radar.KEY] is r
 
 
-def test_onchain_spend_alert_resent_after_telegram_failure(monkeypatch):
-    # Radar BẬT: số đọc của ví được giữ khi Telegram lỗi; mốc "đã báo" thì KHÔNG -> lượt sau báo lại
-    # đúng phần tăng (gộp), không bị nuốt vì số đọc mới đã nằm trong state.
+def _spend_radar(monkeypatch, radar_on):
     import flop_radar
-    monkeypatch.setattr(ac, "TESTNET_RADAR", True)
+    monkeypatch.setattr(ac, "TESTNET_RADAR", radar_on)
     monkeypatch.setattr(ac, "_radar_wallet", lambda pk: "5Wallet")
     monkeypatch.setattr(ac, "_radar_explorers", lambda: (_TN,))
     monkeypatch.setattr(ac, "gateway_attribution_step", lambda st, now: "ok")
     monkeypatch.setattr(ac, "save_state", lambda d: None)
-    h = "explorer.testnet.flop.network"
     sent, ok = [], {"v": False}
     monkeypatch.setattr(ac, "_telegram_send", lambda t: sent.append(t) or ok["v"])
-    # State cũ (trước bản này): chỉ có số đọc, chưa có mốc đã báo.
-    st = {flop_radar.KEY: {"status": "planned", "attr_spent_raw": {h: 2 * 10 ** 18}}}
-    monkeypatch.setattr(ac, "_radar_fetch", _wallet_pages(3 * 10 ** 18))
-    assert ac.testnet_radar_step(st, 10_000) == "alert-unsent"
-    assert "+1 FLOP (tổng 3 FLOP)" in sent[-1]
-    assert st[flop_radar.KEY]["attr_spent_raw"][h] == 3 * 10 ** 18        # số đọc giữ
-    assert st[flop_radar.KEY]["attr_spent_notified"][h] == 2 * 10 ** 18   # mốc đã báo KHÔNG tiến
-    ok["v"] = True
-    monkeypatch.setattr(ac, "_radar_fetch", _wallet_pages(5 * 10 ** 18))
-    assert ac.testnet_radar_step(st, 20_000) == "ALERT"
-    assert "+3 FLOP (tổng 5 FLOP)" in sent[-1]                            # gộp phần chưa báo
-    assert st[flop_radar.KEY]["attr_spent_notified"][h] == 5 * 10 ** 18
-    n = len(sent)
-    assert ac.testnet_radar_step(st, 30_000) in ("ok", "ALERT")
-    assert not any("CHI THẬT" in t for t in sent[n:])                     # không đổi: không báo lại
+
+    def step(st, now, spent_flop):
+        monkeypatch.setattr(ac, "_radar_fetch", _wallet_pages(spent_flop * 10 ** 18))
+        n = len(sent)
+        ac.testnet_radar_step(st, now)
+        return [t for t in sent[n:] if "on-chain" in t]
+    return flop_radar, sent, ok, step
 
 
-def test_onchain_spend_alert_resent_when_radar_off(monkeypatch, tmp_path):
-    import flop_radar
-    monkeypatch.setattr(ac, "TESTNET_RADAR", False)
-    monkeypatch.setenv("TESTNET_ENABLED", "true")
-    monkeypatch.setenv("TOKEN_LEDGER_FILE", str(tmp_path / "ledger.json"))
-    monkeypatch.setattr(ac, "_radar_wallet", lambda pk: "5Wallet")
-    monkeypatch.setattr(ac, "_radar_explorers", lambda: (_TN,))
-    monkeypatch.setattr(ac, "save_state", lambda d: None)
-    h = "explorer.testnet.flop.network"
-    sent, ok = [], {"v": False}
-    monkeypatch.setattr(ac, "_telegram_send", lambda t: sent.append(t) or ok["v"])
-    st = {flop_radar.KEY: {"attr_spent_raw": {h: 0}}}
-    monkeypatch.setattr(ac, "_radar_fetch", _wallet_pages(2 * 10 ** 18))
-    ac.testnet_radar_step(st, 1_800_000_000)
-    assert "+2 FLOP (tổng 2 FLOP)" in sent[-1] and "LẦN ĐẦU" in sent[-1]
-    assert st[flop_radar.KEY]["attr_spent_notified"][h] == 0               # gửi lỗi -> mốc hoàn về
+@pytest.mark.parametrize("radar_on", [True, False])
+def test_onchain_spend_alerts_survive_telegram_failure(monkeypatch, radar_on):
+    # Telegram lỗi -> mốc "đã báo" (cả mốc ngày) hoàn về: lần đầu và tin ngày đều được gửi lại ở lượt
+    # sau, gộp đúng phần tăng, không bị nuốt vì số đọc mới đã nằm trong state. Cả radar bật lẫn tắt.
+    if not radar_on:
+        monkeypatch.setenv("TESTNET_ENABLED", "true")
+    flop_radar, sent, ok, step = _spend_radar(monkeypatch, radar_on)
+    h, T, H = "explorer.testnet.flop.network", 1_800_000_000, 3600
+    st = {flop_radar.KEY: {"status": "planned"}}
+    msgs = step(st, T, 3)                                                  # testnet mở: đã chi 3
+    assert msgs and "+3 FLOP (tổng 3 FLOP)" in msgs[0] and "LẦN ĐẦU" in msgs[0]
+    assert st[flop_radar.KEY]["attr_spent_raw"][h] == 3 * 10 ** 18          # số đọc GIỮ (cổng đứng tên)
+    assert not st[flop_radar.KEY].get("attr_spent_notified", {}).get(h)    # chưa gửi được -> chưa báo
     ok["v"] = True
-    ac.testnet_radar_step(st, 1_800_000_000 + 7200)
-    assert "+2 FLOP (tổng 2 FLOP)" in sent[-1]
-    assert st[flop_radar.KEY]["attr_spent_notified"][h] == 2 * 10 ** 18
+    msgs = step(st, T + H, 5)
+    assert msgs and "+5 FLOP (tổng 5 FLOP)" in msgs[0] and "LẦN ĐẦU" in msgs[0]
+    assert step(st, T + 2 * H, 6) == []                                    # tăng trong ngày: gộp, im
+    ok["v"] = False
+    msgs = step(st, T + 25 * H, 8)                                         # tin ngày, gửi lỗi
+    assert msgs and "+3 FLOP (tổng 8 FLOP)" in msgs[0]
+    ok["v"] = True
+    msgs = step(st, T + 26 * H, 9)                                         # gửi lại, gộp thêm
+    assert msgs and "+4 FLOP (tổng 9 FLOP)" in msgs[0]
+    assert step(st, T + 27 * H, 10) == []                                  # mốc ngày mới: chờ 24h
 
 
 def test_radar_off_still_reads_the_wallet_on_testnet(monkeypatch, tmp_path):

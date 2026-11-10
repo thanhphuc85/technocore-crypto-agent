@@ -1246,8 +1246,8 @@ def attribution_read_step(state: dict, now: int, private_key=None) -> str:
         if not wallet:
             return "off"
         r = dict(state.get(flop_radar.KEY) or {})
-        _notified = flop_radar.spent_baseline(r)
-        lines = flop_radar.read_wallet(r, _radar_fetch, wallet, _radar_explorers())
+        _marks = flop_radar.notify_marks(r)
+        lines = flop_radar.read_wallet(r, _radar_fetch, wallet, _radar_explorers(), now=now)
         state[flop_radar.KEY] = r
         _ab = gateway_attribution_step(state, now)
         if _ab not in ("off", "ok"):
@@ -1257,7 +1257,7 @@ def attribution_read_step(state: dict, now: int, private_key=None) -> str:
             print(f"[attrib] {msg}")
             if not _telegram_send(msg):
                 # Mốc "đã báo" hoàn về -> lượt sau báo lại phần chi on-chain tăng thêm, không nuốt mất.
-                r["attr_spent_notified"] = _notified
+                r.update(_marks)
         save_state({"last_attrib_read": now, flop_radar.KEY: r})
         state["last_attrib_read"] = now
         return "off+attrib"
@@ -1268,7 +1268,7 @@ def attribution_read_step(state: dict, now: int, private_key=None) -> str:
 
 def testnet_radar_step(state: dict, now: int, private_key=None) -> str:
     """Một nhịp radar testnet (xem flop_radar). Trả trạng thái cho dòng [run]. Gửi Telegram
-    thất bại thì KHÔNG ghi nhận "đã thấy" (kể cả mốc chi on-chain đã báo `attr_spent_notified`)
+    thất bại thì KHÔNG ghi nhận "đã thấy" (kể cả mốc chi on-chain đã báo — flop_radar.NOTIFY_KEYS)
     và KHÔNG đóng cổng giờ -> lần sau báo lại — nhưng số
     đọc được của ví vẫn được GIỮ (cổng đứng tên dựa vào nó; Telegram hỏng không được làm agent
     ngừng mua). Radar tắt -> chỉ đọc ví (attribution_read_step)."""
@@ -1280,7 +1280,7 @@ def testnet_radar_step(state: dict, now: int, private_key=None) -> str:
         import flop_radar
         prev = state.get(flop_radar.KEY)
         alert = flop_radar.check(state, _radar_fetch, wallet=_radar_wallet(private_key),
-                                 explorers=_radar_explorers())
+                                 explorers=_radar_explorers(), now=now)
         _ab = gateway_attribution_step(state, now)
         if _ab not in ("off", "ok"):
             print(f"[attrib] {_ab}")
@@ -1292,7 +1292,7 @@ def testnet_radar_step(state: dict, now: int, private_key=None) -> str:
                 if keep:
                     # Số đọc mới được giữ, nên mốc chi on-chain "đã báo" phải ghi tường minh theo
                     # bản CŨ — không thì nó rơi về số đọc mới và phần chi tăng thêm không bao giờ được báo.
-                    keep["attr_spent_notified"] = flop_radar.spent_baseline(prev or {})
+                    keep.update(flop_radar.notify_marks(prev or {}))
                 state[flop_radar.KEY] = {**(prev or {}), **keep} if keep else prev
                 if keep:
                     save_state({flop_radar.KEY: state[flop_radar.KEY]})
