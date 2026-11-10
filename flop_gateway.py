@@ -657,11 +657,21 @@ def lag_status(g: dict, now: int, outcome: str, *, pct: float, alert_hours: floa
     return line, alert, None
 
 
+REPORT_STALE_SEC = 26 * 3600          # báo cáo ngày: chu kỳ 24h + dư cho lượt lỡ
+
+
 def report_line(g: dict, now: int):
     """Một dòng cho báo cáo ngày: quota còn, đã chi so với mục tiêu tới giờ, biên nhận đã settle,
     kết quả lượt gần nhất. Báo cáo cũ chỉ biết bộ chia `flop_pacer` -> trên testnet (gateway)
-    dòng nhịp biến mất. None nếu gateway chưa chạy lần nào."""
+    dòng nhịp biến mất. None nếu gateway chưa chạy lần nào, hoặc lượt cuối đã cũ hơn
+    REPORT_STALE_SEC (gateway đang tắt — vd đợt tập devnet đã xong: số liệu cũ lặp lại mỗi ngày như
+    thể vẫn đang chạy, gây hiểu nhầm)."""
     if not isinstance(g, dict) or not g.get("last_run"):
+        return None
+    try:
+        if int(now) - int(g["last_run"]) > REPORT_STALE_SEC:
+            return None
+    except (TypeError, ValueError):
         return None
     parts = [f"mạng {g.get('network') or '?'}"]
     win = g.get("window") if isinstance(g.get("window"), dict) else None
