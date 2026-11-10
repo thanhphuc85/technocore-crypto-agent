@@ -578,26 +578,62 @@ def gateway_attribution(token: str = None, path: str = None) -> dict:
             for k in ("unattributed", "attributed")}
 
 
-CHAIN_RESET_READINGS = 2     # số lần đọc LIÊN TIẾP thấp hơn mốc cao nhất thì mới coi là mạng reset
+def gateway_epoch_done(token: str = None, path: str = None) -> Decimal:
+    """Phần chi gateway đã được chain xác nhận trong KỲ hiện tại của chain (xem confirm_gateway_attribution)."""
+    token = (token or default_token())
+    state = load_ledger(path)
+    done = (state.get("gateway_attributed") or {}).get(token, "0")
+    return _parse_amount((state.get("gateway_epoch_done") or {}).get(token, done)) or Decimal(0)
+
+
+def write_off_gateway_pending(max_amount=None, token: str = None, *, path: str = None, log=print) -> Decimal:
+    """Chuyển tối đa `max_amount` (None = tất cả) từ chi gateway CHỜ xác nhận sang `gateway_written_off`:
+    khoản đã chi qua kênh KHÔNG đứng tên ví mình, chain sẽ không bao giờ ghi cho mình. Để trong phần chờ
+    thì cổng đứng tên dừng mua mãi dù các lần mua mới đã đứng tên đúng. Không vào thước đo airdrop, không
+    đổi số dư, không đổi tổng chi cộng dồn. Trả số đã chuyển."""
+    token = (token or default_token())
+    if ledger_mode() != "testnet":
+        return Decimal(0)
+    state = load_ledger(path)
+    pend_map = state.setdefault("gateway_unattributed", {})
+    pend = _parse_amount(pend_map.get(token, "0")) or Decimal(0)
+    cap = pend if max_amount is None else (_parse_amount(max_amount) or Decimal(0))
+    amt = max(Decimal(0), min(pend, cap))
+    if amt <= 0:
+        return Decimal(0)
+    off = state.setdefault("gateway_written_off", {})
+    off[token] = _fmt((_parse_amount(off.get(token, "0")) or Decimal(0)) + amt)
+    pend_map[token] = _fmt(pend - amt)
+    _save_ledger(state, path)
+    log(f"[ledger] chuyển {_fmt(amt)} {token} chi gateway chờ xác nhận sang KHÔNG TÍNH (kênh không đứng tên ví mình)")
+    return amt
+
+
+CHAIN_RESET_READINGS = 3     # KHÔNG biết genesis: ngần này lần đọc LIÊN TIẾP thấp hơn mốc mới coi là reset
 
 
 def confirm_gateway_attribution(onchain_total, token: str = None, *, path: str = None,
-                                log=print, read_at=None) -> dict:
+                                log=print, read_at=None, chain_id: str = None) -> dict:
     """Chain (explorer) báo ví mình đã chi `onchain_total` FLOP: phần chi qua gateway đang chờ (tối đa
     phần chain mới ghi thêm) trở thành chi tiêu đã xác nhận: vào thước đo airdrop và trừ số dư ví.
     Chỉ ở chế độ testnet.
 
     Tổng on-chain đếm lại từ 0 khi mạng reset. Phần "chain ghi thêm" vì thế tính theo KỲ của chain
     (`gateway_epoch_done` = phần đã xác nhận trong kỳ hiện tại, `gateway_chain_hw` = tổng cao nhất đã
-    đọc trong kỳ), không theo tổng cộng dồn `gateway_attributed`: trước đây sau reset, tổng mới luôn
-    nhỏ hơn số đã xác nhận ở kỳ cũ nên không khoản nào được xác nhận nữa và cổng đứng tên khoá vĩnh
-    viễn. Một lần đọc thấp có thể chỉ là explorer chập chờn (đọc lại thấy số cũ -> mở kỳ mới sớm sẽ
-    xác nhận nhầm khoản chờ bằng chi tiêu cũ), nên phải CHAIN_RESET_READINGS lần đọc khác nhau
-    (`read_at` khác nhau; None = mỗi lần gọi là một lần đọc) liền nhau mới mở kỳ mới."""
+    đọc trong kỳ), không theo tổng cộng dồn `gateway_attributed`: nếu không, sau reset tổng mới luôn
+    nhỏ hơn số đã xác nhận ở kỳ cũ, không khoản nào được xác nhận nữa và cổng đứng tên khoá vĩnh viễn.
+
+    Khi nào một số đọc THẤP hơn mốc là reset thật chứ không phải explorer chập chờn (đang index lại
+    trả 0 vài giờ rồi trả lại số cũ — mở kỳ mới lúc đó sẽ xác nhận nhầm khoản chờ bằng chi tiêu cũ):
+      · `chain_id` (genesis hash gateway báo) KHÁC cái đã ghi của kỳ -> reset, mở kỳ mới ngay;
+      · `chain_id` TRÙNG cái đã ghi -> cùng một chain: số thấp là lỗi đọc, không bao giờ mở kỳ mới;
+      · không có genesis để so (một trong hai bên trống) -> CHAIN_RESET_READINGS lần đọc khác nhau
+        liền nhau (`read_at` khác nhau; None = mỗi lần gọi là một lần đọc)."""
     token = (token or default_token())
     total = _parse_amount(onchain_total)
     if ledger_mode() != "testnet" or total is None or total < 0:
         return {"outcome": "no_change"}
+    cid = str(chain_id or "").strip().lower()[:80]
     state = load_ledger(path)
     pend_map = state.setdefault("gateway_unattributed", {})
     done_map = state.setdefault("gateway_attributed", {})
@@ -606,28 +642,47 @@ def confirm_gateway_attribution(onchain_total, token: str = None, *, path: str =
     hw_map = state.setdefault("gateway_chain_hw", {})
     ep_map = state.setdefault("gateway_epoch_done", {})
     low_map = state.setdefault("gateway_chain_low", {})
+    id_map = state.setdefault("gateway_chain_id", {})
+    known = str(id_map.get(token) or "")
     # Sổ cũ chưa có hai khoá kỳ: trước giờ chỉ có một kỳ, nên kỳ hiện tại = toàn bộ phần đã xác nhận.
     epoch_done = _parse_amount(ep_map.get(token, _fmt(done))) or Decimal(0)
     hw = _parse_amount(hw_map.get(token, _fmt(epoch_done))) or Decimal(0)
     hw = max(hw, epoch_done)                 # chain không thể ghi ít hơn phần nó đã xác nhận trong kỳ
     if total < hw:
-        low = low_map.get(token) if isinstance(low_map.get(token), dict) else {}
-        if read_at is not None and low.get("at") == read_at:
-            return {"outcome": "no_change"}  # cùng một lần đọc được đưa vào lại, không đếm hai lần
-        n = int(low.get("n") or 0) + 1
-        if n < CHAIN_RESET_READINGS:
-            low_map[token] = {"n": n, "at": read_at, "total": _fmt(total)}
+        reset = bool(cid and known and cid != known)
+        if cid and known and cid == known:
+            low_map.pop(token, None)
             _save_ledger(state, path)
-            log(f"[ledger] chain ghi {_fmt(total)} {token} < mốc {_fmt(hw)} của kỳ — chờ lần đọc sau xác nhận "
-                "mạng reset (có thể chỉ là explorer chập chờn)")
+            log(f"[ledger] chain ghi {_fmt(total)} {token} < mốc {_fmt(hw)} nhưng genesis không đổi — "
+                "explorer đọc thiếu, bỏ qua lần đọc này")
             return {"outcome": "low_reading"}
-        log(f"[ledger] chain reset: tổng on-chain {_fmt(total)} < mốc {_fmt(hw)} {CHAIN_RESET_READINGS} lần đọc "
-            f"liền — mở kỳ mới ({_fmt(epoch_done)} {token} đã xác nhận ở kỳ cũ giữ nguyên)")
+        if not reset:
+            low = low_map.get(token) if isinstance(low_map.get(token), dict) else {}
+            if read_at is not None and low.get("at") == read_at:
+                return {"outcome": "no_change"}  # cùng một lần đọc được đưa vào lại, không đếm hai lần
+            n = int(low.get("n") or 0) + 1
+            if n < CHAIN_RESET_READINGS:
+                low_map[token] = {"n": n, "at": read_at, "total": _fmt(total)}
+                _save_ledger(state, path)
+                log(f"[ledger] chain ghi {_fmt(total)} {token} < mốc {_fmt(hw)} của kỳ (lần {n}/"
+                    f"{CHAIN_RESET_READINGS}, không có genesis để so) — chờ thêm lần đọc xác nhận mạng reset")
+                return {"outcome": "low_reading"}
+        log(f"[ledger] chain reset ({'genesis đổi' if reset else f'{CHAIN_RESET_READINGS} lần đọc thấp liền'}): "
+            f"tổng on-chain {_fmt(total)} < mốc {_fmt(hw)} — mở kỳ mới "
+            f"({_fmt(epoch_done)} {token} đã xác nhận ở kỳ cũ giữ nguyên)")
         epoch_done, hw = Decimal(0), total
         low_map.pop(token, None)
+        if cid:
+            id_map[token] = cid
+        else:
+            id_map.pop(token, None)          # kỳ mới chưa biết genesis: không so với genesis kỳ cũ
     else:
         low_map.pop(token, None)
         hw = total
+        # Ghi genesis của kỳ ở lần đọc NHẤT QUÁN. Genesis khác mà tổng không tụt: không kết luận gì
+        # (gateway báo nhầm, hoặc chain mới đã vượt mốc cũ) — giữ cái đã ghi, lần đọc thấp sau sẽ quyết.
+        if cid and (not known or cid == known):
+            id_map[token] = cid
     hw_map[token], ep_map[token] = _fmt(hw), _fmt(epoch_done)
     newly = min(pend, total - epoch_done)
     if newly <= 0:
