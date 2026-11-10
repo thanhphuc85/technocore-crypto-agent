@@ -21,7 +21,8 @@ trả lời chính thức, nên radar canh 3 tín hiệu sẽ đổi quyết đ�
                                          hoặc issue đóng.
   · <explorer>/api/session-offers     — miner có offer công khai -> mua TRỰC TIẾP đứng tên mình
                                          (CLI `flop session run`) bắt đầu khả thi.
-  · <explorer>/api/accounts/<ví>/inference-spend — ví mình có chi tiêu ghi trên chain (0 -> >0).
+  · <explorer>/api/accounts/<ví>/inference-spend — MỖI lần chi tiêu đứng tên ví mình trên chain TĂNG
+    (so với mốc đã báo) -> một dòng "+X FLOP (tổng Y)". Đây là chi tiêu THẬT đã ghi on-chain.
   · yellowpaper#31                    — airdrop tính theo ví chủ / khoá uỷ quyền / danh tính agent
                                          (quyết định có cần lập ví agent có trần hay không).
   · COMMIT mới vào flop-labs/yellowpaper — Arthur Hayes 2026-11-05: "We are ironing out some things and
@@ -354,9 +355,36 @@ def check_attribution(r: dict, fetch_fn, wallet=None, explorers=EXPLORERS) -> li
 WALLET_READ_KEYS = ("attr_spent_raw", "attr_spent_at", "attr_balance_raw", "attr_balance_at")
 
 
+def fmt_flop(raw: int) -> str:
+    """Số raw (1e18) -> chuỗi FLOP gọn: tối đa 6 chữ số thập phân, số rất nhỏ vẫn hiện khác 0."""
+    s = f"{raw / 10 ** 18:.6f}".rstrip("0").rstrip(".")
+    return s if s not in ("", "0") or raw == 0 else f"{raw / 10 ** 18:.3g}"
+
+
+def _net_label(host: str) -> str:
+    if "devnet" in host:
+        return "devnet — chạy thử, KHÔNG tính airdrop"
+    if "testnet" in host:
+        return "testnet"
+    return host
+
+
+def spent_baseline(r: dict) -> dict:
+    """Mốc chi on-chain ĐÃ BÁO theo explorer: `attr_spent_notified`, state cũ chưa có thì số đọc
+    lần trước. Caller hoàn r["attr_spent_notified"] về giá trị này khi gửi Telegram thất bại."""
+    raw = r.get("attr_spent_raw") if isinstance(r.get("attr_spent_raw"), dict) else {}
+    nt = r.get("attr_spent_notified") if isinstance(r.get("attr_spent_notified"), dict) else {}
+    return {**raw, **nt}
+
+
 def read_wallet(r: dict, fetch_fn, wallet=None, explorers=EXPLORERS) -> list:
     """Chi tiêu + số dư của ví trên từng explorer -> ghi vào r (WALLET_READ_KEYS + cờ attr_spent).
-    Trả dòng báo khi chi tiêu của ví đổi từ 0 sang > 0. Không có ví / nguồn lỗi -> bỏ qua."""
+
+    Trả một dòng báo MỖI KHI chi tiêu on-chain của ví TĂNG so với mốc đã báo (`attr_spent_notified`).
+    Mốc này KHÔNG nằm trong WALLET_READ_KEYS: gửi Telegram lỗi thì caller hoàn nó về -> lần sau báo lại
+    phần tăng (gộp), không nuốt mất. Lần đầu thấy một explorer chỉ ghi mốc (không báo lịch sử cũ);
+    state cũ chưa có mốc thì lấy số đọc lần trước. Số GIẢM (explorer/mạng reset) -> đặt lại mốc, im.
+    Không có ví / nguồn lỗi -> bỏ qua."""
     lines = []
     if not wallet:
         return lines
@@ -365,19 +393,24 @@ def read_wallet(r: dict, fetch_fn, wallet=None, explorers=EXPLORERS) -> list:
     spent_at = dict(r.get("attr_spent_at") or {})        # lúc đọc được: số cũ không còn là bằng chứng
     balance_raw = dict(r.get("attr_balance_raw") or {})  # số dư ví thật, đối chiếu với sổ
     balance_at = dict(r.get("attr_balance_at") or {})
+    notified = spent_baseline(r)                         # chi tiêu on-chain đã báo Telegram tới đâu
     for base in explorers:
         h = _host(base)
         v = parse_spent(fetch_fn(f"{base}/api/accounts/{wallet}/inference-spend"))
         if v is not None:
-            if spent.get(h) == 0 and v > 0:
-                lines.append(f"• {h}: VÍ MÌNH {wallet[:6]}…{wallet[-4:]} đã có chi tiêu ghi trên "
-                             f"chain ({v / 1e18:.4g} FLOP) — chi tiêu đang đứng tên mình")
+            prev = notified.get(h)
+            if isinstance(prev, int) and v > prev:
+                first = " · LẦN ĐẦU chi tiêu đứng tên ví mình" if prev == 0 else ""
+                lines.append(f"• ✅ CHI THẬT ghi on-chain ({_net_label(h)}): ví {wallet[:6]}…{wallet[-4:]} "
+                             f"+{fmt_flop(v - prev)} FLOP (tổng {fmt_flop(v)} FLOP){first} — "
+                             f"{base}/api/accounts/{wallet}/inference-spend")
+            notified[h] = v
             spent[h] = 0 if v == 0 else 1
             spent_raw[h], spent_at[h] = v, int(time.time())
         b = parse_balance(fetch_fn(f"{base}/api/accounts/{wallet}"))
         if b is not None:
             balance_raw[h], balance_at[h] = b, int(time.time())
-    r["attr_spent"], r["attr_spent_raw"] = spent, spent_raw
+    r["attr_spent"], r["attr_spent_raw"], r["attr_spent_notified"] = spent, spent_raw, notified
     r["attr_spent_at"], r["attr_balance_raw"], r["attr_balance_at"] = spent_at, balance_raw, balance_at
     return lines
 

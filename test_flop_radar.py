@@ -139,12 +139,46 @@ def test_issue_closed_alerts_once():
     assert _run(st, _attr(issue_state="closed")) is None
 
 
-def test_offers_and_wallet_spend_alert_on_zero_to_positive_only():
+def test_offers_alert_and_every_onchain_spend_increase_alerts_with_delta():
     st = {}
     _run(st, _attr())
     alert = _run(st, _attr(offers=3, spent="2500000000000000000"))
-    assert "OFFER công khai (3)" in alert and "VÍ MÌNH 5CFP21…QnUP" in alert and "2.5 FLOP" in alert
-    assert _run(st, _attr(offers=5, spent="9000000000000000000")) is None   # tăng tiếp: không lặp
+    assert "OFFER công khai (3)" in alert
+    assert "CHI THẬT ghi on-chain" in alert and "ví 5CFP21…QnUP" in alert
+    assert "+2.5 FLOP (tổng 2.5 FLOP)" in alert and "LẦN ĐẦU" in alert
+    assert "KHÔNG tính airdrop" in alert                                     # devnet ghi rõ
+    alert = _run(st, _attr(offers=3, spent="9000000000000000000"))          # tăng tiếp: BÁO tiếp
+    assert "+6.5 FLOP (tổng 9 FLOP)" in alert and "LẦN ĐẦU" not in alert
+    assert _run(st, _attr(offers=3, spent="9000000000000000000")) is None   # không đổi: im
+
+
+def test_onchain_spend_first_sight_is_quiet_even_if_already_positive():
+    st = {}
+    assert _run(st, _attr(spent="7000000000000000000")) is None             # lịch sử cũ: chỉ ghi mốc
+    assert st[rd.KEY]["attr_spent_notified"] == {"explorer.devnet.flop.network": 7 * 10 ** 18}
+
+
+def test_onchain_spend_old_state_without_notified_uses_last_reading():
+    h = "explorer.devnet.flop.network"
+    st = {}
+    _run(st, _attr())
+    st[rd.KEY]["attr_spent_raw"] = {h: 3 * 10 ** 18}                         # state trước bản này
+    st[rd.KEY].pop("attr_spent_notified")
+    alert = _run(st, _attr(spent=str(4 * 10 ** 18)))
+    assert "+1 FLOP (tổng 4 FLOP)" in alert
+
+
+def test_onchain_spend_reset_rebaselines_quietly():
+    st = {}
+    _run(st, _attr(spent=str(5 * 10 ** 18)))
+    assert _run(st, _attr(spent="0")) is None                               # mạng reset: im
+    alert = _run(st, _attr(spent=str(10 ** 18)))
+    assert "+1 FLOP (tổng 1 FLOP)" in alert
+
+
+def test_fmt_flop():
+    assert rd.fmt_flop(0) == "0" and rd.fmt_flop(25 * 10 ** 17) == "2.5"
+    assert rd.fmt_flop(123456789) != "0"                                     # số rất nhỏ vẫn hiện
 
 
 def test_attribution_sources_failing_are_ignored():
