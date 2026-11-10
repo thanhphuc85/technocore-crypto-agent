@@ -21,8 +21,8 @@ trả lời chính thức, nên radar canh 3 tín hiệu sẽ đổi quyết đ�
                                          hoặc issue đóng.
   · <explorer>/api/session-offers     — miner có offer công khai -> mua TRỰC TIẾP đứng tên mình
                                          (CLI `flop session run`) bắt đầu khả thi.
-  · <explorer>/api/accounts/<ví>/inference-spend — MỖI lần chi tiêu đứng tên ví mình trên chain TĂNG
-    (so với mốc đã báo) -> một dòng "+X FLOP (tổng Y)". Đây là chi tiêu THẬT đã ghi on-chain.
+  · <explorer>/api/accounts/<ví>/inference-spend — chi tiêu THẬT đứng tên ví mình trên chain: báo NGAY
+    lần đầu có chi tiêu / mạng reset, các khoản tăng sau gộp 1 tin/ngày (xem read_wallet).
   · yellowpaper#31                    — airdrop tính theo ví chủ / khoá uỷ quyền / danh tính agent
                                          (quyết định có cần lập ví agent có trần hay không).
   · COMMIT mới vào flop-labs/yellowpaper — Arthur Hayes 2026-11-05: "We are ironing out some things and
@@ -325,7 +325,7 @@ def _watch_yellowpaper(r, fetch_fn) -> list:
     return lines
 
 
-def check_attribution(r: dict, fetch_fn, wallet=None, explorers=EXPLORERS) -> list:
+def check_attribution(r: dict, fetch_fn, wallet=None, explorers=EXPLORERS, now: int = None) -> list:
     """3 tín hiệu ĐỨNG TÊN AI (xem docstring module). Ghi mốc vào r, trả các dòng báo động.
     Lần đầu thấy một nguồn chỉ ghi mốc (không báo). Nguồn lỗi -> bỏ qua."""
     lines = []
@@ -347,7 +347,7 @@ def check_attribution(r: dict, fetch_fn, wallet=None, explorers=EXPLORERS) -> li
                              "tên ví mình (flop session run) có thể khả thi")
             offers[h] = t
     r["attr_offers"] = offers
-    return lines + read_wallet(r, fetch_fn, wallet, explorers)
+    return lines + read_wallet(r, fetch_fn, wallet, explorers, now=now)
 
 
 # Số đọc được của ví (kèm mốc đọc) — thứ cổng đứng tên của agent dựa vào. Tách khỏi phần canh issue/
@@ -370,60 +370,94 @@ def _net_label(host: str) -> str:
 
 
 def spent_baseline(r: dict) -> dict:
-    """Mốc chi on-chain ĐÃ BÁO theo explorer: `attr_spent_notified`, state cũ chưa có thì số đọc
-    lần trước. Caller hoàn r["attr_spent_notified"] về giá trị này khi gửi Telegram thất bại."""
-    raw = r.get("attr_spent_raw") if isinstance(r.get("attr_spent_raw"), dict) else {}
-    nt = r.get("attr_spent_notified") if isinstance(r.get("attr_spent_notified"), dict) else {}
-    return {**raw, **nt}
+    """Mốc chi on-chain ĐÃ BÁO theo explorer: `attr_spent_notified`. CHỈ state kiểu cũ (chưa có khoá
+    này) mới lấy số đọc lần trước. Khoá có mặt mà thiếu một explorer = explorer đó CHƯA báo gì -> tính
+    từ 0; không được lùi về số đọc (sau khi gửi lỗi, số đọc mới đã được giữ -> tin lần đầu sẽ mất)."""
+    nt = r.get("attr_spent_notified")
+    if isinstance(nt, dict):
+        return dict(nt)
+    raw = r.get("attr_spent_raw")
+    return dict(raw) if isinstance(raw, dict) else {}
 
 
-def read_wallet(r: dict, fetch_fn, wallet=None, explorers=EXPLORERS) -> list:
+# Khoản chi tăng THƯỜNG (sau lần đầu) gộp thành 1 tin mỗi ngần này; lần đầu / mạng reset báo NGAY.
+# Ví vẫn được ĐỌC theo nhịp radar (1 giờ) — cổng đứng tên cần số mới hơn 6 giờ.
+SPEND_DIGEST_SEC = 24 * 3600
+SPEND_DIGEST_GRACE_SEC = 30 * 60      # lượt đọc ~mỗi 60–65 phút: không để mốc ngày trôi dần
+NOTIFY_KEYS = ("attr_spent_notified", "attr_spent_digest_at")
+
+
+def notify_marks(r: dict) -> dict:
+    """Mốc "đã báo" hiện hành. Gửi Telegram thất bại -> caller `r.update(...)` bằng giá trị này để
+    lượt đọc sau báo lại (gộp), không nuốt mất khoản chi."""
+    at = r.get("attr_spent_digest_at") if isinstance(r.get("attr_spent_digest_at"), dict) else {}
+    return {"attr_spent_notified": spent_baseline(r), "attr_spent_digest_at": dict(at)}
+
+
+def read_wallet(r: dict, fetch_fn, wallet=None, explorers=EXPLORERS, now: int = None) -> list:
     """Chi tiêu + số dư của ví trên từng explorer -> ghi vào r (WALLET_READ_KEYS + cờ attr_spent).
 
-    Trả một dòng báo MỖI KHI chi tiêu on-chain của ví TĂNG so với mốc đã báo (`attr_spent_notified`).
-    Mốc này KHÔNG nằm trong WALLET_READ_KEYS: gửi Telegram lỗi thì caller hoàn nó về -> lần sau báo lại
-    phần tăng (gộp), không nuốt mất. Lần đầu thấy một explorer (vd testnet vừa mở) tính từ 0 -> báo
-    TOÀN BỘ chi tiêu kể từ khi mạng bắt đầu; state cũ chưa có mốc thì lấy số đọc lần trước. Số GIẢM
-    (mạng reset) -> tính lại từ 0 và báo phần đã chi trên mạng mới. Không có ví / nguồn lỗi -> bỏ qua
-    (lần đọc được kế tiếp báo gộp)."""
+    Báo chi tiêu on-chain của ví so với mốc đã báo (`attr_spent_notified`):
+      · BÁO NGAY lần đầu có chi tiêu trên một mạng (chưa có mốc -> tính từ 0, vd ngày testnet mở: báo
+        TOÀN BỘ từ khi mạng bắt đầu) và khi mạng reset (tổng giảm -> tính lại từ 0, kèm phần chưa báo
+        của mạng cũ).
+      · Khoản tăng sau đó GỘP: tối đa 1 tin mỗi SPEND_DIGEST_SEC (mốc `attr_spent_digest_at`).
+    Hai mốc này KHÔNG thuộc WALLET_READ_KEYS: gửi lỗi thì caller hoàn về (notify_marks) -> báo lại.
+    State cũ chưa có mốc thì lấy số đọc lần trước. Nguồn lỗi -> bỏ qua, lần đọc được sau báo gộp."""
     lines = []
     if not wallet:
         return lines
+    now = int(time.time()) if now is None else int(now)      # chỉ cho mốc gộp ngày (test tiêm được)
     spent = dict(r.get("attr_spent") or {})
     spent_raw = dict(r.get("attr_spent_raw") or {})      # số raw (1e18) — so với sổ cái
     spent_at = dict(r.get("attr_spent_at") or {})        # lúc đọc được: số cũ không còn là bằng chứng
     balance_raw = dict(r.get("attr_balance_raw") or {})  # số dư ví thật, đối chiếu với sổ
     balance_at = dict(r.get("attr_balance_at") or {})
-    notified = spent_baseline(r)                         # chi tiêu on-chain đã báo Telegram tới đâu
+    marks = notify_marks(r)
+    notified, digest_at = marks["attr_spent_notified"], marks["attr_spent_digest_at"]
     for base in explorers:
         h = _host(base)
         v = parse_spent(fetch_fn(f"{base}/api/accounts/{wallet}/inference-spend"))
         if v is not None:
+            who = f"ví {wallet[:6]}…{wallet[-4:]}"
+            link = f"{base}/api/accounts/{wallet}/inference-spend"
             prev = notified.get(h)
-            # Chưa có mốc (explorer mới sống, vd ngày testnet mở) -> tính từ 0: mọi chi tiêu kể từ khi
-            # mạng bắt đầu đều được báo, không bị lần đọc đầu nuốt mất. Tổng GIẢM = mạng/explorer reset
-            # -> tính lại từ 0 trên mạng mới. Mất cả state lẫn KV thì có thể báo lặp (an toàn hơn sót).
+            last_read = spent_raw.get(h)
             reset = isinstance(prev, int) and v < prev
-            if not isinstance(prev, int) or reset:
-                prev = 0
-            if v > prev:
-                first = " · LẦN ĐẦU chi tiêu đứng tên ví mình" if prev == 0 else ""
-                note = " · mạng reset, tính lại từ 0" if reset else ""
-                lines.append(f"• ✅ CHI THẬT ghi on-chain ({_net_label(h)}): ví {wallet[:6]}…{wallet[-4:]} "
-                             f"+{fmt_flop(v - prev)} FLOP (tổng {fmt_flop(v)} FLOP){first}{note} — "
-                             f"{base}/api/accounts/{wallet}/inference-spend")
-            notified[h] = v
+            if not isinstance(prev, int) or reset or prev == 0:
+                # Lần đầu / reset: tính từ 0 và báo NGAY. Mất cả state lẫn KV thì có thể báo lặp
+                # (an toàn hơn sót).
+                if v > 0:
+                    note = ""
+                    if reset:
+                        note = " · mạng reset, tính lại từ 0"
+                        if isinstance(last_read, int) and last_read > prev:
+                            note += f" (mạng cũ còn +{fmt_flop(last_read - prev)} FLOP chưa báo trước reset)"
+                    lines.append(f"• ✅ CHI THẬT ghi on-chain ({_net_label(h)}): {who} +{fmt_flop(v)} FLOP "
+                                 f"(tổng {fmt_flop(v)} FLOP) · LẦN ĐẦU chi tiêu đứng tên ví mình{note} — {link}")
+                    digest_at[h] = now
+                notified[h] = v
+            elif v > prev:
+                last = digest_at.get(h)
+                if not isinstance(last, int):
+                    digest_at[h] = now                     # state cũ chưa có mốc ngày: bắt đầu đếm
+                elif now - last >= SPEND_DIGEST_SEC - SPEND_DIGEST_GRACE_SEC:
+                    hrs = max(1, round((now - last) / 3600))
+                    lines.append(f"• 📊 Chi on-chain ({_net_label(h)}) {hrs}h qua: {who} +{fmt_flop(v - prev)} "
+                                 f"FLOP (tổng {fmt_flop(v)} FLOP) — {link}")
+                    notified[h], digest_at[h] = v, now
             spent[h] = 0 if v == 0 else 1
-            spent_raw[h], spent_at[h] = v, int(time.time())
+            spent_raw[h], spent_at[h] = v, int(time.time())      # giờ đọc THẬT (cổng đứng tên dùng)
         b = parse_balance(fetch_fn(f"{base}/api/accounts/{wallet}"))
         if b is not None:
             balance_raw[h], balance_at[h] = b, int(time.time())
-    r["attr_spent"], r["attr_spent_raw"], r["attr_spent_notified"] = spent, spent_raw, notified
+    r["attr_spent"], r["attr_spent_raw"] = spent, spent_raw
+    r["attr_spent_notified"], r["attr_spent_digest_at"] = notified, digest_at
     r["attr_spent_at"], r["attr_balance_raw"], r["attr_balance_at"] = spent_at, balance_raw, balance_at
     return lines
 
 
-def check(state: dict, fetch_fn, wallet=None, explorers=EXPLORERS) -> str:
+def check(state: dict, fetch_fn, wallet=None, explorers=EXPLORERS, now: int = None) -> str:
     """Đọc 3 nguồn, so với mốc + những gì đã báo. Trả chuỗi báo động (đã ghi nhận vào state
     để không báo lại) hoặc None. Nguồn nào lỗi thì bỏ qua nguồn đó, không báo động giả."""
     r = state.get(KEY)
@@ -497,7 +531,7 @@ def check(state: dict, fetch_fn, wallet=None, explorers=EXPLORERS) -> str:
         official_known = official          # lần đầu chỉ ghi mốc, không báo
 
     attr = {k: v for k, v in r.items() if k.startswith("attr_")}
-    lines += check_attribution(attr, fetch_fn, wallet, explorers)
+    lines += check_attribution(attr, fetch_fn, wallet, explorers, now=now)
 
     state[KEY] = {"paths": sorted(seen_paths)[:SEEN_KEEP], "docs": sorted(seen_docs)[:SEEN_KEEP],
                   "paths_fp": paths_fp, "docs_fp": docs_fp,
