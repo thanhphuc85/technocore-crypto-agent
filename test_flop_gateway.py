@@ -716,6 +716,16 @@ def test_report_line_summarises_pace_quota_and_receipts(monkeypatch):
     assert "lượt cuối: pace_wait" in line
 
 
+def test_report_line_hidden_when_gateway_stopped_running():
+    # Đợt tập devnet kết thúc 7/11 nhưng báo cáo ngày 9/11 vẫn in "đã chi 41.30/20000 … lượt cuối: backoff"
+    # như thể gateway còn chạy.
+    g = {"last_run": NOW, "last_outcome": "backoff", "network": "devnet", "remaining": 19958.7,
+         "stats": {"receipts": 18, "settled": 41.3}}
+    assert gw.report_line(g, NOW + 25 * 3600) is not None                 # còn trong chu kỳ báo cáo
+    assert gw.report_line(g, NOW + 2 * 86400) is None                      # gateway đã tắt: không in số cũ
+    assert gw.report_line({**g, "last_run": "rác"}, NOW) is None
+
+
 def test_retired_model_triggers_re_enrollment_instead_of_a_permanent_stall():
     fake, state = FakeGateway(expires_ms=SOON), {}
     _run(state, fake)                                                     # đăng ký, model m1
