@@ -264,6 +264,8 @@ python agent_cron.py           # runs telemetry + auto-responder once
 | `FLOP_WALLET_SEED_HEX` | secret, optional | A separate ed25519 wallet seed instead of the DID key (not recommended, see above) |
 | `FLOP_GATEWAY_URL` | optional | Gateway base (default `https://api.flop.network/v1`) — set only if testnet gets its own host |
 | `FLOP_GATEWAY_NETWORK` | optional | Network `/health` must report before anything is spent (default `testnet` with `TESTNET_ENABLED`, else `devnet`) |
+| `FLOP_TESTNET_NETWORK_NAME` | optional | Exact name `/health` reports for the testnet when it does not contain the word `testnet` (e.g. `aurora-1`). Names containing `devnet` are refused |
+| `FLOP_GATEWAY_GENESIS` | optional | Pin the chain: spend only when `/health` reports this genesis hash (`0x…`). Empty = no pin |
 | `FLOP_GATEWAY_PROMPTS` | optional | Your own fallback prompts `a\|b\|c` (the agent first uses kibble jobs it actually answered; then these, or the bodies of `FLOP_KIBBLE_REQUEST_QUESTIONS`). No shared default — receipts carry `prompt_hash` |
 | `FLOP_GATEWAY_MAX_CALLS_PER_RUN` | optional | Calls per run (default `2`; the devnet allowance allowed 2 req/min) |
 | `FLOP_GATEWAY_FIXED_PRICE` | optional | Fixed FLOP price per call if FLOP publishes one outside the catalog (the agent reports `price_unknown` when it cannot find a price) |
@@ -272,6 +274,7 @@ python agent_cron.py           # runs telemetry + auto-responder once
 | `FLOP_GATEWAY_MAX_PER_RUN` / `_MAX_PER_DAY` | optional | Hard FLOP spend caps for the gateway path (defaults `100` per run, `2500` per UTC day; `0` disables). `FLOP_MAX_PER_RUN` and `FLOP_MAX_SPENDS_PER_HOUR` do not apply to this path |
 | `FLOP_GATEWAY_REPLAY_MAX` | optional | Replays of a hung request with the same `Idempotency-Key` (default `0`, off: the gateway does not document this header for chat). A quota drop after a replay disables replays |
 | `FLOP_ATTRIB_GATE` / `_GATE_MIN` | optional | Limit unconfirmed gateway spend to `max(_GATE_MIN, confirmed on chain)` FLOP (default minimum `20`), counting pending receipts and hung requests. On by default; `off` keeps buying unconfirmed |
+| `FLOP_ATTRIB_PROBE_HOURS` | optional | While the attribution gate is holding, buy one minimal probe call every N hours (default `6`, `0` = off). If the chain then records spend for the wallet, older pending gateway spend is moved to `gateway_written_off` and buying resumes |
 | `FLOP_LLM_PAID_MAX_PER_DAY` | optional | Daily call cap for paid LLM providers, `deepseek` and `openai` (default `300`; `0` disables) |
 | `FLOP_RUN_BUDGET_SEC` | optional | Per-run time budget (default `900`, below the 20-min job timeout): no new gateway call or faucet wait that could not finish in time |
 | `FLOP_RPC_URL` | optional | Testnet RPC endpoint — required (with a `submit_tx`) before a testnet spend will send |

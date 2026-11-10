@@ -2055,7 +2055,10 @@ def persist_ledger_to_kv(private_key, did) -> None:
                 # Kỳ của chain (mạng reset đếm lại từ 0): mất khoá này thì sau reset cổng đứng tên khoá.
                 "gateway_chain_hw": led.get("gateway_chain_hw", {}),
                 "gateway_epoch_done": led.get("gateway_epoch_done", {}),
-                "gateway_chain_low": led.get("gateway_chain_low", {})}
+                "gateway_chain_low": led.get("gateway_chain_low", {}),
+                "gateway_chain_id": led.get("gateway_chain_id", {}),
+                # Chi qua kênh không đứng tên ví mình, đã chuyển khỏi phần chờ (không tính airdrop).
+                "gateway_written_off": led.get("gateway_written_off", {})}
         entries = (led.get("entries", []) or [])
         body = None
         # Cắt dần tới khi VỪA giới hạn. Số dư và các tổng chạy không suy từ entries, nên
@@ -4579,7 +4582,14 @@ def _explorer_net(net: str) -> str:
     """Tên trong host explorer: /health có thể báo 'flop-testnet-1' còn host vẫn là explorer.testnet."""
     import flop_gateway
     net = (net or "testnet").strip().lower()
+    if net == _testnet_alias():
+        return "testnet"                 # mạng testnet mang tên riêng: explorer vẫn theo "testnet"
     return next((n for n in ("testnet", "devnet") if flop_gateway.network_matches(net, n)), net)
+
+
+def _testnet_alias() -> str:
+    """Tên riêng của mạng testnet do operator khai báo (FLOP_TESTNET_NETWORK_NAME), chữ thường; '' nếu không."""
+    return os.environ.get("FLOP_TESTNET_NETWORK_NAME", "").strip().lower()
 
 
 def _attrib_net() -> str:
@@ -4674,27 +4684,109 @@ def attribution_room(state: dict, now: int):
         return None
     if os.environ.get("FLOP_ATTRIB_GATE", "").strip().lower() in ("0", "false", "off", "no"):
         return None
-    total = float(tm.gateway_attribution()["unattributed"])
-    total += flop_gateway.unsettled_exposure(state.get(flop_gateway.KEY))
-    chain = float(onchain_spent(state, now) or Decimal(0))
+    total, chain_d = _attrib_pending(state, now)
+    chain = float(chain_d or Decimal(0))
     if state.get(FOREIGN_SEEN_KEY) and total > 0 and chain < total:
         return 0.0
     return max(_env_float("FLOP_ATTRIB_GATE_MIN", ATTRIB_ALERT_MIN), chain) - total
 
 
-def attribution_hold(state: dict, now: int):
-    """Lý do DỪNG MUA, hoặc None (xem attribution_room). FLOP_ATTRIB_GATE=off để bỏ qua."""
+def _attrib_pending(state: dict, now: int):
+    """(FLOP gateway chưa được chain xác nhận, số chain ghi cho ví | None) cho cổng đứng tên.
+
+    Chưa xác nhận = sổ đang chờ + biên nhận chờ settle + request treo + biên nhận MẤT DẤU trong 24 giờ
+    (flop_gateway.lost_exposure). Biên nhận mất dấu không bao giờ vào sổ, nên chi tiêu thật của nó
+    hiện ra như phần chain ghi cho ví NHIỀU HƠN (sổ đã xác nhận trong kỳ + sổ đang chờ): phần dư đó
+    được trừ vào khoản mất dấu. Trước đây khoản mất dấu cộng dồn mãi và không gì trừ được — mạng settle
+    chậm hơn cửa sổ 20 biên nhận thì cổng dừng mua dù chain ghi đủ cho ví mình."""
     import flop_gateway
     import token_manager as tm
+    g = state.get(flop_gateway.KEY)
+    pend = float(tm.gateway_attribution()["unattributed"])
+    chain_d = onchain_spent(state, now)
+    surplus = max(0.0, float(chain_d or 0) - float(tm.gateway_epoch_done()) - pend)
+    lost = max(0.0, flop_gateway.lost_exposure(g, now) - surplus)
+    return pend + flop_gateway.open_exposure(g) + lost, chain_d
+
+
+def attribution_hold(state: dict, now: int):
+    """Lý do DỪNG MUA, hoặc None (xem attribution_room). FLOP_ATTRIB_GATE=off để bỏ qua."""
     room = attribution_room(state, now)
     if room is None or room > 0:
         return None
-    total = float(tm.gateway_attribution()["unattributed"])
-    total += flop_gateway.unsettled_exposure(state.get(flop_gateway.KEY))
-    chain = onchain_spent(state, now)
+    total, chain = _attrib_pending(state, now)
     seen = f"chain ghi {chain:.4g}" if chain is not None else "chưa đọc được explorer"
     return (f"{total:.4g} FLOP gateway chưa được chain xác nhận, {seen}"
             + (" · có kênh đứng tên người khác" if state.get(FOREIGN_SEEN_KEY) else ""))
+
+
+ATTRIB_PROBE_KEY = "attrib_probe"          # {"at", "chain", "pend"}: lượt mua thăm dò đang chờ kết quả
+ATTRIB_HOLD_SINCE_KEY = "attrib_hold_since"
+
+
+def attrib_probe_due(state: dict, now: int) -> bool:
+    """Cổng đứng tên sắp dừng mua ở lượt này: có mua THĂM DÒ một lần nhỏ không?
+
+    Cổng chỉ mở lại khi chain ghi chi tiêu cho ví mình, mà đang dừng thì không mua, nên chain không
+    bao giờ ghi thêm: FLOP sửa việc đứng tên xong agent vẫn đứng im cho tới khi operator tự tắt cổng.
+    Mỗi FLOP_ATTRIB_PROBE_HOURS giờ (mặc định 6; 0 = tắt) kể từ lúc bắt đầu dừng, mua một lần nhỏ nhất;
+    kết quả đọc ở _attrib_probe_result. Lần gọi đầu của một đợt dừng chỉ ghi mốc."""
+    since = int(state.get(ATTRIB_HOLD_SINCE_KEY) or 0)
+    if not since:
+        state[ATTRIB_HOLD_SINCE_KEY] = now
+        return False
+    hours = _env_float("FLOP_ATTRIB_PROBE_HOURS", 6)
+    if hours <= 0:
+        return False
+    last = max(since, int(state.get("last_attrib_probe") or 0))
+    return now - last >= int(hours * 3600)
+
+
+def _attrib_probe_result(state: dict, now: int, chain: float) -> None:
+    """Sau một lượt thăm dò, chain ghi cho ví NHIỀU HƠN lúc thăm dò = các lần mua mới đã đứng tên ví
+    mình. Khoản chờ có từ trước lượt thăm dò (đã quá FLOP_ATTRIB_PROBE_HOURS giờ mà chain không ghi) là
+    chi qua kênh đứng tên người khác: chuyển sang không-tính để cổng mở lại, xoá cờ kênh lạ."""
+    import token_manager as tm
+    p = state.get(ATTRIB_PROBE_KEY)
+    if not isinstance(p, dict):
+        return
+    try:
+        base, before = float(p.get("chain") or 0), p.get("pend")
+    except (TypeError, ValueError):
+        base, before = 0.0, None
+    if chain <= base + 1e-9:
+        return
+    off = tm.write_off_gateway_pending(before)
+    state.pop(ATTRIB_PROBE_KEY, None)
+    state.pop(ATTRIB_HOLD_SINCE_KEY, None)
+    state[FOREIGN_SEEN_KEY] = 0
+    save_state({ATTRIB_PROBE_KEY: None, ATTRIB_HOLD_SINCE_KEY: 0, FOREIGN_SEEN_KEY: 0})
+    msg = (f"✅ Lượt mua thăm dò đã được chain ghi cho ví mình (chi on-chain {base:.4g} → {chain:.4g} FLOP): "
+           "các lần mua mới ĐỨNG TÊN ví mình. "
+           + (f"{off:.4g} FLOP chi cũ qua kênh không đứng tên mình chuyển sang không-tính; " if off else "")
+           + "agent mua lại bình thường.")
+    print(f"[attrib] {msg}")
+    _telegram_send(msg)
+
+
+def gateway_expect_network(testnet: bool):
+    """-> (tên mạng gateway phải báo, lỗi cấu hình | None).
+
+    Testnet: mặc định "testnet" (khớp cả "flop-testnet-1"). Mạng mang tên riêng không có chữ "testnet"
+    (vd "aurora-1") thì khai báo ĐÚNG tên /health trả ở FLOP_TESTNET_NETWORK_NAME — trước đây không cấu
+    hình nào cho agent chi được trên mạng như vậy. Tên chứa "devnet" bị từ chối: chi devnet không bao giờ
+    vào sổ testnet. Nên đặt kèm FLOP_GATEWAY_GENESIS để ghim đúng chain."""
+    import flop_gateway
+    raw = os.environ.get("FLOP_GATEWAY_NETWORK", "").strip().lower()
+    if not testnet:
+        return raw or "devnet", None
+    alias = _testnet_alias()
+    if alias and flop_gateway.network_matches(alias, "devnet"):
+        return alias, f"FLOP_TESTNET_NETWORK_NAME={alias} là tên devnet"
+    expect = raw or alias or "testnet"
+    if flop_gateway.network_matches(expect, "testnet") or (alias and expect == alias):
+        return expect, None
+    return expect, f"FLOP_GATEWAY_NETWORK={expect} không phải testnet"
 
 
 def gateway_attribution_step(state: dict, now: int) -> str:
@@ -4720,7 +4812,12 @@ def gateway_attribution_step(state: dict, now: int) -> str:
                     save_state({"last_attrib_alert": now})
                 return "UNVERIFIED"
             return "unknown"
-        tm.confirm_gateway_attribution(onchain, read_at=onchain_read_at(state))
+        import flop_gateway
+        # Genesis do gateway báo (lượt mua vừa rồi) = dấu nhận diện chain: phân biệt mạng reset thật
+        # với explorer đọc thiếu (xem confirm_gateway_attribution).
+        _gen = (state.get(flop_gateway.KEY) or {}).get("genesis")
+        tm.confirm_gateway_attribution(onchain, read_at=onchain_read_at(state), chain_id=_gen)
+        _attrib_probe_result(state, now, float(onchain))
         pend = tm.gateway_attribution()["unattributed"]
         if onchain < pend and pend >= Decimal(str(ATTRIB_ALERT_MIN)) and _due(state, "last_attrib_alert", 24, now):
             msg = (f"⚠️ Sổ còn {pend:.4g} FLOP chi qua gateway chưa xác nhận trong khi explorer {own} ghi ví "
@@ -4819,12 +4916,12 @@ def gateway_session_step(state: dict, private_key, now: int):
     import flop_gateway
     import token_manager as _tm
     testnet = _tm.testnet_enabled()
-    expect = (os.environ.get("FLOP_GATEWAY_NETWORK", "").strip().lower()
-              or ("testnet" if testnet else "devnet"))
-    if testnet and not flop_gateway.network_matches(expect, "testnet"):
+    expect, _cfg_err = gateway_expect_network(testnet)
+    if _cfg_err:
         # Sổ testnet không bao giờ được nhận chi của mạng khác, kể cả khi cấu hình sai.
-        print(f"[gateway] TESTNET_ENABLED bật nhưng FLOP_GATEWAY_NETWORK={expect} — từ chối mua")
-        return "skip-network-config", 0, {"reason": f"FLOP_GATEWAY_NETWORK={expect} không phải testnet"}
+        print(f"[gateway] TESTNET_ENABLED bật nhưng {_cfg_err} — từ chối mua "
+              "(mạng testnet mang tên riêng: đặt FLOP_TESTNET_NETWORK_NAME đúng tên /health trả)")
+        return "skip-network-config", 0, {"reason": _cfg_err}
     # Đề ưu tiên = job kibble THẬT agent vừa làm (mỗi đề một việc khác nhau, có người đặt);
     # hết job mới dùng đề của operator. Nội dung job là UNTRUSTED -> isolate như mọi chỗ khác.
     jobs = [j for j in (state.get("gateway_jobs") or []) if isinstance(j, dict) and j.get("task")]
@@ -4872,7 +4969,9 @@ def gateway_session_step(state: dict, private_key, now: int):
     if not _g.get("inflight") and isinstance(_dur, dict) and _dur.get("key"):
         print(f"[gateway] khôi phục request treo {str(_dur['key'])[:8]}… từ KV (mất state.json)")
         _restore["inflight"] = _dur
-    for _k in ("day_spent", "replay_unsafe"):            # phanh an toàn không được mất theo cache
+    # first_enrolled_at: mốc lọc biên nhận "trước lần enroll đầu". Mất theo cache thì lần enroll lại
+    # đặt mốc = bây giờ và biên nhận của CHÍNH MÌNH settle trước đó (chưa kịp đọc) bị bỏ, không ghi sổ.
+    for _k in ("day_spent", "replay_unsafe", "first_enrolled_at"):   # không được mất theo cache
         if isinstance(_gi, dict) and _gi.get(_k) and not _g.get(_k):
             _restore[_k] = _gi[_k]
     if _restore:
@@ -4890,8 +4989,30 @@ def gateway_session_step(state: dict, private_key, now: int):
         checkpoint=lambda: save_state({flop_gateway.KEY: state.get(flop_gateway.KEY)}),
         channel_fn=lambda cid: channel_info(expect, cid),
         gate=lambda: (attribution_hold(state, now), attribution_room(state, now)),
+        probe=(lambda: attrib_probe_due(state, now)) if testnet else None,
         # Lưu sổ NGAY khi có biên nhận mới, TRƯỚC khi checkpoint ghi "đã thấy" xuống state.json.
         after_book=(lambda: persist_ledger_to_kv(private_key, did_of(private_key))) if testnet else None)
+    if testnet:
+        if r.get("probe") and r.get("sent"):
+            # Ghi mốc lượt thăm dò: số chain ghi cho ví + khoản chờ LÚC NÀY. Chain tăng sau mốc này
+            # = lần mua mới đứng tên ví mình (xem _attrib_probe_result). Giữ mốc chain của lượt thăm
+            # dò đầu tiên còn chờ kết quả.
+            import token_manager as _tmp
+            _old = state.get(ATTRIB_PROBE_KEY) if isinstance(state.get(ATTRIB_PROBE_KEY), dict) else {}
+            state[ATTRIB_PROBE_KEY] = {
+                "at": now, "pend": str(_tmp.gateway_attribution()["unattributed"]),
+                "chain": _old["chain"] if "chain" in _old else float(onchain_spent(state, now) or 0)}
+            state["last_attrib_probe"] = now
+            print("[attrib] đã mua thăm dò 1 lần — chờ explorer ghi chi tiêu cho ví mình")
+        elif r.get("gate_open"):
+            # Cổng cho mua bình thường ở lượt này: đợt dừng (nếu có) đã kết thúc. Không xoá mốc thì
+            # đợt dừng SAU sẽ thăm dò ngay lượt đầu, và khoản chờ chỉ do explorer đọc trễ bị chuyển
+            # nhầm sang không-tính.
+            state.pop(ATTRIB_HOLD_SINCE_KEY, None)
+            state.pop(ATTRIB_PROBE_KEY, None)
+        save_state({ATTRIB_PROBE_KEY: state.get(ATTRIB_PROBE_KEY),
+                    ATTRIB_HOLD_SINCE_KEY: state.get(ATTRIB_HOLD_SINCE_KEY) or 0,
+                    "last_attrib_probe": state.get("last_attrib_probe") or 0})
     if r.get("outcome") == "attribution_hold" and _due(state, "last_attrib_hold_alert", 24, now):
         _m = (f"⛔ Đã DỪNG mua compute: {r.get('reason')}. Agent vẫn đọc biên nhận và tự mua lại khi chain ghi "
               "chi tiêu cho ví mình. Muốn mua tiếp dù chưa xác nhận: đặt FLOP_ATTRIB_GATE=off.")
@@ -4936,7 +5057,8 @@ def gateway_session_step(state: dict, private_key, now: int):
                                                                             "model", "max_wait")
                                                        if _inf.get(k) is not None},
                                  "profile": _g.get("profile"), "at": now, "day_spent": _g.get("day_spent"),
-                                 "replay_unsafe": _g.get("replay_unsafe")}
+                                 "replay_unsafe": _g.get("replay_unsafe"),
+                                 "first_enrolled_at": _g.get("first_enrolled_at")}
     save_state({"gateway_inflight": state["gateway_inflight"]})
     if GATEWAY_BRIEF and r.get("calls"):
         save_state({BRIEF_KEY: state.get(BRIEF_KEY)})

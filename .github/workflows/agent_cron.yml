@@ -342,6 +342,13 @@ jobs:
           # ngưỡng = ALERT_MIN). off = mua tiếp dù chưa xác nhận.
           FLOP_ATTRIB_GATE: ${{ vars.FLOP_ATTRIB_GATE }}
           FLOP_ATTRIB_GATE_MIN: ${{ vars.FLOP_ATTRIB_GATE_MIN }}
+          # Đang dừng mua vì chưa đứng tên: mỗi N giờ mua THĂM DÒ 1 lần nhỏ để tự mở lại khi chain
+          # ghi chi tiêu cho ví mình (mặc định 6; 0 = tắt thăm dò).
+          FLOP_ATTRIB_PROBE_HOURS: ${{ vars.FLOP_ATTRIB_PROBE_HOURS }}
+          # Mạng testnet mang tên riêng không có chữ "testnet" (vd aurora-1): đặt ĐÚNG tên /health trả.
+          FLOP_TESTNET_NETWORK_NAME: ${{ vars.FLOP_TESTNET_NETWORK_NAME }}
+          # Ghim genesis hash (0x…) của chain được phép chi; trống = không ghim.
+          FLOP_GATEWAY_GENESIS: ${{ vars.FLOP_GATEWAY_GENESIS }}
           # Trần FLOPs MỘT phiên (tùy chọn) — phiên to hơn tách thành nhiều phiên.
           FLOP_SESSION_MAX_FLOPS: ${{ vars.FLOP_SESSION_MAX_FLOPS }}
           # (testnet) Trần phiên chờ proof: đủ N thì ngừng đăng phiên mới (mặc định 3, 0 = tắt).

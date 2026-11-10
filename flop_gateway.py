@@ -205,21 +205,31 @@ def _request_id(data: dict, headers) -> str:
     return str(rid)[:80] if rid else ""
 
 
-def network_detail(http, base: str):
-    """(network, lỗi): `network.network` ở <origin>/health ("devnet"/"testnet"/...) và mô tả
-    lỗi khi không đọc được (mã HTTP / loại ngoại lệ) — để log nói ĐƯỢC vì sao, không đoán."""
+def network_info(http, base: str):
+    """(network, lỗi, genesis): `network.network` ở <origin>/health ("devnet"/"testnet"/...), mô tả
+    lỗi khi không đọc được (mã HTTP / loại ngoại lệ) — để log nói ĐƯỢC vì sao, không đoán — và
+    `network.observed_genesis_hash` (chữ thường) hoặc None. Genesis là dấu nhận diện CHAIN: mạng
+    reset thì nó đổi, explorer đọc thiếu thì không."""
     try:
         d = _call(http, "GET", origin(base) + "/health", timeout=20)
     except GatewayError as e:
-        return None, f"HTTP {e.status} {e.code}".strip()
+        return None, f"HTTP {e.status} {e.code}".strip(), None
     except Exception as e:
-        return None, f"{type(e).__name__}: {str(e)[:120]}"
+        return None, f"{type(e).__name__}: {str(e)[:120]}", None
     net = d.get("network")
+    gen = None
     if isinstance(net, dict):
+        gen = net.get("observed_genesis_hash") or net.get("genesis_hash")
         net = net.get("network")
+    gen = gen.lower()[:80] if isinstance(gen, str) and re.fullmatch(r"0x[0-9a-fA-F]{8,}", gen) else None
     if isinstance(net, str) and net.strip():
-        return net.strip().lower(), ""
-    return None, f"/health không có trường network (keys: {sorted(d)[:8]})"
+        return net.strip().lower(), "", gen
+    return None, f"/health không có trường network (keys: {sorted(d)[:8]})", gen
+
+
+def network_detail(http, base: str):
+    """(network, lỗi) — xem network_info."""
+    return network_info(http, base)[:2]
 
 
 def network_matches(net: str, expect: str) -> bool:
@@ -514,12 +524,39 @@ def _num(v):
         return None
 
 
-def unsettled_exposure(g) -> float:
-    """FLOP đã cam kết mà sổ chưa có: biên nhận đang chờ settle, request treo, biên nhận đã mất dấu."""
+# Biên nhận rời phản hồi khi chưa settle ("mất dấu") chỉ là khoản CHỜ trong ngần này giây: sau đó nó
+# hoặc đã lên chain (nằm trong tổng chi on-chain của ví) hoặc đã bị huỷ. Trước đây tổng mất dấu cộng
+# dồn mãi (stats.receipts_lost_flop) được tính là khoản chờ vĩnh viễn: mạng settle chậm hơn cửa sổ 20
+# biên nhận của gateway thì khoản "chờ" lớn dần tới khi cổng đứng tên dừng mua, dù mọi thứ đứng tên đúng.
+LOST_EXPOSURE_TTL_SEC = 24 * 3600
+LOST_RECENT_KEEP = 100
+
+
+def open_exposure(g) -> float:
+    """FLOP đã cam kết mà sổ chưa có: biên nhận đang chờ settle + request treo."""
     g = g if isinstance(g, dict) else {}
     held = [v[1] for v in (g.get("receipts_open") or {}).values() if isinstance(v, list) and len(v) == 2]
-    held += [(g.get("inflight") or {}).get("max_cost"), (g.get("stats") or {}).get("receipts_lost_flop")]
+    held.append((g.get("inflight") or {}).get("max_cost"))
     return sum(_num(v) or 0.0 for v in held)
+
+
+def lost_exposure(g, now: int = None) -> float:
+    """FLOP của biên nhận mất dấu trong LOST_EXPOSURE_TTL_SEC gần nhất (`now` None -> mọi mục còn giữ)."""
+    g = g if isinstance(g, dict) else {}
+    total = 0.0
+    for item in g.get("receipts_lost_recent") or []:
+        if not (isinstance(item, list) and len(item) == 2):
+            continue
+        ts, amt = _num(item[0]), _num(item[1])
+        if amt is None or (now is not None and (ts is None or now - ts >= LOST_EXPOSURE_TTL_SEC)):
+            continue
+        total += max(0.0, amt)
+    return total
+
+
+def unsettled_exposure(g, now: int = None) -> float:
+    """open_exposure + lost_exposure."""
+    return open_exposure(g) + lost_exposure(g, now)
 
 
 def _cost(v) -> float:
@@ -776,7 +813,7 @@ def profile_of(expect_network: str) -> str:
 def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_network: str,
              book_fn=None, sleep=time.sleep, log=print, rng=None, deadline=None,
              clock=time.time, answer_fn=None, checkpoint=None, new_key=None,
-             channel_fn=None, gate=None, after_book=None) -> dict:
+             channel_fn=None, gate=None, after_book=None, probe=None) -> dict:
     """Một nhịp mua compute. Trả {"outcome", "calls", "spent", ...}; KHÔNG ném lỗi.
 
     `book_fn(amount, ref, model)` ghi sổ (chỉ khi mạng khớp `expect_network`); None = chạy
@@ -796,6 +833,9 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
     thì vẫn đọc biên nhận và đối soát nhưng không gọi mới. `after_book()` chạy ngay khi có biên nhận
     mới: caller lưu sổ TRƯỚC khi checkpoint ghi receipts_seen xuống đĩa, nếu không run bị huỷ giữa
     lần gọi sẽ để lại "đã ghi" trong khi sổ mất khoản đó.
+
+    `probe()` -> bool, hỏi khi gate (hoặc hạn mức còn lại < 1 lần gọi) sắp dừng mua: True = lượt này mua
+    MỘT lần nhỏ nhất để thăm dò (kết quả có `probe: True`); caller quyết nhịp thăm dò.
 
     `channel_fn(channel_id)` -> {"miner", "agent"} | None: tra kênh của biên nhận mới (biên nhận
     không có miner). Kết quả có `miners` và `foreign_channels` = số kênh KHÔNG đứng tên ví mình.
@@ -847,12 +887,21 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
     base = base_url()
     g["address"] = addr
 
-    net, why = network_detail(http, base)
+    net, why, genesis = network_info(http, base)
     if net is None:
         return done("error_network", reason=f"không đọc được /health của gateway ({why})")
     g["network"] = net
+    if genesis:
+        g["genesis"] = genesis               # dấu nhận diện chain cho sổ (mạng reset -> đổi)
     if not network_matches(net, expect_network):
         return done("network_mismatch", reason=f"gateway báo '{net}', cần '{expect_network}' — không chi")
+    # Ghim genesis (tuỳ chọn): tên mạng do gateway tự khai; genesis là thứ không khai nhầm được.
+    pin = _env("FLOP_GATEWAY_GENESIS").lower()
+    if pin and genesis != pin:
+        return done("network_mismatch",
+                    reason=(f"genesis gateway báo {str(genesis)[:14]}… khác FLOP_GATEWAY_GENESIS "
+                            f"{pin[:14]}… — không chi" if genesis else
+                            "FLOP_GATEWAY_GENESIS đã đặt nhưng /health không có genesis — không chi"))
 
     def backoff(sec, why):
         g["wait_until"], g["wait_why"] = now + int(max(60, sec)), why[:120]
@@ -1079,6 +1128,16 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
             if lost:
                 st["receipts_lost"] = int(st.get("receipts_lost") or 0) + len(lost)
                 st["receipts_lost_flop"] = round(float(st.get("receipts_lost_flop") or 0) + lost_flop, 6)
+            # Khoản mất dấu tính vào phần chờ có HẠN (lost_exposure); tổng cộng dồn ở stats chỉ để báo cáo.
+            recent_lost = [x for x in (g.get("receipts_lost_recent") or [])
+                           if isinstance(x, list) and len(x) == 2
+                           and now - (_num(x[0]) or 0) < LOST_EXPOSURE_TTL_SEC]
+            if lost and lost_flop > 0:
+                recent_lost.append([now, round(lost_flop, 6)])
+            if recent_lost:
+                g["receipts_lost_recent"] = recent_lost[-LOST_RECENT_KEEP:]
+            else:
+                g.pop("receipts_lost_recent", None)
             g["stats"] = st
             if prev_calls or new or not st["receipts"]:      # chưa từng thấy biên nhận -> luôn in hình dạng
                 log(f"[gateway] biên nhận: settled +{len(new)} ({round(amt, 6)} FLOP) | "
@@ -1201,12 +1260,24 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
                 log(f"[gateway] bỏ request treo {key[:8]}… sau {age}s — không thấy biên nhận "
                     "(quota tụt nếu có đã được tính vào 'đã chi')")
                 g.pop("inflight", None)
-        room = None
+        room, probing = None, False
+
+        def may_probe() -> bool:
+            if not probe:
+                return False
+            try:
+                return bool(probe())
+            except Exception as e:
+                log(f"[gateway] bỏ qua lỗi khi hỏi lượt thăm dò ({str(e)[:80]})")
+                return False
+
         if gate:
             state[KEY] = g                    # gate đọc biên nhận chờ / request treo vừa cập nhật
             hold, room = gate()
             if hold:
-                return done("attribution_hold", remaining=remaining, reason=str(hold)[:200])
+                if not may_probe():
+                    return done("attribution_hold", remaining=remaining, reason=str(hold)[:200])
+                probing, room = True, None
         if remaining <= 0:
             backoff(1800, "quota_exhausted")
             return done("exhausted", reason=f"quota gateway đã hết — {EXHAUSTED_NOTE}")
@@ -1288,10 +1359,24 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
         # dùng cỡ lớn nhất miner còn nhận (tok_cap học được) — cùng giá, nhiều compute hơn.
         min_cost = preq + ptok * pp + min_tok * pc
         if room is not None:
-            if room < min_cost:
+            if room >= min_cost:
+                due = min(due, room)
+            elif may_probe():
+                probing = True
+            else:
                 return done("attribution_hold", remaining=remaining,
                             reason=f"chỉ còn {room:.4f} FLOP được mua trước khi chain xác nhận")
-            due = min(due, room)
+        if gate and not probing:
+            out["gate_open"] = True          # cổng cho mua bình thường ở lượt này (caller kết thúc đợt dừng)
+        if probing:
+            # Cổng đứng tên đang dừng mua: MỘT lần gọi nhỏ nhất, bỏ qua nhịp chi. Không có nó thì
+            # điều kiện mở lại (chain ghi chi tiêu cho ví mình) không bao giờ xảy ra được.
+            out["probe"] = True
+            due, max_calls = min(float(avail), min_cost * 1.25), 1
+            if day_cap > 0:
+                due = min(due, day_left)
+            log(f"[gateway] cổng đứng tên đang dừng — mua THĂM DÒ 1 lần nhỏ ({due:.4f} FLOP) để xem chain "
+                "có ghi chi tiêu cho ví mình không")
         if due < min_cost or min_cost <= 0:
             return done("pace_wait", due=round(due, 6), remaining=remaining, budget=_avail_out(fb),
                         reason=f"đến hạn {due:.4f} < giá tối thiểu 1 lần gọi {min_cost:.4f} — tích sang run sau")
