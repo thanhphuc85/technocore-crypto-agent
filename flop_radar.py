@@ -382,9 +382,10 @@ def read_wallet(r: dict, fetch_fn, wallet=None, explorers=EXPLORERS) -> list:
 
     Trả một dòng báo MỖI KHI chi tiêu on-chain của ví TĂNG so với mốc đã báo (`attr_spent_notified`).
     Mốc này KHÔNG nằm trong WALLET_READ_KEYS: gửi Telegram lỗi thì caller hoàn nó về -> lần sau báo lại
-    phần tăng (gộp), không nuốt mất. Lần đầu thấy một explorer chỉ ghi mốc (không báo lịch sử cũ);
-    state cũ chưa có mốc thì lấy số đọc lần trước. Số GIẢM (explorer/mạng reset) -> đặt lại mốc, im.
-    Không có ví / nguồn lỗi -> bỏ qua."""
+    phần tăng (gộp), không nuốt mất. Lần đầu thấy một explorer (vd testnet vừa mở) tính từ 0 -> báo
+    TOÀN BỘ chi tiêu kể từ khi mạng bắt đầu; state cũ chưa có mốc thì lấy số đọc lần trước. Số GIẢM
+    (mạng reset) -> tính lại từ 0 và báo phần đã chi trên mạng mới. Không có ví / nguồn lỗi -> bỏ qua
+    (lần đọc được kế tiếp báo gộp)."""
     lines = []
     if not wallet:
         return lines
@@ -399,10 +400,17 @@ def read_wallet(r: dict, fetch_fn, wallet=None, explorers=EXPLORERS) -> list:
         v = parse_spent(fetch_fn(f"{base}/api/accounts/{wallet}/inference-spend"))
         if v is not None:
             prev = notified.get(h)
-            if isinstance(prev, int) and v > prev:
+            # Chưa có mốc (explorer mới sống, vd ngày testnet mở) -> tính từ 0: mọi chi tiêu kể từ khi
+            # mạng bắt đầu đều được báo, không bị lần đọc đầu nuốt mất. Tổng GIẢM = mạng/explorer reset
+            # -> tính lại từ 0 trên mạng mới. Mất cả state lẫn KV thì có thể báo lặp (an toàn hơn sót).
+            reset = isinstance(prev, int) and v < prev
+            if not isinstance(prev, int) or reset:
+                prev = 0
+            if v > prev:
                 first = " · LẦN ĐẦU chi tiêu đứng tên ví mình" if prev == 0 else ""
+                note = " · mạng reset, tính lại từ 0" if reset else ""
                 lines.append(f"• ✅ CHI THẬT ghi on-chain ({_net_label(h)}): ví {wallet[:6]}…{wallet[-4:]} "
-                             f"+{fmt_flop(v - prev)} FLOP (tổng {fmt_flop(v)} FLOP){first} — "
+                             f"+{fmt_flop(v - prev)} FLOP (tổng {fmt_flop(v)} FLOP){first}{note} — "
                              f"{base}/api/accounts/{wallet}/inference-spend")
             notified[h] = v
             spent[h] = 0 if v == 0 else 1
