@@ -2051,7 +2051,11 @@ def persist_ledger_to_kv(private_key, did) -> None:
                 "gateway_unattributed": led.get("gateway_unattributed", {}),
                 "gateway_attributed": led.get("gateway_attributed", {}),
                 "gateway_count": led.get("gateway_count", {}),
-                "gateway_counted": led.get("gateway_counted", {})}
+                "gateway_counted": led.get("gateway_counted", {}),
+                # Kỳ của chain (mạng reset đếm lại từ 0): mất khoá này thì sau reset cổng đứng tên khoá.
+                "gateway_chain_hw": led.get("gateway_chain_hw", {}),
+                "gateway_epoch_done": led.get("gateway_epoch_done", {}),
+                "gateway_chain_low": led.get("gateway_chain_low", {})}
         entries = (led.get("entries", []) or [])
         body = None
         # Cắt dần tới khi VỪA giới hạn. Số dư và các tổng chạy không suy từ entries, nên
@@ -4635,6 +4639,14 @@ def onchain_spent(state: dict, now: int):
     return Decimal(max(seen)) / Decimal(10 ** 18) if seen else None
 
 
+def onchain_read_at(state: dict):
+    """Mốc đọc mới nhất của số chi on-chain (giây) — để sổ không đếm một lần đọc hai lần."""
+    import flop_radar
+    at = (state.get(flop_radar.KEY) or {}).get("attr_spent_at") or {}
+    vals = [int(v) for v in at.values() if isinstance(v, (int, float))]
+    return max(vals) if vals else None
+
+
 def chain_balance(state: dict, now: int):
     """Số dư ví trên explorer đúng mạng (FLOP), đọc còn mới; None nếu không biết."""
     import flop_radar
@@ -4708,7 +4720,7 @@ def gateway_attribution_step(state: dict, now: int) -> str:
                     save_state({"last_attrib_alert": now})
                 return "UNVERIFIED"
             return "unknown"
-        tm.confirm_gateway_attribution(onchain)
+        tm.confirm_gateway_attribution(onchain, read_at=onchain_read_at(state))
         pend = tm.gateway_attribution()["unattributed"]
         if onchain < pend and pend >= Decimal(str(ATTRIB_ALERT_MIN)) and _due(state, "last_attrib_alert", 24, now):
             msg = (f"⚠️ Sổ còn {pend:.4g} FLOP chi qua gateway chưa xác nhận trong khi explorer {own} ghi ví "
@@ -4902,6 +4914,13 @@ def gateway_session_step(state: dict, private_key, now: int):
         if _telegram_send(_m):
             state["last_replay_alert"] = now
             save_state({"last_replay_alert": now})
+    if testnet and r.get("implausible_new"):
+        # Mỗi biên nhận chỉ báo một lần (flop_gateway nhớ khoá đã báo) — không cần cổng thời gian.
+        _m = (f"⚠️ {r['implausible_new']} biên nhận gateway có số tiền phi lý (vd đơn vị raw 1e-18 trong "
+              "trường FLOP) — agent KHÔNG ghi sổ các biên nhận này. Xem dòng [gateway] trong log, đối chiếu "
+              "trên explorer.")
+        print(f"[gateway] {_m}")
+        _telegram_send(_m)
     if testnet and r.get("foreign_channels") and _due(state, "last_foreign_alert", 24, now):
         _ag = ", ".join(a[:8] + "…" for a, n in (r.get("channel_agents") or {}).items())
         _m = (f"⚠️ {r['foreign_channels']} kênh compute vừa settle đứng tên {_ag}, KHÔNG phải ví mình. "

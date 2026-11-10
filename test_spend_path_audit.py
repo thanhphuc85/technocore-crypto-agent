@@ -719,3 +719,124 @@ def test_nothing_is_written_without_miner_stats(monkeypatch):
     monkeypatch.setattr(ac, "kv_set", lambda *a, **k: pytest.fail("không có gì để ghi"))
     monkeypatch.setattr(ac, "_miner_stats", {})
     ac.persist_miner_stats(KEY, "did")
+
+
+# --- audit vòng 3: mạng reset, biên nhận trước enroll, số tiền phi lý ---------------------
+
+def _confirmed(amount="300"):
+    """Sổ đã có `amount` FLOP gateway được chain xác nhận ở kỳ hiện tại (chain ghi đúng chừng đó)."""
+    tm.credit("1000")
+    tm.record_gateway_spend(amount, "inference-session gateway m", "old-1")
+    st = {flop_radar.KEY: _chain_read(int(amount) * 10 ** 18, at=NOW - 7200)}
+    ac.gateway_attribution_step(st, NOW - 7200)
+    assert tm.gateway_attribution()["unattributed"] == 0
+
+
+def test_chain_reset_opens_a_new_epoch_instead_of_locking_the_gate():
+    _confirmed("300")
+    tm.record_gateway_spend("20", "inference-session gateway m", "new-1")
+    st = {flop_radar.KEY: _chain_read(20 * 10 ** 18, at=NOW - 3600)}
+    ac.gateway_attribution_step(st, NOW - 3600)
+    assert tm.gateway_attribution()["unattributed"] == 20         # 1 lần đọc thấp: chưa kết luận reset
+    st = {flop_radar.KEY: _chain_read(20 * 10 ** 18, at=NOW)}
+    ac.gateway_attribution_step(st, NOW)
+    assert tm.gateway_attribution() == {"unattributed": 0, "attributed": 320}
+    assert ac.attribution_hold(st, NOW) is None
+    # Kỳ mới tiếp tục bình thường.
+    tm.record_gateway_spend("15", "inference-session gateway m", "new-2")
+    tm.confirm_gateway_attribution("35", read_at=NOW + 3600)
+    assert tm.gateway_attribution() == {"unattributed": 0, "attributed": 335}
+    assert tm.load_ledger()["session_cumulative"]["FLOP"] == "335"
+
+
+def test_one_low_explorer_reading_does_not_confirm_pending_spend_with_old_history():
+    _confirmed("300")
+    tm.record_gateway_spend("50", "inference-session gateway m", "new-1")
+    assert tm.confirm_gateway_attribution("0", read_at=NOW - 3600)["outcome"] == "low_reading"
+    tm.confirm_gateway_attribution("300", read_at=NOW)               # explorer hồi phục: số cũ
+    assert tm.gateway_attribution()["unattributed"] == 50            # không bị "xác nhận" bằng chi cũ
+
+
+def test_the_same_low_reading_is_not_counted_twice():
+    _confirmed("300")
+    tm.record_gateway_spend("20", "inference-session gateway m", "new-1")
+    for _ in range(3):
+        tm.confirm_gateway_attribution("20", read_at=NOW)
+    assert tm.gateway_attribution()["unattributed"] == 20
+
+
+def test_ledger_without_epoch_keys_detects_a_reset_that_already_happened():
+    """Sổ đã nằm trên KV từ trước bản sửa: chỉ có gateway_attributed, không có khoá kỳ."""
+    _confirmed("300")
+    led = tm.load_ledger()
+    for k in ("gateway_chain_hw", "gateway_epoch_done", "gateway_chain_low"):
+        led.pop(k, None)
+    tm.save_ledger(led)
+    tm.record_gateway_spend("20", "inference-session gateway m", "new-1")
+    tm.confirm_gateway_attribution("20", read_at=NOW - 3600)
+    tm.confirm_gateway_attribution("20", read_at=NOW)
+    assert tm.gateway_attribution() == {"unattributed": 0, "attributed": 320}
+
+
+def test_chain_epoch_keys_go_to_kv_with_the_ledger(monkeypatch):
+    _confirmed("300")
+    sent = {}
+    monkeypatch.setattr(ac, "kv_set", lambda pk, did, k, v: sent.update({k: v}) or True)
+    ac.persist_ledger_to_kv(KEY, ac.did_of(KEY))
+    body = json.loads(sent[ac._ledger_kv_key()])["body"]
+    assert body["gateway_chain_hw"] == {"FLOP": "300"} and body["gateway_epoch_done"] == {"FLOP": "300"}
+
+
+def test_receipts_created_before_the_first_enrollment_are_not_booked():
+    st, srv = {}, Srv()                                            # ví enroll lần đầu trên mạng này
+    srv.receipts = [rc(f"old{i}", spend=2.3, created_at=(NOW - 10 * 86400) * 1000) for i in range(18)]
+    srv.receipts.append(rc("mine", spend=1.5, created_at=(NOW - 60) * 1000))
+    r = step(st, srv)
+    assert st[fg.KEY]["first_enrolled_at"] == NOW
+    assert r["pre_enroll_skipped"] == 18
+    assert tm.gateway_attribution()["unattributed"] == pytest.approx(1.5)
+    assert fg.unsettled_exposure(st[fg.KEY]) == 0
+    r2 = step(st, srv, now=NOW + 300)                             # lượt sau không đếm lại
+    assert r2["pre_enroll_skipped"] == 0 and tm.gateway_attribution()["unattributed"] == pytest.approx(1.5)
+
+
+def test_re_enrolling_on_the_same_network_keeps_late_receipts():
+    st, srv = fresh(), Srv()
+    st[fg.KEY].update(first_enrolled_at=NOW - 5000, enrolled_at=NOW - 100)
+    srv.receipts = [rc("late", spend=3.0, created_at=(NOW - 3000) * 1000)]   # trước lần enroll LẠI
+    step(st, srv)
+    assert tm.gateway_attribution()["unattributed"] == pytest.approx(3.0)
+
+
+def test_raw_unit_amount_is_held_back_reported_once_and_booked_when_fixed():
+    st, srv = fresh(), Srv()
+    srv.receipts = [rc("r1", spend="6500000000000000000")]
+    r = step(st, srv)
+    assert r["implausible_new"] == 1 and tm.gateway_attribution()["unattributed"] == 0
+    assert fg.unsettled_exposure(st[fg.KEY]) < 1000
+    r = step(st, srv, now=NOW + 300)
+    assert r["implausible_new"] == 0 and tm.gateway_attribution()["unattributed"] == 0
+    srv.receipts = [rc("r1", spend=6.5)]                           # gateway sửa số
+    step(st, srv, now=NOW + 600)
+    assert tm.gateway_attribution()["unattributed"] == pytest.approx(6.5)
+
+
+def test_implausible_amount_rules(monkeypatch):
+    assert fg.implausible_amount({}, 6.5) == ""
+    assert fg.implausible_amount({}, 6.5e18)
+    assert fg.implausible_amount({"reserved_spend": 1.0}, 10.0)
+    assert fg.implausible_amount({"reserved_spend": 1.0}, 2.5) == ""
+    assert fg.implausible_amount({}, float("nan"))
+    monkeypatch.setenv("FLOP_GATEWAY_MAX_PER_RUN", "0")             # trần lượt tắt -> trần tuyệt đối
+    assert fg.implausible_amount({}, 5000) == "" and fg.implausible_amount({}, 2e6)
+
+
+def test_implausible_receipt_raises_one_telegram_alert(monkeypatch, telegram):
+    st, srv = fresh(), Srv()
+    srv.receipts = [rc("r1", spend="6500000000000000000")]
+    monkeypatch.setattr(ac, "_gateway_http", srv)
+    pin_now(monkeypatch, NOW)
+    ac.gateway_session_step(st, KEY, NOW)
+    ac.gateway_session_step(st, KEY, NOW + 300)
+    assert sum("phi lý" in m for m in telegram) == 1
+    assert ac.attribution_hold(st, NOW) is None
