@@ -568,6 +568,32 @@ def settled_amount(rc: dict):
     return None
 
 
+def implausible_amount(rc: dict, amount) -> str:
+    """Lý do số tiền của biên nhận đã settle là phi lý (không được ghi sổ), hoặc '' nếu hợp lý.
+
+    Một lần gọi không thể tốn hơn `max_cost_flop` agent gửi kèm, mà mức đó <= trần lượt
+    (FLOP_GATEWAY_MAX_PER_RUN). Biên nhận ghi số ở đơn vị raw (1e-18) trong trường FLOP từng bị ghi
+    sổ nguyên văn: 6.5 FLOP thành 6.5e18 — tổng chi chỉ tăng nên sổ hỏng vĩnh viễn và cổng đứng tên
+    dừng mua mãi. Không tự quy đổi (đoán đơn vị): giữ lại, báo, chờ gateway sửa."""
+    a = _num(amount)
+    if a is None or not math.isfinite(a) or a < 0:
+        return f"số tiền không hợp lệ ({str(amount)[:32]})"
+    run_cap = _env_num("FLOP_GATEWAY_MAX_PER_RUN", DEFAULT_MAX_PER_RUN)
+    ceiling = 2 * run_cap if run_cap > 0 else IMPLAUSIBLE_SPEND_FLOP
+    if a > min(ceiling, IMPLAUSIBLE_SPEND_FLOP):
+        return f"{a:.6g} FLOP > trần hợp lý {min(ceiling, IMPLAUSIBLE_SPEND_FLOP):g} cho một lần gọi"
+    r = _num(rc.get("reserved_spend")) if isinstance(rc, dict) else None
+    if r is not None and math.isfinite(r) and 0 < r < a / 2 - 1:
+        return f"{a:.6g} FLOP > 2 lần phần giữ chỗ {r:.6g}"
+    return ""
+
+
+# Trần tuyệt đối cho MỘT biên nhận khi trần lượt bị tắt (0): lớn hơn mọi mức faucet đã thấy.
+IMPLAUSIBLE_SPEND_FLOP = 1e6
+# Lệch đồng hồ cho phép khi so giờ tạo biên nhận với lần enroll đầu tiên của ví trên mạng này.
+PRE_ENROLL_SKEW_SEC = 300
+
+
 _DONE_UNPAID_STATES = _OPEN_STATES - _WAITING_STATES     # failed/released/refunded...: không bị trừ tiền
 DAY_HOLDS_KEEP = 20
 
@@ -898,6 +924,9 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
             g["vault"] = seal_bearer(agent_key, bearer)
             g.update(model=e["model"], expires_at=e.get("expires_at"),
                      remaining=e.get("remaining_quota"), enrolled_at=now)
+            # Lần enroll ĐẦU của ví này trên gateway+mạng này (đổi mạng/ví thì g đã được làm sạch):
+            # biên nhận tạo trước mốc này không thể là chi của lượt mua nào của agent trên mạng này.
+            g.setdefault("first_enrolled_at", now)
             log(f"[gateway] enroll ví {addr} model={e['model']} quota={e.get('remaining_quota')}")
         info = me(http, base, bearer)
         remaining = float(info.get("remaining_quota") or 0)
@@ -938,9 +967,45 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
                 items, shape = receipts_detail(http, base, bearer)
             except GatewayError as e:
                 items, shape = [], f"HTTP {e.status} {e.code}".strip()
-            live = {_receipt_key(rc) for rc in items}
-            rids.clear()
-            rids.update(str(rc.get("request_id")) for rc in items if rc.get("request_id"))
+            # (1) Biên nhận tạo TRƯỚC lần enroll đầu của ví trên mạng này: đổi mạng (vd devnet ->
+            # testnet) xoá receipts_seen, nên nếu gateway trả lịch sử theo địa chỉ ví thì chi của
+            # mạng/đợt cũ bị ghi vào sổ mới và cổng đứng tên dừng mua trước cả lần mua đầu tiên.
+            # Đánh dấu đã thấy, không ghi sổ, không tính vào phần chờ.
+            # (2) Số tiền phi lý (implausible_amount): không ghi sổ, không vào receipts_seen (gateway
+            # sửa số thì lượt sau ghi được), không đem đối soát bộ đếm ngày; báo một lần mỗi biên nhận.
+            first = g.get("first_enrolled_at")
+            pre, bad = 0, {}
+            kept = []
+            for rc in items:
+                k = _receipt_key(rc)
+                made = epoch_s(rc.get("created_at"))
+                if first and made and made < int(first) - PRE_ENROLL_SKEW_SEC:
+                    if k not in seen:
+                        seen.append(k)
+                        pre += 1
+                    waiting.pop(k, None)
+                    continue
+                a0 = settled_amount(rc)
+                why = implausible_amount(rc, a0) if a0 is not None else ""
+                if why:
+                    bad[k] = why
+                    waiting.pop(k, None)
+                    continue
+                kept.append(rc)
+            if pre:
+                log(f"[gateway] bỏ qua {pre} biên nhận tạo trước lần enroll đầu tiên của ví trên mạng này "
+                    "— không phải chi của agent trên mạng này, KHÔNG ghi sổ")
+            known_bad = dict(g.get("receipts_implausible") or {})
+            fresh_bad = {k: v for k, v in bad.items() if k not in known_bad}
+            for k, why in fresh_bad.items():
+                log(f"[gateway] ⚠️ biên nhận {k[:12]}… số tiền phi lý — KHÔNG ghi sổ: {why}")
+            if bad or known_bad:
+                g["receipts_implausible"] = dict(list({**known_bad, **bad}.items())[-50:])
+            live_all = {_receipt_key(rc) for rc in items}
+            all_items, items = items, kept
+            live = live_all                  # còn trong phản hồi (kể cả biên nhận vừa loại) -> không "mất"
+            rids.clear()                     # request treo của ta: đối soát theo MỌI biên nhận gateway trả
+            rids.update(str(rc.get("request_id")) for rc in all_items if rc.get("request_id"))
             settled_rids.clear()
             settled_rids.update(str(rc.get("request_id")) for rc in items
                                 if rc.get("request_id") and settled_amount(rc) is not None)
@@ -1035,6 +1100,7 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
                 log(f"[gateway] ⚠️ {sum(foreign.values())} kênh vừa settle đứng tên "
                     f"{', '.join(a[:8] + '…' for a in foreign)} — KHÔNG phải ví mình {addr[:8]}…")
             return {"receipts_new": len(new), "settled_new": round(amt, 6),
+                    "implausible_new": len(fresh_bad), "pre_enroll_skipped": pre,
                     "receipts_total": st["receipts"], "settled_total": st["settled"],
                     "miners": miners, "channel_agents": agents,
                     "foreign_channels": sum(foreign.values())}
