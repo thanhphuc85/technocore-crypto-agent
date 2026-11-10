@@ -317,6 +317,7 @@ python agent_cron.py           # runs telemetry + auto-responder once
 | `FLOP_KIBBLE_MAX_PER_RUN` | optional | Cap on jobs delivered per run (default `2`) — anti-spam |
 | `FLOP_KIBBLE_CLAIM` | optional | Post a `CLAIM` before each `DELIVER`: `on` (default) / `off` |
 | `FLOP_KIBBLE_MAX_CHARS` | optional | Max length of a deliverable (default `1200`) |
+| `FLOP_KIBBLE_TASK_MAX_CHARS` | optional | Max length of the job text (title + body) passed to the model (default `4000`, floor `500`). Longer jobs are cut; on `review` jobs the task is cut, never the fetched GitHub facts |
 | `FLOP_KIBBLE_TRACK_ENABLED` | optional | Record each real DELIVER and reconcile it against incoming `ATTEST rh:` hashes to measure the agent's own **useful-rate** — published to KV note `/kv/<ns>/kibble-score`: off (default) / `on` |
 | `FLOP_TCLK_ENABLED` | optional | Enable the **tclk/1 payee** — watch `tclk-offers` and post a signed `accept` for valid HTLC offers: off (default) / `on` |
 | `FLOP_TCLK_DRY_RUN` | optional | **On by default when the payee is enabled** — logs `would accept …`, posts nothing, never reveals a secret. Set to `off` to go live |

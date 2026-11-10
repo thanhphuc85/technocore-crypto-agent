@@ -157,6 +157,8 @@ jobs:
           FLOP_KIBBLE_DUP_SIM: ${{ vars.FLOP_KIBBLE_DUP_SIM }}
           # Vân tay chống-trùng hết hạn sau ngần này giờ (trống = 6). <=0 = không hết hạn.
           FLOP_KIBBLE_DUP_HOURS: ${{ vars.FLOP_KIBBLE_DUP_HOURS }}
+          # Trần ký tự ĐỀ BÀI (title + body) của job đưa vào model (trống = 4000, sàn 500).
+          FLOP_KIBBLE_TASK_MAX_CHARS: ${{ vars.FLOP_KIBBLE_TASK_MAX_CHARS }}
           # Báo cáo CHI TIÊU FLOP định kỳ qua Telegram (mặc định TẮT). Dùng lại 2 secret
           # Telegram của bước cảnh báo; agent chỉ ĐỌC chúng để gửi, không bao giờ log.
           FLOP_DAILY_REPORT_ENABLED: ${{ vars.FLOP_DAILY_REPORT_ENABLED }}
