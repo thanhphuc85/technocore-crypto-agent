@@ -145,9 +145,11 @@ def _load(path: str = None) -> dict:
 
 
 def _save(state: dict, path: str = None) -> None:
+    p = pacer_path(path)
     try:
-        with open(pacer_path(path), "w", encoding="utf-8") as f:
+        with open(f"{p}.tmp", "w", encoding="utf-8") as f:     # file tạm rồi đổi tên: không để file dở
             json.dump(state, f, ensure_ascii=False, indent=2)
+        os.replace(f"{p}.tmp", p)
     except Exception as e:
         print(f"[pacer] không lưu được state: {e}")
 

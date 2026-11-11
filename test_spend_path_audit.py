@@ -1237,3 +1237,139 @@ def test_stale_fallback_never_counts_as_a_confirmation():
     ac.gateway_attribution_step(st, NOW + 7 * 3600)
     assert tm.gateway_attribution() == {"unattributed": 25, "attributed": 500}
 
+
+# --- các mục Low còn lại -----------------------------------------------------------------------
+
+def test_receipts_sharing_a_channel_are_booked_separately():
+    st, srv = fresh(), Srv()
+    srv.receipts = [{"channel_id": "chan-1", "state": "settled", "settled_spend": s, "model": "m",
+                     "created_at": (NOW - 600 + i) * 1000} for i, s in enumerate((1.0, 2.0, 3.0))]
+    step(st, srv)
+    assert tm.gateway_attribution()["unattributed"] == pytest.approx(6.0)
+    step(st, srv, now=NOW + 300)                                     # lượt sau không ghi lại
+    assert tm.gateway_attribution()["unattributed"] == pytest.approx(6.0)
+
+
+def test_receipt_key_still_prefers_request_id():
+    assert fg._receipt_key({"request_id": "abc", "channel_id": "c"}) == "abc"
+    assert fg._receipt_key({"tx_hash": "0x1", "channel_id": "c"}) == "0x1"
+
+
+def test_own_wallet_under_another_ss58_prefix_is_not_foreign():
+    pub = fg._raw_pub(KEY)
+    mine_42 = fg.wallet_address(KEY)
+    mine_0 = fg.ss58_encode(pub, prefix=0)
+    assert mine_0 != mine_42 and fg.same_account(mine_0, mine_42)
+    assert fg.same_account("0x" + pub.hex(), mine_42)
+    other = fg.ss58_encode(bytes(32))
+    assert not fg.same_account(other, mine_42)
+    st, srv = fresh(), Srv()
+    srv.receipts = [rc("r1")]
+    r = fg.run_step(st, agent_key=KEY, http=srv, now=NOW, prompts=["p1"], expect_network="testnet",
+                    book_fn=book, log=lambda m: None, sleep=lambda s: None, rng=lambda: 0.5,
+                    channel_fn=lambda cid: {"agent": mine_0, "miner": "m1"})
+    assert r["foreign_channels"] == 0
+
+
+def test_account_pubkey_rejects_garbage():
+    addr = fg.wallet_address(KEY)
+    bad = addr[:-1] + ("A" if addr[-1] != "A" else "B")              # sai checksum
+    assert fg.account_pubkey(bad) is None and fg.account_pubkey("hello") is None
+    assert fg.account_pubkey(None) is None
+
+
+@pytest.mark.parametrize("msg", [
+    '{"body":{"last_seq":1},"note":"api.flop.network ADDR"}',      # thân KV niêm phong
+    'api.flop.network|1800000000000|hi ADDR',                        # canonical tin chat
+    'ns|api.flop.network|1800000000000|ADDR',                       # canonical KV ký
+    'did:key:z6Mk|FLOP|1|1800000000000|api.flop.network ADDR',       # giao dịch
+    'api.flop.network.evil.example wants ADDR',                      # host là chuỗi con
+    'evil-api.flop.network wants ADDR',
+])
+def test_challenge_shapes_signed_elsewhere_are_refused(msg):
+    addr = fg.wallet_address(KEY)
+    assert fg.challenge_problem(msg.replace("ADDR", addr), addr, "https://api.flop.network")
+
+
+def test_a_normal_enrollment_challenge_is_accepted():
+    addr = fg.wallet_address(KEY)
+    for lines in (["api.flop.network enroll", addr, "nonce"],
+                  ["api.flop.network wants you to sign in with your FLOP account:", addr, "Nonce: 7f3a"],
+                  ["Sign in to https://api.flop.network.", addr]):
+        msg = "\n".join(lines)
+        assert fg.challenge_problem(msg, addr, "https://api.flop.network") == "", msg
+
+
+def test_receipts_are_still_read_during_a_long_non_rate_backoff():
+    st, srv = fresh(), Srv()
+    st[fg.KEY].update(wait_until=NOW + 3600, wait_why="403 forbidden", receipts_read_at=NOW - 1000)
+    srv.receipts = [rc("late", spend=2.0)]
+    r = step(st, srv)
+    assert r["outcome"] == "backoff" and srv.chats == []
+    assert tm.gateway_attribution()["unattributed"] == pytest.approx(2.0)
+    assert st[fg.KEY]["wait_until"] == NOW + 3600                    # không đổi lịch nghỉ
+    srv.receipts.append(rc("later", spend=1.0))
+    step(st, srv, now=NOW + 300)                                     # < 15 phút: không đọc lại
+    assert tm.gateway_attribution()["unattributed"] == pytest.approx(2.0)
+
+
+@pytest.mark.parametrize("why", ["429 rate_limited", "503 x", "overloaded", "no_admitted_miner"])
+def test_rate_limit_backoff_makes_no_requests(why):
+    calls = []
+    st = fresh()
+    st[fg.KEY].update(wait_until=NOW + 600, wait_why=why)
+    srv = Srv()
+    r = step(st, lambda *a, **k: calls.append(a) or srv(*a, **k))
+    assert r["outcome"] == "backoff" and calls == []
+
+
+def test_late_receipts_of_the_previous_bearer_are_still_booked():
+    st, srv = fresh(), Srv()
+    st[fg.KEY]["expires_at"] = (NOW + 60) * 1000                     # bearer cũ sắp hết hạn -> enroll lại
+    seen = []
+    plain = srv.__call__
+
+    def by_bearer(method, url, headers=None, json=None, timeout=20):
+        if url.endswith("/keys/me/receipts"):
+            tok = (headers or {}).get("Authorization", "")
+            seen.append(tok)
+            return R(200, {"receipts": [rc("old-late", spend=3.0)] if tok == "Bearer tok" else []})
+        return plain(method, url, headers=headers, json=json, timeout=timeout)
+
+    step(st, by_bearer)
+    assert "Bearer tok" in seen and "Bearer newtok" in seen
+    assert tm.gateway_attribution()["unattributed"] == pytest.approx(3.0)
+    assert fg.open_bearer(KEY, st[fg.KEY]["vault"]) == "newtok"
+
+
+def test_previous_bearer_is_dropped_when_rejected_or_expired():
+    st, srv = fresh(), Srv()
+    st[fg.KEY].update(vault_prev=fg.seal_bearer(KEY, "old"), vault_prev_until=NOW - 1)
+    step(st, srv)
+    assert "vault_prev" not in st[fg.KEY]
+    st[fg.KEY].update(vault_prev=fg.seal_bearer(KEY, "old"), vault_prev_until=NOW + 9999)
+    plain = srv.__call__
+
+    def reject_old(method, url, headers=None, json=None, timeout=20):
+        if url.endswith("/keys/me/receipts") and (headers or {}).get("Authorization") == "Bearer old":
+            return R(401, {"error": "expired"})
+        return plain(method, url, headers=headers, json=json, timeout=timeout)
+
+    step(st, reject_old, now=NOW + 300)
+    assert "vault_prev" not in st[fg.KEY]
+
+
+def test_ledger_writes_are_atomic(monkeypatch, tmp_path):
+    p = tmp_path / "led.json"
+    tm.credit("10", path=str(p))
+    real_dump = tm.json.dump
+
+    def boom(obj, f, **k):
+        f.write("{partial")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(tm.json, "dump", boom)
+    assert tm._save_ledger({"balances": {}, "entries": []}, str(p)) is False
+    monkeypatch.setattr(tm.json, "dump", real_dump)
+    assert tm.check_balance(path=str(p)) == "10"                     # file cũ còn nguyên
+

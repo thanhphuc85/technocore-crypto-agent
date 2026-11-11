@@ -164,13 +164,22 @@ def load_ledger(path: str = None) -> dict:
     return data
 
 
-def _save_ledger(state: dict, path: str = None) -> None:
+def _atomic_json(p: str, state) -> None:
+    """Ghi JSON ra file tạm rồi đổi tên: run bị giết giữa chừng không để lại file dở (load coi là rỗng)."""
+    tmp = f"{p}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, p)
+
+
+def _save_ledger(state: dict, path: str = None) -> bool:
     p = ledger_path(path)
     try:
-        with open(p, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
+        _atomic_json(p, state)
+        return True
     except Exception as e:
-        print(f"[ledger] không lưu được {p}: {e}")
+        print(f"[ledger] ⚠️ không lưu được {p}: {e}")
+        return False
 
 
 def save_ledger(state: dict, path: str = None) -> None:
@@ -499,7 +508,9 @@ def spend(amount, memo, token: str = None, *, path: str = None,
         _accrue_day(state, token, amt)         # tổng theo ngày -> pacer không cần entries
         if is_session_spend(memo):             # thước đo airdrop THẬT
             _accrue_session(state, token, amt)
-        _save_ledger(state, path)
+        if not _save_ledger(state, path):
+            # Giao dịch ĐÃ lên chain, không hoàn được: báo to để đối soát tay theo tx hash.
+            log(f"[ledger] ⚠️ chi on-chain {_fmt(amt)} {token} (tx {tx_hash}) nhưng KHÔNG lưu được sổ — đối soát tay")
         short = (tx_hash or "")[:12]
         log(f"[ledger] spent {_fmt(amt)} {token} for {memo} (tx {short}…)")
         return {**base, "outcome": "spent_onchain", "balance_after": new_bal,
