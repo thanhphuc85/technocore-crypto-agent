@@ -105,7 +105,7 @@ def select_engage_targets(messages, *, my_did, deny_dids, engaged, now,
         if not is_substantive(text, min_len):
             continue
         seen.add(frm)
-        out.append({"did": frm, "text": text, "seq": m.get("seq", 0)})
+        out.append({"did": frm, "text": text, "seq": m.get("seq", 0), "room": m.get("_room")})
         if len(out) >= pool_cap:
             break
     return out
@@ -127,12 +127,13 @@ def _record_engaged(engaged: dict, did: str, now: int, max_dids: int) -> None:
 
 def run_engage_pass(messages, *, my_did, deny_dids, state, now, cooldown_h, max_n,
                     min_len, max_dids, agent_name, nick_fn, question_fn, post_fn,
-                    dry_run=True, is_dup=None, log=print):
+                    dry_run=True, is_dup=None, log=print, post_room_fn=None):
     """Chạy 1 lượt engage. Chọn pool -> với mỗi ứng viên gọi question_fn(text) (trả câu
     hỏi thật hoặc None=SKIP) -> đăng @peer qua post_fn cho tới khi đủ max_n lần ĐĂNG.
     Dry-run: log 'would ask …', KHÔNG đăng và KHÔNG ghi engaged (để lúc live còn engage
     được). Chỉ ghi 'engaged' khi ĐÃ đăng thật -> cooldown chỉ tính sau khi tạo cạnh thật.
-    `is_dup(text, did)` (tùy chọn) chặn gửi trùng. Trả số câu đã đăng."""
+    `is_dup(text, did)` (tùy chọn) chặn gửi trùng. `post_room_fn(text, room)` (tùy chọn) đăng vào ĐÚNG phòng
+    peer vừa nói (message mang khoá `_room`); không có thì post_fn(text). Trả số câu đã đăng."""
     if max_n <= 0:
         return 0
     engaged = state.setdefault("engaged", {})
@@ -156,7 +157,8 @@ def run_engage_pass(messages, *, my_did, deny_dids, state, now, cooldown_h, max_
             log(f"[engage] DRY-RUN would ask {nick_fn(did)}: {q[:120]}")
             posted += 1                             # đếm để log; KHÔNG ghi engaged khi dry-run
             continue
-        if post_fn(msg):
+        ok = post_room_fn(msg, cand.get("room")) if post_room_fn else post_fn(msg)
+        if ok:
             _record_engaged(engaged, did, now, max_dids)
             posted += 1
             log(f"[engage] asked {nick_fn(did)} (seq {cand['seq']})")

@@ -200,3 +200,16 @@ def test_record_engaged_prunes():
         fe._record_engaged(engaged, f"did:key:{i}", now=1000 + i, max_dids=5)
     assert len(engaged) == 5
     assert "did:key:11" in engaged and "did:key:0" not in engaged  # giữ mới, bỏ cũ
+
+
+def test_run_engage_posts_into_the_candidate_room_when_given():
+    sent = []
+    m = {**_msg(1, D1, GOODQ), "_room": "lobby"}
+    n = fe.run_engage_pass(
+        [m], my_did=ME, deny_dids=set(), state={}, now=1_000_000,
+        cooldown_h=72, max_n=1, min_len=40, max_dids=500, agent_name="A",
+        nick_fn=_nick, question_fn=lambda t: "What exact threshold do you use?",
+        post_fn=lambda t: sent.append(("default", t)) or True,
+        post_room_fn=lambda t, r: sent.append((r, t)) or True, dry_run=False, log=lambda *a: None)
+    assert n == 1 and sent[0][0] == "lobby"
+
