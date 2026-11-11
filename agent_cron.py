@@ -4742,6 +4742,14 @@ def attrib_probe_due(state: dict, now: int) -> bool:
     return now - last >= int(hours * 3600)
 
 
+def _probe_baseline(state: dict, now: int) -> float:
+    """Mốc chi on-chain lúc thăm dò: max(số đọc explorer còn mới, tổng cao nhất sổ đã thấy trong kỳ).
+    Chỉ lấy số đọc còn mới thì explorer cũ quá 6 giờ cho mốc 0, và lần đọc sau trả lại ĐÚNG số cũ bị
+    coi là "chain ghi thêm cho ví mình" -> chuyển nhầm khoản chờ sang không-tính và mở cổng."""
+    import token_manager as tm
+    return max(float(onchain_spent(state, now) or 0), float(tm.gateway_chain_high()))
+
+
 def _attrib_probe_result(state: dict, now: int, chain: float) -> None:
     """Sau một lượt thăm dò, chain ghi cho ví NHIỀU HƠN lúc thăm dò = các lần mua mới đã đứng tên ví
     mình. Khoản chờ có từ trước lượt thăm dò (đã quá FLOP_ATTRIB_PROBE_HOURS giờ mà chain không ghi) là
@@ -5001,7 +5009,7 @@ def gateway_session_step(state: dict, private_key, now: int):
             _old = state.get(ATTRIB_PROBE_KEY) if isinstance(state.get(ATTRIB_PROBE_KEY), dict) else {}
             state[ATTRIB_PROBE_KEY] = {
                 "at": now, "pend": str(_tmp.gateway_attribution()["unattributed"]),
-                "chain": _old["chain"] if "chain" in _old else float(onchain_spent(state, now) or 0)}
+                "chain": _old["chain"] if "chain" in _old else _probe_baseline(state, now)}
             state["last_attrib_probe"] = now
             print("[attrib] đã mua thăm dò 1 lần — chờ explorer ghi chi tiêu cho ví mình")
         elif r.get("gate_open"):
