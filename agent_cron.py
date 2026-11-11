@@ -4785,19 +4785,23 @@ def attribution_room(state: dict, now: int):
 def _attrib_pending(state: dict, now: int):
     """(FLOP gateway chưa được chain xác nhận, số chain ghi cho ví | None) cho cổng đứng tên.
 
-    Chưa xác nhận = sổ đang chờ + biên nhận chờ settle + request treo + biên nhận MẤT DẤU trong 24 giờ
-    (flop_gateway.lost_exposure). Biên nhận mất dấu không bao giờ vào sổ, nên chi tiêu thật của nó
-    hiện ra như phần chain ghi cho ví NHIỀU HƠN (sổ đã xác nhận trong kỳ + sổ đang chờ): phần dư đó
-    được trừ vào khoản mất dấu. Trước đây khoản mất dấu cộng dồn mãi và không gì trừ được — mạng settle
-    chậm hơn cửa sổ 20 biên nhận thì cổng dừng mua dù chain ghi đủ cho ví mình."""
+    Chưa xác nhận = sổ đang chờ + phần CHƯA VÀO SỔ (biên nhận chờ settle + request treo + biên nhận MẤT
+    DẤU trong 24 giờ). Phần chưa vào sổ không có trong sổ, nên chi tiêu thật của nó hiện ra như phần chain
+    ghi cho ví NHIỀU HƠN sổ (đã xác nhận trong kỳ + đang chờ): phần dư đó được trừ vào TOÀN BỘ phần chưa
+    vào sổ.
+
+    Trước #254 biên nhận chờ rời danh sách 20 cái gần nhất thì thành "mất dấu" và được trừ như vậy; từ
+    #254 nó được theo dõi tiếp như biên nhận CHỜ — mà phần dư từng chỉ trừ vào mất dấu. Biên nhận kẹt ở
+    `estimated` (gateway: hoàn tất nhưng chưa đối soát số thực) trong khi chain đã ghi cho ví mình thì
+    cổng dừng mua (đo: giữ chỗ 262.5, chain ghi 175 -> hạn mức −87.5, trước #254 là +87.5)."""
     import flop_gateway
     import token_manager as tm
     g = state.get(flop_gateway.KEY)
     pend = float(tm.gateway_attribution()["unattributed"])
     chain_d, _src = chain_for_gate(state, now)
     surplus = max(0.0, float(chain_d or 0) - float(tm.gateway_epoch_done()) - pend)
-    lost = max(0.0, flop_gateway.lost_exposure(g, now) - surplus)
-    return pend + flop_gateway.open_exposure(g) + lost, chain_d
+    unbooked = flop_gateway.open_exposure(g) + flop_gateway.lost_exposure(g, now)
+    return pend + max(0.0, unbooked - surplus), chain_d
 
 
 def attribution_hold(state: dict, now: int):

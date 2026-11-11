@@ -1524,3 +1524,36 @@ def test_receipt_by_id_quotes_the_id_and_maps_404_to_none():
     assert urls[0] == "https://gw/v1/keys/me/receipts/a%2Fb%20c"
     assert fg.receipt_by_id(http, "https://gw/v1", "t", "missing") is None
 
+
+# --- cổng đứng tên: phần chain ghi dư trừ vào CẢ biên nhận chờ (hồi quy của #254) ------------------
+
+def test_pending_receipts_stuck_estimated_are_offset_by_chain_spend():
+    """40 biên nhận kẹt `estimated` (giữ chỗ 262.5) trong khi chain đã ghi 175 cho ví mình: trước bản sửa
+    hạn mức −87.5 (dừng mua); trước #254 (đường "mất dấu") là +87.5."""
+    tm.credit("1000")
+    open_ = {f"r{i}": [NOW - 3600, 6.5625, f"r{i}"] for i in range(40)}
+    st = {flop_radar.KEY: _chain_read(175 * 10 ** 18), fg.KEY: {"receipts_open": open_}}
+    assert ac.attribution_room(st, NOW) == pytest.approx(175 - (262.5 - 175))
+    assert ac.attribution_hold(st, NOW) is None
+
+
+def test_pending_and_lost_are_offset_together_and_never_below_zero():
+    tm.credit("1000")
+    g = {"receipts_open": {"a": [NOW - 60, 10.0, "a"]}, "receipts_lost_recent": [[NOW - 60, 5.0]],
+         "inflight": {"max_cost": 2.0}}
+    st = {flop_radar.KEY: _chain_read(100 * 10 ** 18), fg.KEY: g}
+    assert ac.attribution_room(st, NOW) == pytest.approx(100)          # dư 100 > 17 chưa vào sổ
+    st = {flop_radar.KEY: _chain_read(10 * 10 ** 18), fg.KEY: g}
+    assert ac.attribution_room(st, NOW) == pytest.approx(20 - (17 - 10))
+
+
+def test_surplus_is_measured_against_the_ledger_not_double_counted():
+    """Chi đã vào sổ (đang chờ xác nhận) không được tính là "dư" để trừ thêm vào biên nhận chờ."""
+    tm.credit("1000")
+    tm.record_gateway_spend("30", "inference-session gateway m", "booked-1")
+    g = {"receipts_open": {"a": [NOW - 60, 10.0, "a"]}}
+    st = {flop_radar.KEY: _chain_read(30 * 10 ** 18), fg.KEY: g}
+    ac.gateway_attribution_step(st, NOW)                               # 30 trong sổ -> xác nhận
+    assert tm.gateway_attribution()["unattributed"] == 0
+    assert ac.attribution_room(st, NOW) == pytest.approx(30 - 10)      # chain = sổ: không dư, chờ 10 nguyên
+
