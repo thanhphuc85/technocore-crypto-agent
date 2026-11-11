@@ -1208,11 +1208,37 @@ TESTNET_RADAR_H = max(0.25, _env_float("FLOP_TESTNET_RADAR_HOURS", 1))
 RADAR_EXPLORER = os.environ.get("FLOP_RADAR_EXPLORER_URL", "").strip().rstrip("/")
 
 
+def _github_headers(url: str) -> dict:
+    """Header cho một GET. Chỉ request tới https://api.github.com/ mới kèm GITHUB_TOKEN của lượt chạy
+    (Actions cấp sẵn, quyền đọc): không có token thì 60 request/giờ chia chung IP runner, 403 bị coi
+    như "nguồn lỗi" và radar yellowpaper#172 / job review mù mà không ai biết. Token KHÔNG bao giờ gửi
+    tới host khác."""
+    h = {"User-Agent": UA}
+    tok = os.environ.get("GITHUB_TOKEN", "").strip()
+    if tok and url.startswith("https://api.github.com/"):
+        h["Authorization"] = f"Bearer {tok}"
+    return h
+
+
+def _github_rate_note(r, url: str) -> None:
+    """403/429 vì hết hạn mức GitHub API -> in 1 dòng (không im lặng như lỗi nguồn thường)."""
+    try:
+        if (url.startswith("https://api.github.com/") and r.status_code in (403, 429)
+                and str((r.headers or {}).get("X-RateLimit-Remaining", "")) == "0"):
+            _provider_warn(f"GitHub API hết hạn mức ({'có' if os.environ.get('GITHUB_TOKEN') else 'KHÔNG có'} "
+                           "GITHUB_TOKEN) — radar issue/commit và job review tạm mù tới khi hạn mức hồi")
+    except Exception:
+        pass
+
+
 def _radar_fetch(url: str):
     """GET chỉ-đọc cho radar; lỗi/không 200 -> None (radar bỏ qua nguồn đó)."""
     try:
-        r = requests.get(url, headers={"User-Agent": UA}, timeout=15)
-        return r.text if r.status_code == 200 else None
+        r = requests.get(url, headers=_github_headers(url), timeout=15)
+        if r.status_code != 200:
+            _github_rate_note(r, url)
+            return None
+        return r.text
     except requests.RequestException:
         return None
 
@@ -2235,18 +2261,40 @@ def _provider_has_key(provider: str) -> bool:
     }.get(provider, False)
 
 
+KNOWN_PROVIDERS = ("groq", "gemini", "openrouter", "deepseek", "openai")
+_provider_warned = set()
+
+
+def _provider_warn(msg: str) -> None:
+    """In cảnh báo cấu hình LLM một lần mỗi tiến trình (mỗi lượt chạy)."""
+    if msg not in _provider_warned:
+        _provider_warned.add(msg)
+        print(f"[llm] ⚠️ {msg}")
+
+
 def _provider_chain():
     """Danh sách provider để thử LẦN LƯỢT (chính -> phụ), chỉ giữ provider còn key.
     - LLM_PROVIDER=none            -> [] (tắt LLM)
-    - LLM_PROVIDER=<provider>      -> chỉ provider đó (không fallback), nếu có key
+    - LLM_PROVIDER=<provider>      -> chỉ provider đó (không fallback), nếu có key — KỂ CẢ khi nó không
+                                      nằm trong LLM_PROVIDER_ORDER (trước đây vd LLM_PROVIDER=openai với
+                                      order mặc định không có openai lặng lẽ thành auto)
     - LLM_PROVIDER=auto (mặc định) -> theo LLM_PROVIDER_ORDER, lọc theo key có sẵn.
+    Giá trị lạ (gõ nhầm) -> auto, kèm cảnh báo. Tên lạ trong LLM_PROVIDER_ORDER bị bỏ, kèm cảnh báo.
     Provider đầu danh sách = 'chính'; các provider sau = fallback khi provider trước lỗi."""
     if LLM_PROVIDER == "none":
         return []
-    if LLM_PROVIDER in LLM_PROVIDER_ORDER:
-        return [LLM_PROVIDER] if _provider_has_key(LLM_PROVIDER) else []
-    # auto
-    return [p for p in LLM_PROVIDER_ORDER if _provider_has_key(p)]
+    if LLM_PROVIDER in KNOWN_PROVIDERS:
+        if not _provider_has_key(LLM_PROVIDER):
+            _provider_warn(f"LLM_PROVIDER={LLM_PROVIDER} nhưng chưa có API key của nó — không dùng LLM")
+            return []
+        return [LLM_PROVIDER]
+    if LLM_PROVIDER not in ("auto", ""):
+        _provider_warn(f"LLM_PROVIDER={LLM_PROVIDER!r} không phải provider đã biết "
+                       f"({', '.join(KNOWN_PROVIDERS)}, auto, none) — dùng auto")
+    unknown = [p for p in LLM_PROVIDER_ORDER if p not in KNOWN_PROVIDERS]
+    if unknown:
+        _provider_warn(f"LLM_PROVIDER_ORDER có tên lạ {unknown} — bỏ qua")
+    return [p for p in LLM_PROVIDER_ORDER if p in KNOWN_PROVIDERS and _provider_has_key(p)]
 
 
 def _active_provider():
@@ -2279,9 +2327,14 @@ _LLM_DEAD_STATUS = (401, 402)
 # Google trả 400 INVALID_ARGUMENT ("API key not valid") / 403 PERMISSION_DENIED cho KHOÁ hỏng — không
 # phải 401. Không nhận ra thì mỗi câu trả lời lại gõ tới GEMINI_MAX_TRIES model rồi mới rơi xuống
 # provider trả phí. Chỉ coi 400/403 là khoá hỏng khi thân lỗi NÓI về khoá (400 thường = request sai).
+# KHÔNG có "permission_denied": Google trả 403 PERMISSION_DENIED cả khi key không được dùng MỘT model
+# (preview/giới hạn vùng) — trước đây một model như vậy làm bỏ cả provider Gemini tới hết lượt và mọi câu
+# trả lời đổ sang provider trả phí. 403 ở mức khoá/dự án vẫn được nhận qua các dấu hiệu riêng bên dưới.
 _KEY_REJECTED_MARKERS = ("api key not valid", "api_key_invalid", "invalid api key", "api key expired",
-                         "api_key_expired", "permission_denied", "consumer_suspended",
-                         "has been suspended", "incorrect api key")
+                         "api_key_expired", "api_key_service_blocked", "api_key_ip_address_blocked",
+                         "api_key_http_referrer_blocked", "consumer_suspended", "has been suspended",
+                         "incorrect api key", "service_disabled", "has not been used in project",
+                         "billing_disabled", "requires billing")
 _llm_dead = {}                       # provider -> mã HTTP đã khiến nó bị bỏ qua
 
 
@@ -2389,8 +2442,10 @@ def _gemini_cooling(model, now: float = None) -> bool:
 
 
 def _gemini_note_429(model, e, now: float = None) -> None:
-    """Né model vừa 429 trong GEMINI_429_COOLDOWN_SEC. Chỉ 429 — 503/timeout không né."""
-    if model and _is_http_429(e) and GEMINI_429_COOLDOWN_SEC > 0:
+    """Né model vừa 429 — hoặc 403 ở mức MODEL (key vẫn tốt, chỉ không được dùng model này) — trong
+    GEMINI_429_COOLDOWN_SEC. 503/timeout không né."""
+    status = getattr(getattr(e, "response", None), "status_code", None)
+    if model and (status == 429 or (status == 403 and not _key_rejected(e))) and GEMINI_429_COOLDOWN_SEC > 0:
         _gemini_429[model] = (now if now is not None else time.time()) + GEMINI_429_COOLDOWN_SEC
 
 
@@ -2889,12 +2944,13 @@ def _parse_github_target(text: str):
 
 
 def _gh_get(path: str, params=None):
-    """GET GitHub API (unauth). None nếu lỗi mạng / status != 200 / JSON hỏng (fail-closed)."""
+    """GET GitHub API (kèm GITHUB_TOKEN nếu có). None nếu lỗi mạng / status != 200 / JSON hỏng (fail-closed)."""
+    url = "https://api.github.com" + path
     try:
-        r = requests.get("https://api.github.com" + path,
-                         headers={"User-Agent": UA, "Accept": "application/vnd.github+json"},
+        r = requests.get(url, headers={**_github_headers(url), "Accept": "application/vnd.github+json"},
                          params=params, timeout=10)
         if r.status_code != 200:
+            _github_rate_note(r, url)
             return None
         return r.json()
     except (requests.RequestException, ValueError):
@@ -4324,7 +4380,8 @@ def auto_respond(private_key, did):
             cursors[room] = new_last
             print(f"[respond:{room}] lần đầu — đặt cursor tại seq {new_last}, bỏ backlog.")
             continue
-        all_msgs.extend(msgs)
+        # Nhớ phòng của từng tin: engage phải hỏi peer NGAY phòng họ vừa nói, không phải ROOM.
+        all_msgs.extend({**m, "_room": room} if isinstance(m, dict) else m for m in msgs)
         cursors[room] = _respond_room(private_key, did, room, msgs, rc, state, now,
                                       my_nick, greeted, caps)
 
@@ -4359,6 +4416,7 @@ def auto_respond(private_key, did):
                 min_len=ENGAGE_MIN_MSG_LEN, max_dids=ENGAGE_MAX_DIDS, agent_name=AGENT_NAME,
                 nick_fn=short_nick, question_fn=_engage_question,
                 post_fn=lambda t: post_message(private_key, did, t),
+                post_room_fn=lambda t, r: post_message(private_key, did, t, room=r or ROOM),
                 dry_run=ENGAGE_DRY_RUN,
                 is_dup=lambda t, who: is_dup_out(state, t, now, who))
             if n:
