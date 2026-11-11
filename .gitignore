@@ -28,3 +28,4 @@ token_ledger.json
 token_ledger_testnet.json
 flop_pacer.json
 flop_faucet.json
+*.json.tmp

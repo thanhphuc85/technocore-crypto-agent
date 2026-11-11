@@ -87,6 +87,47 @@ def _b58encode(raw: bytes) -> str:
     return "1" * (len(raw) - len(raw.lstrip(b"\0"))) + out
 
 
+def _b58decode(s: str):
+    n = 0
+    for c in s:
+        i = _B58.find(c)
+        if i < 0:
+            return None
+        n = n * 58 + i
+    raw = n.to_bytes((n.bit_length() + 7) // 8, "big") if n else b""
+    return b"\0" * (len(s) - len(s.lstrip("1"))) + raw
+
+
+def account_pubkey(addr):
+    """Khoá công khai 32 byte của một tài khoản: địa chỉ SS58 (mọi prefix, checksum đúng) hoặc hex 0x…64.
+    None nếu không nhận ra. Cùng một ví hiện dưới prefix khác (vd explorer dùng 0 thay vì 42) vẫn ra cùng
+    khoá — so CHUỖI thì mọi kênh của chính ví mình bị coi là "đứng tên người khác"."""
+    if not isinstance(addr, str):
+        return None
+    a = addr.strip()
+    if re.fullmatch(r"0x[0-9a-fA-F]{64}", a):
+        return bytes.fromhex(a[2:])
+    if not 40 <= len(a) <= 50:
+        return None
+    raw = _b58decode(a)
+    if raw is None or len(raw) not in (35, 36):
+        return None
+    plen = 1 if raw[0] < 64 else 2
+    if len(raw) != plen + 32 + 2:
+        return None
+    if hashlib.blake2b(b"SS58PRE" + raw[:-2], digest_size=64).digest()[:2] != raw[-2:]:
+        return None
+    return raw[plen:plen + 32]
+
+
+def same_account(a, b) -> bool:
+    """Cùng một tài khoản? So khoá công khai khi giải mã được cả hai, không thì so chuỗi."""
+    ka, kb = account_pubkey(a), account_pubkey(b)
+    if ka is not None and kb is not None:
+        return ka == kb
+    return str(a or "").strip() == str(b or "").strip()
+
+
 def ss58_encode(pub32: bytes, prefix: int = SS58_PREFIX) -> str:
     if len(pub32) != 32 or not 0 <= prefix < 64:
         raise ValueError("ss58_encode: cần khoá công khai 32 byte và prefix 0..63")
@@ -252,6 +293,38 @@ def catalog(http, base: str) -> dict:
     return {m["id"]: m for m in d.get("data") or [] if isinstance(m, dict) and m.get("id")}
 
 
+# Câu mà khoá ví (= khoá DID khi FLOP_WALLET_USE_DID=on) còn ký ở NƠI KHÁC: thân KV niêm phong (JSON),
+# tin chat "room|nonce|text", KV "ns|key|nonce|value", giao dịch/phiên "did:key:…|…". Chữ ký Ed25519 không
+# gắn ngữ cảnh, nên một gateway độc hại (hoặc FLOP_GATEWAY_URL trỏ nhầm) đưa một trong các câu này làm
+# challenge là lấy được chữ ký dùng được ở nơi kia (vd bản KV trạng thái giả mà agent tin).
+_FOREIGN_SIGNED_SHAPES = (
+    re.compile(r"^\s*[\[{]"),
+    re.compile(r"^[^|\s]*\|\d{10,}\|"),
+    re.compile(r"^[^|\s]+\|[^|\s]+\|\d{10,}\|"),
+    re.compile(r"^\s*did:key:", re.I),
+    re.compile(r"^\|"),
+)
+
+
+def challenge_problem(msg, addr: str, base_origin: str) -> str:
+    """'' nếu `msg` là câu enroll hợp lệ để ký, ngược lại lý do từ chối. Dòng đầu phải nêu ĐÚNG host của
+    gateway như một từ riêng (không phải chuỗi con, vd "api.flop.network.evil.example"), câu phải nêu địa
+    chỉ ví mình, ≤ 2000 ký tự, và không mang dạng của câu nào khoá này ký ở nơi khác."""
+    if not isinstance(msg, str) or not msg.strip():
+        return "challenge rỗng"
+    if len(msg) > 2000:
+        return "challenge quá dài"
+    if addr not in msg:
+        return "challenge không nêu địa chỉ ví này"
+    host = re.sub(r"(?i)^https?://", "", base_origin or "").lower()
+    first = msg.splitlines()[0].lower()
+    if not host or not re.search(r"(?<![a-z0-9.-])" + re.escape(host) + r"(?![a-z0-9-]|\.[a-z0-9])", first):
+        return "challenge không nêu gateway này ở dòng đầu"
+    if any(p.search(msg) for p in _FOREIGN_SIGNED_SHAPES):
+        return "challenge có dạng của dữ liệu agent ký ở nơi khác (KV/chat/giao dịch) — từ chối ký"
+    return ""
+
+
 def enroll(http, base: str, wkey, purpose: str = None) -> dict:
     """Ký challenge bằng khoá ví -> {key, model, remaining_quota, expires_at}."""
     from urllib.parse import quote
@@ -261,11 +334,10 @@ def enroll(http, base: str, wkey, purpose: str = None) -> dict:
         url += f"&purpose={quote(purpose)}"
     ch = _call(http, "GET", url)
     msg = ch.get("message")
-    host = re.sub(r"(?i)^https?://", "", origin(base)).lower()
-    first = msg.splitlines()[0].lower() if isinstance(msg, str) and msg else ""
-    if not isinstance(msg, str) or addr not in msg or len(msg) > 2000 or host not in first:
+    why = challenge_problem(msg, addr, origin(base))
+    if why:
         # Chỉ ký câu enroll của CHÍNH gateway này, nêu đúng địa chỉ ví mình — không ký câu lạ.
-        raise GatewayError(0, "challenge_mismatch", "challenge không nêu gateway/địa chỉ ví này")
+        raise GatewayError(0, "challenge_mismatch", why)
     sig = "0x" + wkey.sign(msg.encode("utf-8")).hex()
     d = _call(http, "POST", base + "/enroll/wallet",
               body={"address": addr, "message": msg, "signature": sig})
@@ -545,8 +617,16 @@ def probe_up(tok_cap: int, cap: int, tok_bad, tok_bad_ts, now: int) -> int:
 
 
 def _receipt_key(r: dict) -> str:
-    return str(r.get("request_id") or r.get("tx_hash") or r.get("channel_id")
-               or f"{r.get('block_number')}:{r.get('prompt_hash')}")[:96]
+    """Khoá chống ghi trùng của MỘT biên nhận. request_id / tx_hash là duy nhất cho mỗi lần gọi. Thiếu cả
+    hai thì KHÔNG dùng channel_id một mình: một kênh mang nhiều lần gọi, nên mọi biên nhận cùng kênh từng
+    gộp thành một và chỉ lần đầu được ghi sổ (3 biên nhận 1+2+3 FLOP -> sổ ghi 1). Ghép kênh với các trường
+    phân biệt từng lần gọi."""
+    rid = r.get("request_id") or r.get("tx_hash")
+    if rid:
+        return str(rid)[:96]
+    parts = [r.get("channel_id"), r.get("created_at"), r.get("block_number"), r.get("prompt_hash"),
+             r.get("reserved_spend"), r.get("id")]
+    return ":".join("" if p is None else str(p) for p in parts)[:96]
 
 
 # Biên nhận THẬT của devnet (2026-10-24) KHÔNG theo schema InferenceReceipt của OpenAPI: không có
@@ -566,6 +646,14 @@ def _num(v):
     except (TypeError, ValueError):
         return None
 
+
+# Sau khi đổi bearer, còn đọc biên nhận của bearer cũ chừng này giây (gateway có thể từ chối key hết
+# hạn: 401/403 -> thôi đọc ngay).
+PREV_BEARER_READ_SEC = 2 * 3600
+# Đang nghỉ (backoff) vì lỗi KHÔNG phải giới hạn tốc độ: vẫn đọc biên nhận tối đa 1 lần mỗi chừng này
+# giây — biên nhận settle trong lúc nghỉ dài (403/402: 1 giờ) được ghi sổ và đối soát ngay, không đợi hết nghỉ.
+BACKOFF_RECEIPT_READ_SEC = 900
+_RATE_WAITS = ("429", "503", "rate", "overload", "no_admitted_miner")
 
 # Biên nhận rời phản hồi khi chưa settle ("mất dấu") chỉ là khoản CHỜ trong ngần này giây: sau đó nó
 # hoặc đã lên chain (nằm trong tổng chi on-chain của ví) hoặc đã bị huỷ. Trước đây tổng mất dấu cộng
@@ -922,8 +1010,13 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
         state[KEY] = g
         return out
 
+    read_only = False
     if int(g.get("wait_until") or 0) > now:
-        return done("backoff", reason=f"chờ tới {g['wait_until']} ({g.get('wait_why', '')})")
+        why = str(g.get("wait_why") or "").lower()
+        if (any(w in why for w in _RATE_WAITS) or not g.get("vault")
+                or now - int(g.get("receipts_read_at") or 0) < BACKOFF_RECEIPT_READ_SEC):
+            return done("backoff", reason=f"chờ tới {g['wait_until']} ({g.get('wait_why', '')})")
+        read_only = True                     # nghỉ dài, không vì giới hạn tốc độ: chỉ đọc biên nhận
     if wkey is None:
         return done("unconfigured", reason="chưa có khoá ví (FLOP_WALLET_SEED_HEX hoặc FLOP_WALLET_USE_DID=on)")
     if not prompts:
@@ -1001,7 +1094,12 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
         bearer = open_bearer(agent_key, g.get("vault"))
         exp_s = epoch_s(g.get("expires_at"))
         if bearer and exp_s and exp_s <= now + 120:
-            bearer = None                                     # sắp hết hạn -> enroll lại (không hạn -> giữ)
+            # Sắp hết hạn -> enroll lại (không hạn -> giữ). Giữ bearer CŨ (két) một thời gian để đọc nốt
+            # biên nhận của nó: biên nhận settle muộn chỉ nằm trong /keys/me/receipts của key đã gọi.
+            g["vault_prev"], g["vault_prev_until"] = g.get("vault"), max(exp_s, now) + PREV_BEARER_READ_SEC
+            bearer = None
+        if read_only and not bearer:
+            return done("backoff", reason=f"chờ tới {g['wait_until']} ({g.get('wait_why', '')})")
         if not bearer:
             try:
                 e = enroll(http, base, wkey, _env("FLOP_GATEWAY_PURPOSE") or None)
@@ -1025,7 +1123,9 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
         remaining = float(info.get("remaining_quota") or 0)
         g.update(remaining=remaining, expires_at=info.get("expires_at") or g.get("expires_at"))
         model_id = g.get("model")
-        models = catalog(http, base)
+        models = {} if read_only else catalog(http, base)
+        if read_only:
+            models = {model_id: {}}          # chỉ đọc biên nhận: không cần catalog, không đổi model
         if not models:
             # Catalog rỗng = dịch vụ phía sau đang lỗi, không phải model bị gỡ: giữ bearer.
             backoff(600, "catalog_empty")
@@ -1063,6 +1163,22 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
             except GatewayError as e:
                 items, shape = [], f"HTTP {e.status} {e.code}".strip()
                 rcpt["ok"] = False
+            g["receipts_read_at"] = now
+            # Biên nhận của bearer TRƯỚC (vừa đổi khi hết hạn) — gộp, khoá trùng thì giữ bản của bearer mới.
+            if g.get("vault_prev"):
+                prev = open_bearer(agent_key, g.get("vault_prev"))
+                if not prev or now > int(g.get("vault_prev_until") or 0) or prev == bearer:
+                    g.pop("vault_prev", None)
+                    g.pop("vault_prev_until", None)
+                else:
+                    try:
+                        old = receipts_detail(http, base, prev)[0]
+                        have = {_receipt_key(x) for x in items}
+                        items = items + [x for x in old if _receipt_key(x) not in have]
+                    except GatewayError as e:
+                        if e.status in (401, 403, 404):
+                            g.pop("vault_prev", None)
+                            g.pop("vault_prev_until", None)
             # (1) Biên nhận tạo TRƯỚC lần enroll đầu của ví trên mạng này: đổi mạng (vd devnet ->
             # testnet) xoá receipts_seen, nên nếu gateway trả lịch sử theo địa chỉ ví thì chi của
             # mạng/đợt cũ bị ghi vào sổ mới và cổng đứng tên dừng mua trước cả lần mua đầu tiên.
@@ -1203,7 +1319,7 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
                         miners.append(str(info["miner"]))
                     if info.get("agent"):
                         agents[str(info["agent"])] = agents.get(str(info["agent"]), 0) + 1
-            foreign = {a: n for a, n in agents.items() if a != addr}
+            foreign = {a: n for a, n in agents.items() if not same_account(a, addr)}
             if foreign:
                 log(f"[gateway] ⚠️ {sum(foreign.values())} kênh vừa settle đứng tên "
                     f"{', '.join(a[:8] + '…' for a in foreign)} — KHÔNG phải ví mình {addr[:8]}…")
@@ -1222,6 +1338,9 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
                 after_book()
             except Exception as e:
                 log(f"[gateway] không lưu được sổ sau biên nhận mới ({str(e)[:80]})")
+        if read_only:
+            return done("backoff", remaining=remaining,
+                        reason=f"chờ tới {g['wait_until']} ({g.get('wait_why', '')}) — đã đọc biên nhận")
         # ĐỐI SOÁT request treo của lượt trước TRƯỚC khi gọi mới (xem docstring).
         inf = g.get("inflight") if isinstance(g.get("inflight"), dict) else None
         if inf:
