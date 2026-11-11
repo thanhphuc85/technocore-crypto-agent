@@ -1373,3 +1373,154 @@ def test_ledger_writes_are_atomic(monkeypatch, tmp_path):
     monkeypatch.setattr(tm.json, "dump", real_dump)
     assert tm.check_balance(path=str(p)) == "10"                     # file cũ còn nguyên
 
+
+# --- biên nhận chờ settle đã rời 20 cái gần nhất: đọc lại theo request_id ------------------------
+
+class ById(Srv):
+    """Gateway giả: danh sách chỉ trả `listed`; GET /keys/me/receipts/{id} trả từ `book` (mọi biên nhận)."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.book, self.by_id, self.by_id_status = {}, [], {}
+
+    def __call__(self, method, url, headers=None, json=None, timeout=20):
+        if "/keys/me/receipts/" in url:
+            rid = url.rsplit("/", 1)[-1]
+            self.by_id.append((rid, (headers or {}).get("Authorization")))
+            if not (headers or {}).get("Authorization"):
+                return R(401, {"error": "missing_credential"})       # như gateway thật: phải có bearer
+            code = self.by_id_status.get(rid)
+            if code:
+                return R(code, {"error": "x"})
+            rc = self.book.get(rid)
+            return R(200, rc) if rc else R(404, {"error": "receipt_not_found"})
+        return super().__call__(method, url, headers=headers, json=json, timeout=timeout)
+
+
+def _pending_then_gone(srv, st, rid="late", reserved=6.5):
+    """Biên nhận `rid` được thấy ĐANG CHỜ ở lượt NOW, rồi rời danh sách (20 biên nhận mới hơn)."""
+    pend = rc(rid, state="estimated", spend=None, reserved_spend=reserved, created_at=(NOW - 60) * 1000)
+    srv.receipts = [pend]
+    srv.book[rid] = pend
+    srv.chat_fn = lambda b, h: R(429, {"error": "x"})
+    step(st, srv)
+    assert rid in st[fg.KEY]["receipts_open"] and st[fg.KEY]["receipts_open"][rid][2] == rid
+    st[fg.KEY]["wait_until"] = 0
+    srv.receipts = [rc(f"n{i}", created_at=(NOW + i) * 1000) for i in range(20)]
+
+
+def test_receipt_that_settles_after_leaving_the_window_is_booked():
+    st, srv = fresh(), ById()
+    _pending_then_gone(srv, st)
+    step(st, srv, now=NOW + 700)                                      # vẫn chờ: không mất, không ghi
+    assert "late" in st[fg.KEY]["receipts_open"] and not st[fg.KEY]["stats"].get("receipts_lost")
+    srv.book["late"] = rc("late", spend=6.0, reserved_spend=6.5, created_at=(NOW - 60) * 1000)
+    st[fg.KEY]["wait_until"] = 0
+    step(st, srv, now=NOW + 1400)
+    assert "late" not in st[fg.KEY]["receipts_open"] and not st[fg.KEY]["stats"].get("receipts_lost")
+    assert tm.gateway_attribution()["unattributed"] == pytest.approx(6.0 + 20 * 6.5)
+    step(st, srv, now=NOW + 2100)                                     # không ghi lại
+    assert tm.gateway_attribution()["unattributed"] == pytest.approx(6.0 + 20 * 6.5)
+
+
+def test_receipt_not_found_by_id_is_counted_as_lost():
+    st, srv = fresh(), ById()
+    _pending_then_gone(srv, st)
+    del srv.book["late"]
+    step(st, srv, now=NOW + 700)
+    assert st[fg.KEY]["stats"]["receipts_lost"] == 1 and "late" not in st[fg.KEY]["receipts_open"]
+
+
+def test_transient_error_reading_by_id_keeps_tracking():
+    st, srv = fresh(), ById()
+    _pending_then_gone(srv, st)
+    srv.by_id_status["late"] = 500
+    step(st, srv, now=NOW + 700)
+    assert "late" in st[fg.KEY]["receipts_open"] and not st[fg.KEY]["stats"].get("receipts_lost")
+
+
+def test_no_by_id_reads_when_the_receipt_list_is_unreadable():
+    st, srv = fresh(), ById()
+    _pending_then_gone(srv, st)
+    plain = srv.__call__
+    srv_down = lambda m, u, headers=None, json=None, timeout=20: (                    # noqa: E731
+        R(503, {"error": "busy"}) if u.endswith("/keys/me/receipts") else plain(m, u, headers, json, timeout))
+    srv.by_id.clear()
+    step(st, srv_down, now=NOW + 700)
+    assert srv.by_id == [] and "late" in st[fg.KEY]["receipts_open"]
+
+
+def test_by_id_reads_are_capped_per_run_and_rotate():
+    st, srv = fresh(), ById()
+    rids = [f"p{i}" for i in range(8)]
+    for i, rid in enumerate(rids):
+        st[fg.KEY].setdefault("receipts_open", {})[rid] = [NOW - 600 + i, 1.0, rid]
+        srv.book[rid] = rc(rid, state="estimated", spend=None, created_at=(NOW - 600 + i) * 1000)
+    srv.receipts = [rc("n0", created_at=NOW * 1000)]
+    step(st, srv)
+    first = [r for r, _ in srv.by_id]
+    assert len(first) == fg.TRACK_PER_RUN
+    srv.by_id.clear()
+    st[fg.KEY]["wait_until"] = 0
+    step(st, srv, now=NOW + 300)
+    second = [r for r, _ in srv.by_id]
+    assert set(rids) - set(first) <= set(second)                       # cái chưa đọc lượt trước được đọc trước
+
+
+def test_tracking_gives_up_after_the_ttl():
+    st, srv = fresh(), ById()
+    st[fg.KEY]["receipts_open"] = {"ancient": [NOW - fg.TRACK_TTL_SEC - 10, 2.0, "ancient"]}
+    srv.book["ancient"] = rc("ancient", state="estimated", spend=None, created_at=(NOW - 999999) * 1000)
+    srv.receipts = [rc("n0", created_at=NOW * 1000)]
+    step(st, srv)
+    assert "ancient" not in st[fg.KEY]["receipts_open"] and st[fg.KEY]["stats"]["receipts_lost"] == 1
+
+
+def test_pending_overflow_is_counted_as_lost_not_dropped_silently(monkeypatch):
+    monkeypatch.setattr(fg, "RECEIPTS_OPEN_KEEP", 3)
+    st, srv = fresh(), ById()
+    srv.receipts = [rc(f"w{i}", state="estimated", spend=None, created_at=(NOW - 60 + i) * 1000) for i in range(5)]
+    srv.chat_fn = lambda b, h: R(429, {"error": "x"})
+    step(st, srv)
+    assert len(st[fg.KEY]["receipts_open"]) == 3 and st[fg.KEY]["stats"]["receipts_lost"] == 2
+
+
+def test_legacy_pending_entry_gains_its_request_id():
+    st, srv = fresh(), ById()
+    st[fg.KEY]["receipts_open"] = {"late": [NOW - 60, 6.5]}               # bản cũ: chưa có id
+    srv.receipts = [rc("late", state="estimated", spend=None, created_at=(NOW - 60) * 1000)]
+    srv.chat_fn = lambda b, h: R(429, {"error": "x"})
+    step(st, srv)
+    assert st[fg.KEY]["receipts_open"]["late"] == [NOW - 60, 6.5, "late"]
+
+
+def test_previous_bearer_is_used_when_the_current_key_cannot_see_the_receipt():
+    st, srv = fresh(), ById()
+    _pending_then_gone(srv, st)
+    st[fg.KEY].update(vault_prev=fg.seal_bearer(KEY, "old"), vault_prev_until=NOW + 9999)
+    settled = rc("late", spend=6.0, created_at=(NOW - 60) * 1000)
+    plain = srv.__call__
+
+    def only_old(method, url, headers=None, json=None, timeout=20):
+        if url.endswith("/keys/me/receipts/late"):
+            srv.by_id.append(("late", (headers or {}).get("Authorization")))
+            ok = (headers or {}).get("Authorization") == "Bearer old"
+            return R(200, settled) if ok else R(404, {"error": "receipt_not_found"})
+        return plain(method, url, headers=headers, json=json, timeout=timeout)
+
+    step(st, only_old, now=NOW + 700)
+    assert [a for _, a in srv.by_id] == ["Bearer tok", "Bearer old"]
+    assert "late" not in st[fg.KEY]["receipts_open"] and not st[fg.KEY]["stats"].get("receipts_lost")
+
+
+def test_receipt_by_id_quotes_the_id_and_maps_404_to_none():
+    urls = []
+
+    def http(method, url, headers=None, json=None, timeout=20):
+        urls.append(url)
+        return R(404, {"error": "receipt_not_found"}) if "missing" in url else R(200, rc("a/b c"))
+
+    assert fg.receipt_by_id(http, "https://gw/v1", "t", "a/b c")["request_id"] == "a/b c"
+    assert urls[0] == "https://gw/v1/keys/me/receipts/a%2Fb%20c"
+    assert fg.receipt_by_id(http, "https://gw/v1", "t", "missing") is None
+
