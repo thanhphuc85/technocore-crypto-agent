@@ -629,6 +629,7 @@ def implausible_amount(rc: dict, amount) -> str:
 IMPLAUSIBLE_SPEND_FLOP = 1e6
 # Lệch đồng hồ cho phép khi so giờ tạo biên nhận với lần enroll đầu tiên của ví trên mạng này.
 PRE_ENROLL_SKEW_SEC = 300
+REAL_TIME_MIN = 1_577_836_800          # 2020-01-01 UTC: created_at nhỏ hơn không phải giờ thực
 
 
 _DONE_UNPAID_STATES = _OPEN_STATES - _WAITING_STATES     # failed/released/refunded...: không bị trừ tiền
@@ -1028,7 +1029,9 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
             for rc in items:
                 k = _receipt_key(rc)
                 made = epoch_s(rc.get("created_at"))
-                if first and made and made < int(first) - PRE_ENROLL_SKEW_SEC:
+                # Chỉ so khi created_at là GIỜ THỰC (sau 2020): mốc tương đối / số block bị đọc thành giây
+                # năm 1970 -> mọi biên nhận (kể cả của chính mình) bị coi là "trước enroll".
+                if first and made and made >= REAL_TIME_MIN and made < int(first) - PRE_ENROLL_SKEW_SEC:
                     if k not in seen:
                         seen.append(k)
                         pre += 1

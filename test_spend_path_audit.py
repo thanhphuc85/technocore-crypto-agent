@@ -1098,3 +1098,32 @@ def test_hold_marks_are_cleared_once_the_gate_lets_a_normal_buy_through(monkeypa
     n = len(srv.chats)
     assert _run_at(monkeypatch, st, NOW + 600) == "attribution_hold" and len(srv.chats) == n
 
+
+# --- re-audit: N1 mốc thăm dò từ số đọc cũ, N2 created_at không phải giờ thực -----------------
+
+def test_probe_baseline_uses_the_ledger_high_water_when_the_reading_is_stale(monkeypatch, telegram):
+    tm.credit("1000")
+    tm.record_gateway_spend("300", "inference-session gateway m", "own-old")
+    tm.confirm_gateway_attribution("300", read_at=NOW - 90000)
+    tm.record_gateway_spend("330", "inference-session gateway m", "broker-1")
+    srv = Srv()
+    monkeypatch.setattr(ac, "_gateway_http", srv)
+    st = fresh()
+    st[flop_radar.KEY] = _chain_read(300 * 10 ** 18, at=NOW - 8 * 3600)          # số đọc đã cũ
+    for now in (NOW, NOW + 6 * 3600):
+        _gstep(monkeypatch, st, now)
+    assert st[ac.ATTRIB_PROBE_KEY]["chain"] == 300.0
+    t = NOW + 6 * 3600 + 600
+    st[flop_radar.KEY] = _chain_read(300 * 10 ** 18, at=t)                       # hồi phục: VẪN 300
+    ac.gateway_attribution_step(st, t)
+    assert tm.gateway_attribution()["unattributed"] == 330
+    assert "gateway_written_off" not in tm.load_ledger() and ac.attribution_hold(st, t) is not None
+
+
+def test_non_wall_clock_created_at_is_not_treated_as_pre_enrollment():
+    st, srv = {}, Srv()
+    step(st, srv)
+    srv.receipts = [rc("mine", spend=2.0, created_at=123456)]
+    r = step(st, srv, now=NOW + 300)
+    assert r["pre_enroll_skipped"] == 0 and tm.gateway_attribution()["unattributed"] == pytest.approx(2.0)
+

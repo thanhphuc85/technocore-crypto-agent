@@ -578,6 +578,16 @@ def gateway_attribution(token: str = None, path: str = None) -> dict:
             for k in ("unattributed", "attributed")}
 
 
+def gateway_chain_high(token: str = None, path: str = None) -> Decimal:
+    """Tổng chi on-chain CAO NHẤT của ví đã thấy trong kỳ hiện tại của chain (0 nếu chưa có), không phụ
+    thuộc số đọc explorer còn mới hay không."""
+    token = (token or default_token())
+    state = load_ledger(path)
+    hw = _parse_amount((state.get("gateway_chain_hw") or {}).get(token, "0")) or Decimal(0)
+    ep = _parse_amount((state.get("gateway_epoch_done") or {}).get(token, "0")) or Decimal(0)
+    return max(hw, ep)
+
+
 def gateway_epoch_done(token: str = None, path: str = None) -> Decimal:
     """Phần chi gateway đã được chain xác nhận trong KỲ hiện tại của chain (xem confirm_gateway_attribution)."""
     token = (token or default_token())
