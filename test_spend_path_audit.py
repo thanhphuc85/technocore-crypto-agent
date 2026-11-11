@@ -180,7 +180,9 @@ def test_replay_is_off_by_default(monkeypatch):
     srv.chat_fn = timeout
     step(st, srv)
     st[fg.KEY]["wait_until"] = 0
-    assert step(st, srv, now=NOW + 900)["outcome"] == "reconciling" and len(srv.chats) == 1
+    # Còn trong khoảng biên nhận có thể xuất hiện: chờ, KHÔNG phát lại (lượt +900 gọi mới: xem
+    # test_hung_request_without_a_receipt_is_dropped_after_its_window).
+    assert step(st, srv, now=NOW + 500)["outcome"] == "reconciling" and len(srv.chats) == 1
 
 
 def test_quota_drop_after_replay_stops_further_replays(monkeypatch):
@@ -1126,4 +1128,112 @@ def test_non_wall_clock_created_at_is_not_treated_as_pre_enrollment():
     srv.receipts = [rc("mine", spend=2.0, created_at=123456)]
     r = step(st, srv, now=NOW + 300)
     assert r["pre_enroll_skipped"] == 0 and tm.gateway_attribution()["unattributed"] == pytest.approx(2.0)
+
+
+# --- T6: request treo không tới server + mức nền khi explorer cũ ---------------------------------
+
+def _hung(srv=None, **inf):
+    st, srv = fresh(), srv or Srv()
+    srv.chat_fn = timeout
+    r = step(st, srv)
+    assert r["outcome"] == "unknown_outcome"
+    st[fg.KEY]["inflight"].update(inf)
+    srv.chat_fn = lambda b, h: ok_chat()
+    return st, srv
+
+
+def test_unknown_outcome_backs_off_only_until_a_receipt_could_show_up():
+    st, _ = _hung()
+    wait = st[fg.KEY]["wait_until"] - NOW
+    assert 300 <= wait < 900 and wait == fg.unknown_backoff_sec(st[fg.KEY]["inflight"])
+
+
+def test_hung_request_without_a_receipt_is_dropped_after_its_window():
+    st, srv = _hung()
+    edge = fg.inflight_window(st[fg.KEY]["inflight"])[1] + fg.INFLIGHT_NO_RECEIPT_GRACE_SEC
+    st[fg.KEY]["wait_until"] = 0
+    assert step(st, srv, now=int(edge) - 30)["outcome"] == "reconciling" and len(srv.chats) == 1
+    r = step(st, srv, now=int(edge) + 1)
+    assert r["outcome"] == "spent" and len(srv.chats) >= 2 and "inflight" not in st[fg.KEY]
+    assert srv.chats[0]["prompt"] not in [c["prompt"] for c in srv.chats[1:]]   # đề treo KHÔNG gửi lại
+
+
+def test_the_whole_stall_is_now_one_backoff_not_thirty_minutes():
+    st, srv = _hung()
+    seq = []
+    for dt in range(300, 1801, 300):
+        seq.append(step(st, srv, now=NOW + dt)["outcome"])
+    assert seq.index("spent") <= 2 and "reconciling" not in seq[:seq.index("spent")][1:]
+
+
+@pytest.mark.parametrize("case", ["quota_dropped", "receipts_unreadable", "receipt_in_window",
+                                  "receipt_without_time", "relative_time", "replayed"])
+def test_hung_request_is_kept_when_arrival_cannot_be_ruled_out(case):
+    srv = Srv()
+    st, srv = _hung(srv)
+    inf = st[fg.KEY]["inflight"]
+    late = int(fg.inflight_window(inf)[1] + fg.INFLIGHT_NO_RECEIPT_GRACE_SEC) + 10
+    if case == "quota_dropped":
+        srv.quota -= 0.5
+    elif case == "receipts_unreadable":
+        plain = srv.__call__
+        srv_call = lambda m, u, headers=None, json=None, timeout=20: (            # noqa: E731
+            R(503, {"error": "busy"}) if u.endswith("/keys/me/receipts") else plain(m, u, headers, json, timeout))
+        srv = srv_call
+    elif case == "receipt_in_window":
+        srv.receipts = [rc("x", state="pending", spend=None, created_at=(NOW + 5) * 1000),
+                        rc("y", state="pending", spend=None, created_at=(NOW + 9) * 1000)]
+    elif case == "receipt_without_time":
+        srv.receipts = [rc("old", spend=1.0)]
+    elif case == "relative_time":
+        srv.receipts = [rc("old", spend=1.0, created_at=123456)]
+    elif case == "replayed":
+        inf["replays"] = 1
+    st[fg.KEY]["wait_until"] = 0
+    assert step(st, srv, now=late)["outcome"] == "reconciling"
+    assert "inflight" in st[fg.KEY]
+
+
+def test_quota_at_send_time_survives_state_loss(monkeypatch, telegram):
+    srv = Srv()
+    srv.chat_fn = timeout
+    monkeypatch.setattr(ac, "_gateway_http", srv)
+    st = fresh()
+    _gstep(monkeypatch, st, NOW)
+    assert st["gateway_inflight"]["inflight"]["quota"] == pytest.approx(1000.0)
+
+
+def test_stale_reading_keeps_the_confirmed_history_as_the_allowance():
+    tm.credit("1000")
+    tm.record_gateway_spend("500", "inference-session gateway m", "a")
+    st = {flop_radar.KEY: _chain_read(500 * 10 ** 18)}
+    ac.gateway_attribution_step(st, NOW)
+    tm.record_gateway_spend("25", "inference-session gateway m", "b")
+    assert ac.attribution_room(st, NOW) == pytest.approx(475)
+    assert ac.attribution_room(st, NOW + 7 * 3600) == pytest.approx(475)        # explorer im 7 giờ
+    assert ac.attribution_hold(st, NOW + 7 * 3600) is None
+    assert ac.chain_for_gate(st, NOW + 7 * 3600)[1] == "ledger"
+
+
+def test_stale_fallback_ends_after_two_days_and_needs_history():
+    tm.credit("1000")
+    tm.record_gateway_spend("500", "inference-session gateway m", "a")
+    st = {flop_radar.KEY: _chain_read(500 * 10 ** 18)}
+    ac.gateway_attribution_step(st, NOW)
+    tm.record_gateway_spend("25", "inference-session gateway m", "b")
+    later = NOW + ac.ATTRIB_STALE_MAX_SEC + 60
+    assert ac.attribution_room(st, later) == pytest.approx(20 - 25)
+    assert "chưa đọc được explorer" in ac.attribution_hold(st, later)
+    assert ac.chain_for_gate({}, NOW) == (None, "none")                         # chưa từng đọc
+
+
+def test_stale_fallback_never_counts_as_a_confirmation():
+    """Mức nền chỉ nới hạn mức; không có số đọc mới thì không khoản chờ nào được xác nhận."""
+    tm.credit("1000")
+    tm.record_gateway_spend("500", "inference-session gateway m", "a")
+    st = {flop_radar.KEY: _chain_read(500 * 10 ** 18)}
+    ac.gateway_attribution_step(st, NOW)
+    tm.record_gateway_spend("25", "inference-session gateway m", "b")
+    ac.gateway_attribution_step(st, NOW + 7 * 3600)
+    assert tm.gateway_attribution() == {"unattributed": 25, "attributed": 500}
 

@@ -4649,6 +4649,39 @@ def onchain_spent(state: dict, now: int):
     return Decimal(max(seen)) / Decimal(10 ** 18) if seen else None
 
 
+ATTRIB_STALE_MAX_SEC = 48 * 3600     # số chain đã thấy trong sổ còn dùng làm mức nền tối đa chừng này
+
+
+def _own_read_at(state: dict):
+    """Mốc đọc mới nhất (giây) của số chi on-chain trên explorer ĐÚNG MẠNG; None nếu chưa từng đọc được."""
+    import flop_radar
+    net = _attrib_net()
+    own = _explorer_base(net).split("//", 1)[-1].split("/", 1)[0]
+    at = (state.get(flop_radar.KEY) or {}).get("attr_spent_at") or {}
+    vals = [int(v) for h, v in at.items() if isinstance(v, (int, float)) and (h == own or f".{net}." in h)]
+    return max(vals) if vals else None
+
+
+def chain_for_gate(state: dict, now: int):
+    """(FLOP chain ghi cho ví dùng cho cổng đứng tên | None, nguồn: 'fresh' | 'ledger' | 'none').
+
+    Số đọc explorer cũ quá ATTRIB_FRESH_SEC (6 giờ) không còn là bằng chứng chi MỚI, nhưng tổng cao nhất
+    đã đọc được trong kỳ chain (sổ giữ, bền qua KV) vẫn là mức chain đã ghi: chain không ghi ít hơn được.
+    Trước đây explorer chập chờn vài giờ là hạn mức rơi về FLOP_ATTRIB_GATE_MIN (20) và agent ngừng mua
+    dù lịch sử đã xác nhận đầy đủ. Mức nền này chỉ dùng khi lần đọc được gần nhất còn trong
+    ATTRIB_STALE_MAX_SEC (explorer im lâu hơn thì không biết chain còn là kỳ đó không)."""
+    import token_manager as tm
+    fresh = onchain_spent(state, now)
+    if fresh is not None:
+        return fresh, "fresh"
+    at = _own_read_at(state)
+    if at is not None and now - at <= ATTRIB_STALE_MAX_SEC:
+        hw = tm.gateway_chain_high()
+        if hw > 0:
+            return hw, "ledger"
+    return None, "none"
+
+
 def onchain_read_at(state: dict):
     """Mốc đọc mới nhất của số chi on-chain (giây) — để sổ không đếm một lần đọc hai lần."""
     import flop_radar
@@ -4703,7 +4736,7 @@ def _attrib_pending(state: dict, now: int):
     import token_manager as tm
     g = state.get(flop_gateway.KEY)
     pend = float(tm.gateway_attribution()["unattributed"])
-    chain_d = onchain_spent(state, now)
+    chain_d, _src = chain_for_gate(state, now)
     surplus = max(0.0, float(chain_d or 0) - float(tm.gateway_epoch_done()) - pend)
     lost = max(0.0, flop_gateway.lost_exposure(g, now) - surplus)
     return pend + flop_gateway.open_exposure(g) + lost, chain_d
@@ -4715,7 +4748,9 @@ def attribution_hold(state: dict, now: int):
     if room is None or room > 0:
         return None
     total, chain = _attrib_pending(state, now)
-    seen = f"chain ghi {chain:.4g}" if chain is not None else "chưa đọc được explorer"
+    _src = chain_for_gate(state, now)[1]
+    seen = (f"chain ghi {chain:.4g}" + (" (số cũ trong sổ, explorer chưa đọc lại được)" if _src == "ledger" else "")
+            if chain is not None else "chưa đọc được explorer")
     return (f"{total:.4g} FLOP gateway chưa được chain xác nhận, {seen}"
             + (" · có kênh đứng tên người khác" if state.get(FOREIGN_SEEN_KEY) else ""))
 
@@ -5062,7 +5097,7 @@ def gateway_session_step(state: dict, private_key, now: int):
     # thì đối soát theo biên nhận, không phát lại được.
     _inf = _g.get("inflight") if isinstance(_g.get("inflight"), dict) else None
     state["gateway_inflight"] = {"inflight": _inf and {k: _inf[k] for k in ("key", "ts", "sent", "max_cost",
-                                                                            "model", "max_wait")
+                                                                            "model", "max_wait", "quota")
                                                        if _inf.get(k) is not None},
                                  "profile": _g.get("profile"), "at": now, "day_spent": _g.get("day_spent"),
                                  "replay_unsafe": _g.get("replay_unsafe"),

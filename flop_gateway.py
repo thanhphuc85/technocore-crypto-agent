@@ -472,6 +472,49 @@ EXHAUSTED_NOTE = ("allowance gateway không được cấp lại (OpenAPI /enrol
 INFLIGHT_MATCH_SKEW_SEC = 15
 
 
+def inflight_window(inf: dict):
+    """(từ, tới) — khoảng giờ biên nhận của request treo có thể được tạo; None nếu không biết giờ gửi."""
+    sent = inf.get("sent")
+    if not isinstance(sent, (int, float)) or sent <= 0:
+        return None
+    return sent - INFLIGHT_MATCH_SKEW_SEC, sent + int(inf.get("max_wait") or 0) / 1000 + 120
+
+
+# Sau khi hết khoảng biên nhận có thể được tạo, chờ thêm ngần này giây (gateway ghi biên nhận trễ) rồi mới
+# kết luận "request không tới server".
+INFLIGHT_NO_RECEIPT_GRACE_SEC = 300
+
+
+def inflight_never_arrived(inf: dict, recent, receipts_ok: bool, now: int, quota_now: float) -> bool:
+    """True nếu CHẮC request treo không tới được server (không bị tính tiền) -> gọi mới ngay, không chờ đủ
+    INFLIGHT_TTL_SEC (30 phút ngừng mua mỗi lần timeout). Chỉ khi MỌI điều sau đúng:
+      · đọc được danh sách biên nhận ở lượt này;
+      · mọi biên nhận trong đó có created_at là giờ thực (không thì không so được giờ);
+      · đã quá khoảng biên nhận có thể được tạo + INFLIGHT_NO_RECEIPT_GRACE_SEC;
+      · KHÔNG có biên nhận nào (cùng model) tạo trong khoảng đó;
+      · quota gateway không tụt so với lúc gửi (tụt = server đã xử lý gì đó);
+      · chưa từng PHÁT LẠI request này (bản phát lại có thể tạo biên nhận ngoài khoảng của lần gửi gốc)."""
+    if int(inf.get("replays") or 0) > 0:
+        return False
+    win = inflight_window(inf)
+    if not receipts_ok or win is None or now < win[1] + INFLIGHT_NO_RECEIPT_GRACE_SEC:
+        return False
+    q0 = _num(inf.get("quota"))
+    if q0 is None or quota_now < q0 - 1e-9:
+        return False
+    if any(t is None or t < REAL_TIME_MIN for t, _, _ in recent or []):
+        return False
+    model = str(inf.get("model") or "")
+    return not any(win[0] <= t <= win[1] and (not m or not model or m == model) for t, m, _ in recent or [])
+
+
+def unknown_backoff_sec(inf) -> int:
+    """Nghỉ sau một request không rõ kết quả: đủ để biên nhận (nếu có) xuất hiện và inflight_never_arrived
+    kết luận được — không phải 15 phút cố định."""
+    wait = int((inf or {}).get("max_wait") or 0) / 1000 if isinstance(inf, dict) else 0
+    return int(max(300, min(900, wait + 120 + INFLIGHT_NO_RECEIPT_GRACE_SEC + INFLIGHT_MATCH_SKEW_SEC)))
+
+
 def match_inflight(inf: dict, recent) -> str:
     """Khoá biên nhận của request treo, khớp theo GIỜ GỬI; '' nếu không chắc.
 
@@ -1006,6 +1049,7 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
         by_key = {}                         # khoá biên nhận -> biên nhận (đối soát khoản tạm tính)
         settled_rids = set()                # ... trong đó đã settle
         recent = []                         # (created_at giây, model, khoá) — đối soát request treo theo giờ
+        rcpt = {"ok": False}                # đọc được danh sách biên nhận ở lượt này chưa
 
         def collect(prev_calls: int) -> dict:
             """Đọc biên nhận; ghi sổ (book_fn) MỖI biên nhận mới ĐÃ SETTLE theo settled_spend —
@@ -1015,8 +1059,10 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
             new, amt, hist = [], 0.0, {}
             try:
                 items, shape = receipts_detail(http, base, bearer)
+                rcpt["ok"] = True
             except GatewayError as e:
                 items, shape = [], f"HTTP {e.status} {e.code}".strip()
+                rcpt["ok"] = False
             # (1) Biên nhận tạo TRƯỚC lần enroll đầu của ví trên mạng này: đổi mạng (vd devnet ->
             # testnet) xoá receipts_seen, nên nếu gateway trả lịch sử theo địa chỉ ví thì chi của
             # mạng/đợt cũ bị ghi vào sổ mới và cổng đứng tên dừng mua trước cả lần mua đầu tiên.
@@ -1255,6 +1301,12 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
                 if held and not settle_hold(held, by_key.get(rk)):
                     g["day_holds"] = {**(g.get("day_holds") or {}), rk: held}   # còn chờ: lượt sau
                 g.pop("inflight", None)
+            elif age < ttl and inflight_never_arrived(inf, recent, rcpt["ok"], now, remaining):
+                # Quá khoảng biên nhận có thể được tạo mà không có biên nhận nào, quota không tụt: request
+                # không tới server. Bỏ treo, gọi mới ngay (khoản tạm tính trong ngày giữ nguyên: an toàn).
+                log(f"[gateway] bỏ request treo {key[:8]}… sau {age}s — không có biên nhận nào trong khoảng nó "
+                    "có thể được tạo và quota không tụt: request không tới server")
+                g.pop("inflight", None)
             elif age < ttl:
                 return done("reconciling", remaining=remaining,
                             reason=(f"request {key[:8]}… gửi {age}s trước chưa rõ kết quả (timeout) — "
@@ -1425,7 +1477,7 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
             # `ts` giữ mốc của lượt cho TTL.
             g["inflight"] = {"key": pending, "ts": now, "sent": now + int(clock() - t0),
                              "max_cost": round(max_cost, 6), "model": model_id, "prompt": prompt, "mt": mt,
-                             "max_wait": max_wait}
+                             "max_wait": max_wait, "quota": round(quota_now, 9)}
             if checkpoint:
                 state[KEY] = g
                 try:
@@ -1511,7 +1563,7 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
             hold_day()
             if fb is not None:
                 _fb_charge(g, fb, float((g.get("inflight") or {}).get("max_cost") or 0))
-            backoff(900, f"{e.status} {e.code}")
+            backoff(unknown_backoff_sec(g.get("inflight")), f"{e.status} {e.code}")
             return done("unknown_outcome",
                         reason=(f"HTTP {e.status} khi chờ phản hồi — có thể server đã xử lý và trừ tiền; "
                                 f"giữ request {pending[:8]}… để đối soát, KHÔNG gửi lại đề này"))
@@ -1564,7 +1616,7 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
             tally(calls, spent, n_sent=calls + unknown)
         if unknown:
             hold_day()
-        backoff(900, type(e).__name__)
+        backoff(unknown_backoff_sec(g.get("inflight")) if unknown else 900, type(e).__name__)
         if unknown:
             return done("unknown_outcome",
                         reason=(f"{type(e).__name__} khi chờ phản hồi — có thể server đã xử lý và trừ "
