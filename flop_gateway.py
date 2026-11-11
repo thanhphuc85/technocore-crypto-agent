@@ -366,6 +366,22 @@ def receipts(http, base: str, bearer: str) -> list:
     return receipts_detail(http, base, bearer)[0]
 
 
+def receipt_by_id(http, base: str, bearer: str, request_id: str):
+    """GET /keys/me/receipts/{request_id} (OpenAPI v2 `getCurrentCredentialReceipt`): một biên nhận theo
+    request_id, kể cả khi nó đã rời 20 biên nhận gần nhất; không tốn lượt dùng của key. Trả biên nhận,
+    hoặc None khi 404 (không còn trong phạm vi key này — theo OpenAPI không phải bằng chứng là không có
+    việc trả tiền). Lỗi khác ném GatewayError."""
+    from urllib.parse import quote
+    try:
+        d = _call(http, "GET", f"{base}/keys/me/receipts/{quote(str(request_id), safe='')}", bearer=bearer)
+    except GatewayError as e:
+        if e.status == 404:
+            return None
+        raise
+    rc = d.get("receipt") if isinstance(d.get("receipt"), dict) else d
+    return rc if isinstance(rc, dict) and rc.get("request_id") else None
+
+
 def estimate(http, base: str, model: str, prompt: str, max_tokens: int) -> dict:
     return _call(http, "POST", base + "/models/estimate",
                  body={"model": model, "prompt": prompt, "max_tokens": int(max_tokens)})
@@ -655,6 +671,15 @@ PREV_BEARER_READ_SEC = 2 * 3600
 BACKOFF_RECEIPT_READ_SEC = 900
 _RATE_WAITS = ("429", "503", "rate", "overload", "no_admitted_miner")
 
+# Biên nhận đang chờ settle mà đã rời 20 biên nhận gần nhất: đọc lại theo request_id (tối đa chừng này mỗi
+# lượt, cái lâu chưa đọc nhất trước) cho tới khi nó settle / được hoàn — hoặc quá TRACK_TTL_SEC.
+TRACK_PER_RUN = 5
+TRACK_TTL_SEC = 7 * 86400
+# Số biên nhận CHỜ settle giữ trong state. Trước là 100 và cái cũ nhất bị cắt ÂM THẦM: settle chậm 3 giờ với
+# 4 lần gọi/lượt là >100 biên nhận chờ cùng lúc -> phần bị cắt không bao giờ vào sổ (mô phỏng: thiếu 213/733
+# FLOP). Vượt trần thì cái cũ nhất tính là "mất dấu" (hiện trong báo cáo), không biến mất.
+RECEIPTS_OPEN_KEEP = 600
+
 # Biên nhận rời phản hồi khi chưa settle ("mất dấu") chỉ là khoản CHỜ trong ngần này giây: sau đó nó
 # hoặc đã lên chain (nằm trong tổng chi on-chain của ví) hoặc đã bị huỷ. Trước đây tổng mất dấu cộng
 # dồn mãi (stats.receipts_lost_flop) được tính là khoản chờ vĩnh viễn: mạng settle chậm hơn cửa sổ 20
@@ -666,7 +691,7 @@ LOST_RECENT_KEEP = 100
 def open_exposure(g) -> float:
     """FLOP đã cam kết mà sổ chưa có: biên nhận đang chờ settle + request treo."""
     g = g if isinstance(g, dict) else {}
-    held = [v[1] for v in (g.get("receipts_open") or {}).values() if isinstance(v, list) and len(v) == 2]
+    held = [v[1] for v in (g.get("receipts_open") or {}).values() if isinstance(v, list) and len(v) >= 2]
     held.append((g.get("inflight") or {}).get("max_cost"))
     return sum(_num(v) or 0.0 for v in held)
 
@@ -1179,6 +1204,50 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
                         if e.status in (401, 403, 404):
                             g.pop("vault_prev", None)
                             g.pop("vault_prev_until", None)
+            # Biên nhận ĐANG CHỜ đã rời danh sách 20 cái gần nhất: đọc lại từng cái theo request_id thay vì
+            # coi là "mất dấu". Trước đây mạng settle chậm hơn cửa sổ 20 biên nhận thì phần lớn chi tiêu thật
+            # không bao giờ vào sổ (mô phỏng 48h, settle sau 3h: chain 704 FLOP, sổ 81). Chỉ khi đọc được
+            # danh sách (gateway sống). 404 = không còn trong phạm vi key -> mới là mất dấu.
+            gone404, deferred = set(), set()
+            listed = {_receipt_key(x) for x in items}
+
+            def expired(v) -> bool:
+                return now - int(_num(v[0] if isinstance(v, list) and v else None) or now) >= TRACK_TTL_SEC
+
+            if rcpt["ok"]:
+                polled = {k: v for k, v in (g.get("receipts_polled") or {}).items() if k in waiting}
+                missing = [k for k, v in waiting.items()
+                           if k not in listed and isinstance(v, list) and len(v) >= 3 and v[2] and not expired(v)]
+                missing.sort(key=lambda k: int(polled.get(k) or 0))
+                prev_tok = open_bearer(agent_key, g.get("vault_prev")) if g.get("vault_prev") else None
+                for i, k in enumerate(missing):
+                    if i >= TRACK_PER_RUN:
+                        deferred.update(missing[i:])
+                        break
+                    rid = str(waiting[k][2])
+                    try:
+                        rc = receipt_by_id(http, base, bearer, rid)
+                        if rc is None and prev_tok and prev_tok != bearer:
+                            rc = receipt_by_id(http, base, prev_tok, rid)
+                    except GatewayError as e:
+                        log(f"[gateway] đọc biên nhận {rid[:12]}… theo id lỗi HTTP {e.status} — thử lại lượt sau")
+                        deferred.add(k)
+                        polled[k] = now
+                        continue
+                    polled[k] = now
+                    if rc is None:
+                        gone404.add(k)
+                    else:
+                        items = items + [rc]
+                if polled:
+                    g["receipts_polled"] = polled
+                else:
+                    g.pop("receipts_polled", None)
+                if missing:
+                    found = len(missing) - len(deferred) - len(gone404)
+                    log(f"[gateway] đọc lại {len(missing) - len(deferred)} biên nhận chờ settle đã rời danh sách "
+                        f"theo request_id: thấy {found}, không còn {len(gone404)}"
+                        + (f", để lượt sau {len(deferred)}" if deferred else ""))
             # (1) Biên nhận tạo TRƯỚC lần enroll đầu của ví trên mạng này: đổi mạng (vd devnet ->
             # testnet) xoá receipts_seen, nên nếu gateway trả lịch sử theo địa chỉ ví thì chi của
             # mạng/đợt cũ bị ghi vào sổ mới và cổng đứng tên dừng mua trước cả lần mua đầu tiên.
@@ -1255,7 +1324,11 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
                 # vào exposure của cổng đứng tên, và vào "rời phản hồi khi chưa settle" nếu biến mất).
                 if a is None and (_state(rc) in _WAITING_STATES or _state(rc) in _SETTLED_STATES
                                   or unknown_state(rc)):
-                    waiting.setdefault(k, [now, _num(rc.get("reserved_spend")) or _spend_value(rc) or 0.0])
+                    held_amt = _num(rc.get("reserved_spend")) or _spend_value(rc) or 0.0
+                    if k not in waiting:
+                        waiting[k] = [now, held_amt, rc.get("request_id")]
+                    elif isinstance(waiting[k], list) and len(waiting[k]) == 2 and rc.get("request_id"):
+                        waiting[k] = waiting[k] + [rc.get("request_id")]     # bản cũ: thêm id để đọc lại được
                 else:
                     waiting.pop(k, None)
                 if a is None or k in seen:
@@ -1274,11 +1347,21 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
                 log(f"[gateway] ⚠️ biên nhận ở trạng thái lạ {sorted(odd)} — chưa ghi sổ cho tới khi settled")
             if unpriced:
                 log(f"[gateway] {unpriced} biên nhận đã settled nhưng gateway chưa điền số tiền — chờ, chưa ghi sổ")
-            lost = [k for k in waiting if k not in live] if live else []
+            # Mất dấu = đã rời danh sách VÀ (404 khi đọc theo id, hoặc không có request_id để đọc lại, hoặc
+            # đã theo dõi quá TRACK_TTL_SEC). Đang chờ đọc ở lượt sau (vượt trần lượt / lỗi tạm) thì giữ.
+            if rcpt["ok"]:
+                lost = [k for k, v in waiting.items() if k not in deferred and k not in listed
+                        and (expired(v) or (k not in live and (
+                            k in gone404 or not (isinstance(v, list) and len(v) >= 3 and v[2]))))]
+            else:
+                lost = []
+            over = len(waiting) - len(lost) - RECEIPTS_OPEN_KEEP
+            if over > 0:
+                lost += [k for k in waiting if k not in lost][:over]
             lost_flop = sum(_cost(v[1]) for v in (waiting.pop(k) for k in lost) if isinstance(v, list))
             if lost:
                 log(f"[gateway] ⚠️ {len(lost)} biên nhận rời phản hồi khi chưa settle — sổ có thể thiếu")
-            g["receipts_open"] = dict(list(waiting.items())[-100:])
+            g["receipts_open"] = dict(list(waiting.items())[-RECEIPTS_OPEN_KEEP:])
             # Nhớ MỌI biên nhận gateway còn trả (cắt cứng 200 mục từng có thể quên một biên nhận
             # vẫn nằm trong phản hồi -> ghi sổ lần hai) + tối đa 200 cái đã rời phản hồi.
             # Phản hồi rỗng/lỗi -> KHÔNG cắt gì (lần sau gateway trả đủ thì không ghi trùng).
