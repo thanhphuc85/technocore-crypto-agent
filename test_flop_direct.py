@@ -19,6 +19,18 @@ MINER = fg.ss58_encode(bytes([7]) * 32)
 OTHER = fg.ss58_encode(bytes([9]) * 32)
 CH = "0x" + "ab" * 32
 CH2 = "0x" + "cd" * 32
+MH = "0x" + "11" * 32
+MH2 = "0x" + "22" * 32
+
+
+def offer(miner=MINER, min_escrow=5 * 10 ** 16, model_hash=MH, forward=None, max_turns=1):
+    """Một dòng /api/session-offers đúng định dạng SDK đọc ({"offer": {...}, "minerSignature": ...})."""
+    o = {"miner": miner, "modelHash": model_hash, "precision": 0, "enclaveKey": "0x" + "00" * 32,
+         "minEscrow": str(min_escrow), "maxTurns": max_turns, "maxDuration": "600", "expiry": "99999999",
+         "nonce": "1"}
+    if forward:
+        o["forward"] = forward
+    return {"offer": o, "minerSignature": "0x" + "ee" * 64}
 
 
 @pytest.fixture(autouse=True)
@@ -65,10 +77,12 @@ def step(state, cli, explorer=None, book=True, network="testnet", **kw):
     def book_fn(amount, channel, model):
         return tm.record_direct_spend(amount, f"inference-session direct {model}", channel)
 
+    offers = kw.pop("offers", [offer()])
+    offers_fn = kw.pop("offers_fn", lambda miner, mh: offers)
     return fd.run_step(state, agent_key=KEY, now=kw.pop("now", NOW), prompt=kw.pop("prompt", "What is 2+2?"),
                        network=network, fetch_channel=lambda cid: explorer.get(cid),
                        book_fn=book_fn if book else None, runner=cli, alert=alerts.append,
-                       log=lambda m: None, **kw)
+                       log=lambda m: None, offers_fn=offers_fn, **kw)
 
 
 # --- cấu hình & chốt chặn -------------------------------------------------------------------
@@ -301,13 +315,129 @@ def test_success_without_a_valid_channel_id_is_treated_as_unknown():
 
 
 def test_daily_escrow_cap(monkeypatch):
-    monkeypatch.setenv("FLOP_DIRECT_MAX_FLOP", "0.5")
     monkeypatch.setenv("FLOP_DIRECT_MAX_PER_DAY", "1")
-    st = {}
+    st, offers = {}, [offer(min_escrow=5 * 10 ** 17)]                       # 0.5 FLOP mỗi phiên theo offer
     for i in range(3):
-        step(st, CLI(), explorer={CH: paid()}, now=NOW + i * 300)
+        step(st, CLI(), explorer={CH: paid()}, now=NOW + i * 300, offers=offers)
         st[fd.KEY]["pending"] = []
     assert st[fd.KEY]["last_outcome"] == "daily_cap" and st[fd.KEY]["day"]["escrow"] == 1.0
+
+
+# --- escrow theo offer miner công bố (escrow là chi phí) -----------------------------------------
+
+def _max_flop(cli):
+    run = cli.sessions()[0]["cmd"]
+    return run[run.index("--max-flop") + 1]
+
+
+def test_escrow_is_the_offers_min_escrow_when_not_set():
+    cli = CLI()
+    r = step({}, cli, offers=[offer(min_escrow=216 * 10 ** 15)])
+    assert r["outcome"] == "opened" and _max_flop(cli) == "0.216"
+    assert r["escrow"] == "0.216" and r["escrow_src"] == "offer"
+
+
+def test_the_cheapest_offer_of_the_model_sets_the_escrow():
+    cli = CLI()
+    step({}, cli, offers=[offer(min_escrow=3 * 10 ** 17), offer(min_escrow=2 * 10 ** 17)])
+    assert _max_flop(cli) == "0.2"
+
+
+def test_exact_raw_amount_is_preserved(monkeypatch):
+    cli = CLI()
+    step({}, cli, offers=[offer(min_escrow=123456789012345678)])
+    assert _max_flop(cli) == "0.123456789012345678"                    # đủ 18 chữ số lẻ, không làm tròn
+    monkeypatch.setenv("FLOP_DIRECT_ESCROW_CAP", "2")
+    cli = CLI()
+    step({}, cli, offers=[offer(min_escrow=1050496031746020001)])       # kênh devnet thật: escrow 1.0505
+    assert _max_flop(cli) == "1.050496031746020001"
+
+
+def test_offer_above_the_escrow_cap_is_not_bought(monkeypatch):
+    cli = CLI()
+    r = step({}, cli, offers=[offer(min_escrow=2 * 10 ** 18)])          # 2 FLOP > trần mặc định 1
+    assert r["outcome"] == "no_offer" and "FLOP_DIRECT_ESCROW_CAP" in r["reason"] and cli.calls == []
+    monkeypatch.setenv("FLOP_DIRECT_ESCROW_CAP", "3")
+    assert step({}, CLI(), offers=[offer(min_escrow=2 * 10 ** 18)])["outcome"] == "opened"
+    monkeypatch.setenv("FLOP_DIRECT_ESCROW_CAP", "50")                   # trần cứng 5 vẫn áp
+    assert step({}, CLI(), offers=[offer(min_escrow=6 * 10 ** 18)])["outcome"] == "no_offer"
+
+
+def test_no_offer_means_no_cli_call():
+    cli, st = CLI(), {}
+    r = step(st, cli, offers=[])
+    assert r["outcome"] == "no_offer" and cli.calls == [] and st[fd.KEY]["wait_until"] == NOW + fd.ERROR_BACKOFF_SEC
+
+
+@pytest.mark.parametrize("bad", [
+    offer(miner=OTHER),                                  # miner khác
+    offer(forward={"price": "1"}),                       # offer forward (không phải spot)
+    offer(max_turns=0),
+    offer(min_escrow=0),
+    offer(model_hash="0xnothex"),
+    {"offer": "garbage"}, "garbage", None,
+])
+def test_unusable_offer_rows_are_ignored(bad):
+    cli = CLI()
+    assert step({}, cli, offers=[bad])["outcome"] == "no_offer" and cli.calls == []
+
+
+def test_several_models_need_an_explicit_model_hash(monkeypatch):
+    rows = [offer(min_escrow=10 ** 17, model_hash=MH), offer(min_escrow=4 * 10 ** 17, model_hash=MH2)]
+    cli = CLI()
+    r = step({}, cli, offers=rows)
+    assert r["outcome"] == "no_offer" and "FLOP_DIRECT_MODEL_HASH" in r["reason"] and cli.calls == []
+    monkeypatch.setenv("FLOP_DIRECT_MODEL_HASH", MH2)
+    cli = CLI()
+    assert step({}, cli, offers=rows)["outcome"] == "opened" and _max_flop(cli) == "0.4"
+
+
+def test_model_hash_without_a_matching_offer(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_MODEL_HASH", MH2)
+    cli = CLI()
+    assert step({}, cli, offers=[offer(model_hash=MH)])["outcome"] == "no_offer" and cli.calls == []
+
+
+def test_bad_model_hash_setting(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_MODEL_HASH", "abc")
+    assert step({}, CLI())["outcome"] == "unconfigured"
+
+
+def test_fixed_escrow_below_the_offer_minimum_is_refused_before_the_cli(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_FLOP", "0.05")
+    cli = CLI()
+    r = step({}, cli, offers=[offer(min_escrow=2 * 10 ** 17)])
+    assert r["outcome"] == "no_offer" and "minEscrow" in r["reason"] and cli.calls == []
+
+
+def test_fixed_escrow_at_or_above_the_offer_minimum_is_used(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_FLOP", "0.3")
+    cli = CLI()
+    r = step({}, cli, offers=[offer(min_escrow=2 * 10 ** 17)])
+    assert r["outcome"] == "opened" and _max_flop(cli) == "0.3" and r["escrow_src"] == "fixed"
+
+
+def test_offer_lookup_failure_backs_off_briefly():
+    def boom(miner, mh):
+        raise RuntimeError("explorer down")
+    cli, st = CLI(), {}
+    r = step(st, cli, offers_fn=boom)
+    assert r["outcome"] == "offer_lookup_error" and cli.calls == [] and st[fd.KEY]["wait_until"] == NOW + 900
+
+
+def test_force_mode_with_fixed_escrow_does_not_need_offers(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_VIA", "force")
+    monkeypatch.setenv("FLOP_DIRECT_ALLOW_FORCE", "on")
+    monkeypatch.setenv("FLOP_DIRECT_MAX_FLOP", "0.2")
+    cli = CLI()
+    assert step({}, cli, offers=[])["outcome"] == "opened" and _max_flop(cli) == "0.2"
+
+
+def test_without_offers_or_fixed_escrow_nothing_runs():
+    cli = CLI()
+    r = fd.run_step({}, agent_key=KEY, now=NOW, prompt="p", network="testnet", fetch_channel=lambda c: None,
+                    runner=cli, log=lambda m: None)
+    assert r["outcome"] == "unconfigured" and cli.calls == []
 
 
 def test_not_enough_run_time_skips(monkeypatch):
@@ -341,7 +471,17 @@ def test_agent_step_wires_explorer_prompts_and_booking(monkeypatch):
         def raise_for_status(self):
             return None
 
-    monkeypatch.setattr(ac.requests, "get", lambda url, **k: seen.append(url) or _R(paid()))
+    def get(url, **k):
+        from urllib.parse import urlencode
+        seen.append(url + ("?" + urlencode(k["params"]) if k.get("params") else ""))
+        if "/api/session-offers" in url:
+            class _O(_R):
+                def json(self):
+                    return {"data": [offer()], "pagination": {"total": 1}}
+            return _O(None)
+        return _R(paid())
+
+    monkeypatch.setattr(ac.requests, "get", get)
     monkeypatch.setattr(ac, "kv_set", lambda *a, **k: True)
     monkeypatch.setattr(ac, "_telegram_send", lambda m: True)
     st = {}
@@ -350,6 +490,7 @@ def test_agent_step_wires_explorer_prompts_and_booking(monkeypatch):
     status = ac.direct_session_step(st, KEY, NOW + 300)
     assert status.startswith("pending") or status.startswith("opened")
     assert any(u.endswith(f"/api/compute-channels/{CH}") and "explorer.testnet.flop.network" in u for u in seen)
+    assert any("/api/session-offers?" in u and f"miner={MINER}" in u for u in seen)
     assert tm.load_ledger()["session_cumulative"]["FLOP"] == "0.021"
 
 
