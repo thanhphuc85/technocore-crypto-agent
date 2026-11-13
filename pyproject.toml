@@ -48,6 +48,7 @@ packages = ["technocore_agent"]
 py-modules = [
     "agent_cron",
     "token_manager",
+    "flop_direct",
     "flop_engage",
     "flop_faucet",
     "flop_gateway",
@@ -74,7 +75,7 @@ technocore_agent = ["py.typed"]
 # Đo MỌI module được phát hành (test_packaging giữ danh sách này khớp py-modules).
 source = [
     "agent_cron", "token_manager", "technocore_agent", "contributions_log",
-    "flop_engage", "flop_faucet", "flop_gateway", "flop_governor", "flop_kibble",
+    "flop_direct", "flop_engage", "flop_faucet", "flop_gateway", "flop_governor", "flop_kibble",
     "flop_kibble_track", "flop_miners", "flop_outcomes", "flop_pacer", "flop_radar",
     "flop_rail_x402", "flop_report", "flop_session", "flop_status_feed", "flop_tclk",
     "flop_tx", "flop_watchdog",

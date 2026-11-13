@@ -2084,7 +2084,9 @@ def persist_ledger_to_kv(private_key, did) -> None:
                 "gateway_chain_low": led.get("gateway_chain_low", {}),
                 "gateway_chain_id": led.get("gateway_chain_id", {}),
                 # Chi qua kênh không đứng tên ví mình, đã chuyển khỏi phần chờ (không tính airdrop).
-                "gateway_written_off": led.get("gateway_written_off", {})}
+                "gateway_written_off": led.get("gateway_written_off", {}),
+                # Chi MUA TRỰC TIẾP (flop_direct) đã settle đứng tên ví mình.
+                "direct_attributed": led.get("direct_attributed", {})}
         entries = (led.get("entries", []) or [])
         body = None
         # Cắt dần tới khi VỪA giới hạn. Số dư và các tổng chạy không suy từ entries, nên
@@ -5228,6 +5230,50 @@ def gateway_session_step(state: dict, private_key, now: int):
     return status, settled, last
 
 
+def direct_session_step(state: dict, private_key, now: int) -> str:
+    """Mua compute TRỰC TIẾP từ một miner (flop_direct): kênh đứng tên ví agent. Testnet tắt -> chạy tập trên
+    devnet, KHÔNG ghi sổ. Không ném lỗi; trả trạng thái cho dòng [run]."""
+    import flop_direct
+    if not flop_direct.enabled():
+        return "off"
+    import token_manager as _tm
+    try:
+        testnet = _tm.testnet_enabled()
+        network = "testnet" if testnet else "devnet"
+        g = state.get(flop_direct.KEY) if isinstance(state.get(flop_direct.KEY), dict) else {}
+        prompts = _gateway_prompts(now, "")
+        prompt = prompts[int(g.get("prompt_idx") or 0) % len(prompts)] if prompts else ""
+        explorer = _explorer_base(network)
+
+        def fetch_channel(cid):
+            r = requests.get(f"{explorer}/api/compute-channels/{cid}", headers={"User-Agent": UA}, timeout=15)
+            if r.status_code == 404:
+                return None                  # kênh force-open chưa được miner xác nhận cũng trả 404
+            r.raise_for_status()
+            d = r.json()
+            return d.get("data") if isinstance(d, dict) and isinstance(d.get("data"), dict) else d
+
+        def book(amount, channel_id, model):
+            res = _tm.record_direct_spend(amount, f"inference-session direct {model}", channel_id)
+            if res.get("outcome") == "direct_settled":
+                persist_ledger_to_kv(private_key, did_of(private_key))
+            return res
+
+        r = flop_direct.run_step(
+            state, agent_key=private_key, now=now, prompt=prompt, network=network,
+            fetch_channel=fetch_channel, book_fn=book if testnet else None,
+            deny=[d for d in PROACTIVE_DENY_DIDS if not d.startswith("did:")],
+            deadline=run_deadline(), alert=_telegram_send)
+        save_state({flop_direct.KEY: state.get(flop_direct.KEY)})
+        status = f"{r.get('outcome')}" + (f" +{r['booked_flop']:.4g}FLOP" if r.get("booked") else "")
+        print(f"[direct] {status}" + ("" if testnet else " (devnet tập, không ghi sổ)")
+              + (f" — {str(r['reason'])[:160]}" if r.get("reason") else ""))
+        return status
+    except Exception as e:
+        print(f"[direct] bỏ qua ({type(e).__name__}: {str(e)[:100]})")
+        return "error"
+
+
 def session_budget_plan(sess_fee, sess_flops, sess_max, now: int = None):
     """Kế hoạch chi phiên cho FLOP_SESSION_BUDGET=auto -> (plan, due).
 
@@ -5874,6 +5920,10 @@ def main():
                 session_status = "error"
                 print(f"[session] bỏ qua ({str(e)[:100]})")
 
+    # 3a9a) (Tùy chọn, GATED) MUA TRỰC TIẾP từ một miner — kênh đứng tên CHÍNH ví agent (flop_direct).
+    #       Mặc định TẮT (FLOP_DIRECT_ENABLED). Độc lập với đường gateway ở trên.
+    direct_status = direct_session_step(state, private_key, now)
+
     # 3a9b) Bộ canh CHI THẬT (chỉ testnet): N run liền không có phiên spent_onchain -> Telegram.
     #       Đường chi thật dựng trên giả định API chưa công bố; im lặng = mất các ngày đầu.
     if session_status != "off":
@@ -5952,7 +6002,8 @@ def main():
         f"- recap: **{recap_status}**",
         f"- kibble: **{kibble_status}**",
         f"- tclk: **{tclk_status}** · complete: **{tclk_done_status}**",
-        f"- faucet: **{faucet_status}** · session: **{session_status}** · radar: **{radar_status}**",
+        f"- faucet: **{faucet_status}** · session: **{session_status}** · direct: **{direct_status}** "
+        f"· radar: **{radar_status}**",
         f"- replies: **{replies}** · proactive: **{proactive}**",
         f"- technocore.chat 200s: **{_server_ok_count}**",
     ]
@@ -5960,7 +6011,7 @@ def main():
           f"digest={digest_status} status_feed={status_feed_status} recap={recap_status} kibble={kibble_status} "
           f"kibble_req={kibble_req_status} "
           f"tclk={tclk_status} tclk_done={tclk_done_status} tclk_offer={tclk_offer_status} "
-          f"faucet={faucet_status} session={session_status} radar={radar_status} "
+          f"faucet={faucet_status} session={session_status} direct={direct_status} radar={radar_status} "
           f"replies={replies} "
           f"proactive={proactive} server200s={_server_ok_count}")
 
