@@ -701,6 +701,9 @@ def write_off_gateway_pending(max_amount=None, token: str = None, *, path: str =
 
 
 CHAIN_RESET_READINGS = 3     # KHÔNG biết genesis: ngần này lần đọc LIÊN TIẾP thấp hơn mốc mới coi là reset
+# Lần đọc chỉ "thấp hơn mốc" khi thấp hơn QUÁ ngần này FLOP: số trong sổ đi qua phép làm tròn (float, _fmt), số chain
+# là raw chính xác — chênh cỡ 1e-14 không phải chain đọc thiếu, càng không phải mạng reset.
+CHAIN_LOW_EPS = Decimal("0.000000001")
 
 
 def confirm_gateway_attribution(onchain_total, token: str = None, *, path: str = None,
@@ -744,7 +747,7 @@ def confirm_gateway_attribution(onchain_total, token: str = None, *, path: str =
     epoch_done = _parse_amount(ep_map.get(token, _fmt(done))) or Decimal(0)
     hw = _parse_amount(hw_map.get(token, _fmt(epoch_done))) or Decimal(0)
     hw = max(hw, epoch_done)                 # chain không thể ghi ít hơn phần nó đã xác nhận trong kỳ
-    if total < hw:
+    if total < hw - CHAIN_LOW_EPS:
         reset = bool(cid and known and cid != known)
         if cid and known and cid == known:
             low_map.pop(token, None)
