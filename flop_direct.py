@@ -579,7 +579,7 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
              clock=time.time, offers_fn=None, price_fn=None, miner_cap_fn=None, balance_fn=None,
              indexer_url=None, own_channels_fn=None) -> dict:
     """Một nhịp mua trực tiếp: tối đa FLOP_DIRECT_MAX_PER_RUN phiên, xoay vòng các miner. Trả {"outcome", ...};
-    KHÔNG ném lỗi. `book_fn(amount, channel_id, model)` ghi sổ (None = chạy tập devnet, không ghi).
+    KHÔNG ném lỗi. `book_fn(amount, channel_id, model, escrow=)` ghi sổ (None = chạy tập devnet, không ghi).
     `fetch_channel(channel_id)` -> dict explorer | None. `offers_fn(miner, model_hash)` -> các dòng
     /api/session-offers của miner. `prompts` = danh sách đề (mỗi phiên một đề, xoay theo prompt_idx).
     `price_fn(model_hash)` -> FLOP/GFLOP | None; `miner_cap_fn(miner)` -> GFLOP/s đã hiệu chuẩn | None (để định cỡ
@@ -670,7 +670,13 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
         kind, amount = classify_channel(info, addr)
         if kind == "paid":
             if p.get("network") == network and book_fn and amount > 0:
-                r = book_fn(amount, p["channel"], p.get("model") or "") or {}
+                # Settle HỢP TÁC trả hết escrow (99% miner + 1% phí kiểm toán, không về ví) -> ví mất cả escrow.
+                # Settle cưỡng bức trả theo khối lượng, phần còn lại có thể hoàn -> chỉ trừ số đã trả (không đoán).
+                coop = info.get("cooperative")
+                esc = None
+                if coop is True or (coop is None and not p.get("force")):
+                    esc = _flop(info.get("escrow")) or (Decimal(str(p["max_flop"])) if p.get("max_flop") else None)
+                r = book_fn(amount, p["channel"], p.get("model") or "", escrow=esc) or {}
                 if r.get("outcome") not in ("direct_settled", "duplicate"):
                     log(f"[direct] ⚠️ không ghi được sổ cho kênh {p['channel'][:12]}… ({r.get('outcome')})")
                     keep.append(p)

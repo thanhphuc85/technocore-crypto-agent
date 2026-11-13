@@ -81,8 +81,8 @@ def step(state, cli, explorer=None, book=True, network="testnet", **kw):
     explorer = explorer if explorer is not None else {}
     alerts = kw.pop("alerts", [])
 
-    def book_fn(amount, channel, model):
-        return tm.record_direct_spend(amount, f"inference-session direct {model}", channel)
+    def book_fn(amount, channel, model, escrow=None):
+        return tm.record_direct_spend(amount, f"inference-session direct {model}", channel, escrow=escrow)
 
     offers = kw.pop("offers", [offer()])
     offers_fn = kw.pop("offers_fn", lambda miner, mh: offers)
@@ -1542,3 +1542,41 @@ def test_finalize_tx_survives_the_kv_round_trip():
     assert fd.restore(new, json.loads(json.dumps(fd.durable_view(g, level=1))))
     p = new[fd.KEY]["pending"][0]
     assert p["fin_tx"] == "0x" + "aa" * 32 and p["force"] is True and p["fin_alerted"] == NOW
+
+
+# --- số dư: ví mất CẢ escrow (1% phí kiểm toán không về ví) ---------------------------------------------------------
+
+def test_cooperative_settlement_deducts_the_whole_escrow_from_the_balance():
+    tm.credit("100")
+    st = {}
+    step(st, CLI())
+    info = {**paid(miner_paid=99 * 10 ** 15, burned=0), "escrow": str(10 ** 17), "cooperative": True}
+    step(st, CLI(session=(0, json.dumps({"ok": True, "channel": CH2}), "")), explorer={CH: info}, now=NOW + 300)
+    led = tm.load_ledger()
+    assert led["balances"]["FLOP"] == "99.9"                    # trừ escrow 0.1, không phải 0.099
+    assert led["session_cumulative"]["FLOP"] == "0.099"         # thước đo airdrop = số chain ghi cho ví
+    assert led["direct_count"]["FLOP"] == 1 and led["entries"][-1]["escrow"] == "0.1"
+
+
+def test_force_settlement_deducts_only_what_was_paid():
+    tm.credit("100")
+    st = {}
+    step(st, CLI(session=(0, json.dumps({"ok": True, "channel": CH, "cooperative": False}), "")))
+    info = {**paid(miner_paid=3 * 10 ** 15, burned=0), "escrow": str(10 ** 17), "cooperative": False}
+    step(st, CLI(session=(0, json.dumps({"ok": True, "channel": CH2}), "")), explorer={CH: info}, now=NOW + 300)
+    assert tm.load_ledger()["balances"]["FLOP"] == "99.997"
+
+
+def test_record_direct_spend_without_escrow_keeps_the_old_behaviour():
+    tm.credit("10")
+    tm.record_direct_spend("1.5", "inference-session direct m", CH)
+    assert tm.load_ledger()["balances"]["FLOP"] == "8.5"
+
+
+def test_balance_line_accounts_for_pending_direct_escrow():
+    st = {fd.KEY: {"pending": [{"channel": CH, "network": "testnet", "max_flop": "100"}]}}
+    assert "⚠️" not in ac.balance_line(st, Decimal("900"), "1000")                   # 100 đang khoá trong kênh
+    assert "100 escrow" in ac.balance_line(st, Decimal("900"), "1000")
+    assert "⚠️ lệch 25" in ac.balance_line(st, Decimal("925"), "1000")              # faucet nạp mà sổ thiếu
+    assert "⚠️" in ac.balance_line({}, Decimal("998.5"), "1000")
+    assert "⚠️" not in ac.balance_line({}, Decimal("998.5"), "1000", direct_count=200)   # phí mở 200 kênh

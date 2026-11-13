@@ -2088,7 +2088,8 @@ def persist_ledger_to_kv(private_key, did) -> None:
                 # Chi MUA TRỰC TIẾP (flop_direct) đã settle đứng tên ví mình.
                 "direct_attributed": led.get("direct_attributed", {}),
                 # Phần trực tiếp trong kỳ chain hiện tại: cổng đứng tên gateway trừ nó khỏi số chain.
-                "direct_epoch_done": led.get("direct_epoch_done", {})}
+                "direct_epoch_done": led.get("direct_epoch_done", {}),
+                "direct_count": led.get("direct_count", {})}
         entries = (led.get("entries", []) or [])
         body = None
         # Cắt dần tới khi VỪA giới hạn. Số dư và các tổng chạy không suy từ entries, nên
@@ -4783,6 +4784,23 @@ def direct_unbooked(state: dict) -> float:
     return total
 
 
+DIRECT_OPEN_FEE_FLOP = 0.01      # phí giao dịch mở kênh trực tiếp (đo devnet 2026-11-14: 0.0083), sổ không ghi
+
+
+def balance_line(state: dict, chain_bal, ledger_bal, direct_count: int = 0) -> str:
+    """Dòng "số dư ví (chain)" của báo cáo. Kênh MUA TRỰC TIẾP còn chờ ghi sổ đã khoá/trả escrow trên chain mà sổ
+    chưa trừ -> so chain với (sổ − escrow chờ), không thì báo "lệch" giả mỗi khi có phiên đang chờ. Phí mở kênh
+    (~0.01 FLOP, sổ không ghi) được nới vào ngưỡng. Lệch thật (vd faucet timeout sau khi đã cấp) vẫn báo."""
+    from decimal import Decimal
+    pend = Decimal(str(round(direct_unbooked(state), 9)))
+    led = Decimal(str(ledger_bal or 0))
+    gap = abs(Decimal(str(chain_bal)) - (led - pend))
+    tol = Decimal(1) + Decimal(str(DIRECT_OPEN_FEE_FLOP)) * max(0, int(direct_count or 0))
+    return (f"{chain_bal:.4g} FLOP · sổ ghi {ledger_bal}"
+            + (f" − {float(pend):.4g} escrow kênh trực tiếp đang chờ" if pend > 0 else "")
+            + (f" · ⚠️ lệch {float(gap):.4g}" if gap >= tol else ""))
+
+
 def direct_on_chain(state: dict) -> float:
     """Phần số chain ghi cho ví có thể là MUA TRỰC TIẾP: đã ghi sổ trong kỳ + còn chờ ghi sổ."""
     import token_manager as tm
@@ -5349,8 +5367,8 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
             d = r.json()
             return d.get("data") if isinstance(d, dict) and isinstance(d.get("data"), dict) else d
 
-        def book(amount, channel_id, model):
-            res = _tm.record_direct_spend(amount, f"inference-session direct {model}", channel_id)
+        def book(amount, channel_id, model, escrow=None):
+            res = _tm.record_direct_spend(amount, f"inference-session direct {model}", channel_id, escrow=escrow)
             if res.get("outcome") == "direct_settled":
                 persist_ledger_to_kv(private_key, did_of(private_key))
             return res
@@ -6264,10 +6282,9 @@ def main():
                                               f"{_ga['unattributed']:.4g} FLOP chờ xác nhận")
         _bal = chain_balance(state, now)
         if _tma.ledger_mode() == "testnet" and _bal is not None:
-            # Faucet timeout SAU khi đã cấp -> sổ thiếu một khoản nạp; chain là nguồn đúng.
-            _gap = abs(_bal - (_tma._parse_amount(_tma.check_balance()) or 0))
-            _mx["số dư ví (chain)"] = (f"{_bal:.4g} FLOP · sổ ghi {_tma.check_balance()}"
-                                       + (f" · ⚠️ lệch {_gap:.4g}" if _gap >= 1 else ""))
+            _mx["số dư ví (chain)"] = balance_line(state, _bal, _tma.check_balance(),
+                                                   int((_tma.load_ledger().get("direct_count") or {})
+                                                       .get(_tma.default_token(), 0)))
         if _llm_paid.get("n"):
             _mx["LLM trả phí hôm nay"] = f"{_llm_paid['n']} lần"
     except Exception:
