@@ -5449,7 +5449,7 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
 
         def own_channels(addr):
             # Kênh gần đây đứng tên ví mình (explorer ?agent=) — tìm kênh mồ côi khi CLI bị ngắt không báo id.
-            r = requests.get(f"{explorer}/api/compute-channels", params={"agent": addr, "limit": "50"},
+            r = requests.get(f"{explorer}/api/compute-channels", params={"agent": addr, "limit": "100"},
                              headers={"User-Agent": UA}, timeout=15)
             r.raise_for_status()
             d = r.json()

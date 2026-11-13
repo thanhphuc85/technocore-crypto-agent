@@ -76,7 +76,8 @@ MAXDUR_MARGIN_SEC = 120            # CLI phải sống quá maxDuration của k�
                                    # tới finalized) + gửi timeout và chờ finalized (~20 s), dư gấp đôi.
 IMPORT_RESERVE_SEC = 60            # thời gian chừa cho `keys import` (kể cả kéo image) trước phiên đầu của lượt
 MISSING_DROP_SEC = 48 * 3600       # kênh explorer 404 quá chừng này (chain reset / indexer mất) -> bỏ theo dõi, báo
-ORPHAN_WINDOW_SEC = 24 * 3600      # sau một lần "không rõ kết quả": tìm kênh của ví mình chưa theo dõi trong chừng này
+ORPHAN_WINDOW_SEC = 72 * 3600      # sau lần "không rõ kết quả" GẦN NHẤT: còn tìm kênh mồ côi chừng này; mỗi khoản giữ
+                                   # escrow cũng sống chừng này kể từ lần ngắt của CHÍNH nó
 # Settle CƯỠNG BỨC (miner không đóng hợp tác; CLI in cooperative:false): kênh nằm ở SettlementPosted tới hết cửa sổ
 # tranh chấp (computeChannel.disputeWindow = 604800 block, block 1 s) rồi phải có người gọi computeChannel.finalize
 # thì miner mới được trả và kênh mới PAID — không ai gọi thì chi tiêu không được tính và escrow nằm khoá.
@@ -479,7 +480,7 @@ def pace_limit(cfg: dict, now: int, salt: str = "") -> tuple[float, bool]:
 
 
 _DURABLE_TOP = ("day", "unknown_until", "wait_until", "wait_why", "prompt_idx", "miner_idx", "gnpt", "stats",
-                "last_attempt", "orphan_since", "done", "unknown_escrow")
+                "last_attempt", "orphan_since", "orphan_last", "done", "unknown_escrow")
 _DURABLE_MINER = ("unknown_until", "wait_until", "wait_why", "cap", "sessions")
 _PENDING_CORE = ("channel", "ts", "network", "miner", "error", "alerted", "force", "fin_tries", "fin_at", "fin_tx",
                  "fin_alerted", "max_flop")
@@ -567,6 +568,7 @@ def _mark_orphan(g: dict, now: int, network: str, max_flop) -> None:
     chain mà chưa có trong danh sách chờ; không giữ thì cổng đứng tên của gateway đọc phần chain tăng đó thành
     "gateway đã đứng tên ví mình" và xác nhận nhầm (rồi sổ vượt chain -> đọc thấp -> có thể mở kỳ chain mới nhầm)."""
     g["orphan_since"] = min(int(g.get("orphan_since") or now), now)
+    g["orphan_last"] = max(int(g.get("orphan_last") or 0), int(now))     # cửa sổ tìm gia hạn theo lần ngắt mới nhất
     held = [h for h in (g.get("unknown_escrow") or []) if isinstance(h, list) and len(h) == 3]
     try:
         esc = _flop_str(Decimal(str(max_flop))) if max_flop is not None else _flop_str(DEFAULT_ESCROW_CAP)
@@ -640,9 +642,21 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
     # nếu PAID). Tìm trong ORPHAN_WINDOW_SEC; thêm lại không trùng nhờ danh sách chờ + `done`.
     pending = [p for p in (g.get("pending") or []) if isinstance(p, dict) and p.get("channel")]
     since = int(g.get("orphan_since") or 0)
-    if since and now - since > ORPHAN_WINDOW_SEC:
+    # Mỗi khoản giữ hết hạn theo tuổi CỦA NÓ; cửa sổ tìm tính từ lần ngắt GẦN NHẤT. Trước đây cửa sổ neo ở lần ngắt
+    # ĐẦU: lần ngắt sau đó vài giờ bị xoá cả khoản giữ lẫn việc tìm khi cửa sổ cũ hết -> kênh mồ côi mất hẳn và chi
+    # on-chain của nó bị cổng gateway đọc thành "gateway đứng tên ví mình" (kiểm thử ngẫu nhiên: 84.5 FLOP).
+    held_all = [h for h in (g.get("unknown_escrow") or []) if isinstance(h, list) and len(h) == 3]
+    held_live = [h for h in held_all if now - int(h[0] or 0) <= ORPHAN_WINDOW_SEC]
+    if len(held_live) != len(held_all):
+        alert(f"⚠️ FLOP direct: {len(held_all) - len(held_live)} phiên bị ngắt không tìm thấy kênh trên explorer sau "
+              f"{ORPHAN_WINDOW_SEC // 3600}h — có thể CLI bị ngắt trước khi mở kênh; nếu không, kiểm ví {addr[:8]}… "
+              "trên explorer/RPC (chi tiêu đó chưa vào sổ).")
+        g["unknown_escrow"] = held_live
+    last = int(g.get("orphan_last") or since or 0)
+    if since and now - last > ORPHAN_WINDOW_SEC and not held_live:
         g.pop("orphan_since", None)
-        g.pop("unknown_escrow", None)            # hết cửa sổ tìm: thôi giữ (CLI bị ngắt trước khi kịp mở kênh)
+        g.pop("orphan_last", None)
+        g.pop("unknown_escrow", None)
     elif since and own_channels_fn is not None:
         try:
             rows = own_channels_fn(addr) or []
