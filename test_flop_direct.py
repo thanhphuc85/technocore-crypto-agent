@@ -404,7 +404,7 @@ def test_no_offer_means_no_cli_call():
     offer(miner=OTHER),                                  # miner khác
     offer(forward={"price": "1"}),                       # offer forward (không phải spot)
     offer(max_turns=0),
-    offer(min_escrow=0),
+    offer(min_escrow=-1),
     offer(model_hash="0xnothex"),
     {"offer": "garbage"}, "garbage", None,
 ])
@@ -969,3 +969,216 @@ def test_failed_runs_lose_nothing_over_a_day(paced_big):
         opened += r.get("opened", 0)
         assert st[fd.KEY]["day"]["escrow"] <= fd.pace_limit(fd.config()[0], t)[0] + 1e-6
     assert st[fd.KEY]["day"]["escrow"] == pytest.approx(2000.0, abs=0.5) and opened <= 30
+
+
+# --- audit 2026-11-13: 6 mục -------------------------------------------------------------------------------------
+
+def test_learning_skips_gflops_per_token_without_completion_tokens():
+    g, ms = {"gnpt": {MH: 28.0}}, {}
+    fd._learn(g, ms, {"model_hash": MH, "ptok": 80, "miner": MINER},             # CLI không trả completion_tokens
+              {"aggregateGn": str(28 * 1080), "capGflopsPerSec": 90})
+    assert g["gnpt"][MH] == 28.0 and ms[fd._mkey(MINER)]["cap"] == 90.0          # công suất vẫn học
+
+
+def test_missing_completion_tokens_does_not_stop_later_sessions(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_DAY", "2000")
+    monkeypatch.setenv("FLOP_DIRECT_MAX_TOKENS", "1024")
+    monkeypatch.setenv("FLOP_DIRECT_MODEL", "Qwen/Qwen3-14B")
+    st = {}
+    step(st, CLI(session=(0, json.dumps({"ok": True, "channel": CH}), "")), prompt=LONG,
+         miner_cap_fn=lambda m: 130.0)
+    info = {**paid(), "aggregateGn": str(28 * (len(LONG) // 4 + 1000)), "capGflopsPerSec": 130}
+    nxt = CLI(session=(0, json.dumps({"ok": True, "channel": CH2}), ""))
+    r = step(st, nxt, prompt=LONG, explorer={CH: info}, now=NOW + 300, miner_cap_fn=lambda m: 130.0)
+    run = nxt.sessions()[0]["cmd"]
+    assert r["outcome"] == "opened" and int(run[run.index("--max-tokens") + 1]) > 800
+
+
+def test_zero_min_escrow_offer_is_usable():
+    cli = CLI()
+    r = step({}, cli, offers=[offer(min_escrow=0)])
+    run = cli.sessions()[0]["cmd"]
+    assert r["outcome"] == "opened" and Decimal(run[run.index("--max-flop") + 1]) > 0
+
+
+def test_docker_containers_are_named_per_call():
+    cli = CLI()
+    step({}, cli)
+    names = [c["cmd"][c["cmd"].index("--name") + 1] for c in cli.calls]
+    assert len(names) == 2 and len(set(names)) == 2 and all(n.startswith("flop-direct-") for n in names)
+    for c in cli.calls:                                                       # tên nằm TRƯỚC image
+        assert c["cmd"].index("--name") < c["cmd"].index(fd.DEFAULT_IMAGE)
+
+
+def test_timeout_kills_the_named_container(monkeypatch):
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        if cmd[:2] == ["docker", "run"]:
+            raise fd.subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+        return fd.subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(fd.subprocess, "run", fake_run)
+    cmd = ["docker", "run", "--rm", "--name", "flop-direct-abc", "img", "session", "run"]
+    assert fd._run(cmd, {}, 5) == (None, "", "")
+    assert calls[-1] == ["docker", "kill", "flop-direct-abc"]
+    calls.clear()
+    assert fd._run(["node", "cli.js"], {}, 5) == (0, "", "")                  # lệnh cục bộ: không gọi docker kill
+    assert ["docker", "kill"] not in [c[:2] for c in calls]
+
+
+def test_balance_shrinks_the_session_to_what_the_wallet_holds(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_DAY", "2000")
+    monkeypatch.setenv("FLOP_DIRECT_MAX_TOKENS", "1024")
+    monkeypatch.setenv("FLOP_DIRECT_MODEL", "Qwen/Qwen3-14B")
+    cli = CLI()
+    r = step({}, cli, prompt=LONG, miner_cap_fn=lambda m: 130.0, balance_fn=lambda a: Decimal("40.5"))
+    run = cli.sessions()[0]["cmd"]
+    assert r["outcome"] == "opened" and Decimal(run[run.index("--max-flop") + 1]) <= Decimal(40)
+    assert Decimal(run[run.index("--max-flop") + 1]) > Decimal(38)
+
+
+def test_low_balance_stops_without_calling_the_cli_or_backing_off():
+    cli, st = CLI(), {}
+    r = step(st, cli, balance_fn=lambda a: Decimal("0.3"))                   # < phí chừa 0.5
+    assert r["outcome"] == "low_balance" and cli.calls == [] and not mst(st).get("wait_until")
+    r = step(st, CLI(), balance_fn=lambda a: Decimal("0.52"), offers=[offer(min_escrow=5 * 10 ** 16)])
+    assert r["outcome"] == "low_balance"                                       # còn 0.02 < minEscrow 0.05
+
+
+def test_balance_is_drawn_down_across_sessions_in_one_run(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_RUN", "10")
+    monkeypatch.setenv("FLOP_DIRECT_MAX_FLOP", "0.2")
+    cli = MultiCLI()
+    r = step({}, cli, balance_fn=lambda a: Decimal("1.15"))                    # 0.65 khả dụng -> 3 phiên 0.2
+    assert r["opened"] == 3 and r["outcome"] == "opened" and "số dư" in r["reason"]
+
+
+def test_balance_read_failure_keeps_the_old_behaviour():
+    def boom(addr):
+        raise RuntimeError("explorer down")
+
+    cli = CLI()
+    assert step({}, cli, balance_fn=boom)["outcome"] == "opened"
+
+
+def test_fee_reserve_is_configurable(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_FEE_RESERVE", "0")
+    assert step({}, CLI(), balance_fn=lambda a: Decimal("0.3"))["outcome"] == "opened"
+    monkeypatch.setenv("FLOP_DIRECT_FEE_RESERVE", "-1")
+    assert step({}, CLI())["outcome"] == "unconfigured"
+
+
+def _rich_state(n_ok=30, n_err=3):
+    pend = [{"channel": "0x" + f"{i:064x}", "ts": NOW, "network": "testnet", "miner": MINER, "model": "m",
+             "model_hash": MH, "ptok": 10, "completion_tokens": 100, "max_flop": "99.5", "settle_tx": "0x" + "ab" * 32}
+            for i in range(n_ok)]
+    pend += [{"channel": "0x" + f"{1000 + i:064x}", "ts": NOW, "network": "testnet", "miner": M2,
+              "error": "miner acknowledgement timed out " * 5} for i in range(n_err)]
+    return {fd.KEY: {"day": {"day": "2027-01-15", "escrow": 900.0}, "unknown_until": NOW + 99,
+                     "miners": {fd._mkey(MINER): {"wait_until": NOW + 5, "cap": 130.0, "learned_junk": 1}},
+                     "gnpt": {MH: 28.0}, "stats": {"paid": 4}, "pending": pend, "last_outcome": "opened"}}
+
+
+def test_durable_view_round_trips_the_safety_state():
+    st = _rich_state(3, 1)
+    view = fd.durable_view(st[fd.KEY])
+    new = {}
+    assert fd.restore(new, json.loads(json.dumps(view)))
+    g = new[fd.KEY]
+    assert g["day"]["escrow"] == 900.0 and g["unknown_until"] == NOW + 99 and g["gnpt"] == {MH: 28.0}
+    assert g["miners"][fd._mkey(MINER)] == {"wait_until": NOW + 5, "cap": 130.0}
+    assert [p["channel"] for p in g["pending"]] == [p["channel"] for p in st[fd.KEY]["pending"]]
+    assert "settle_tx" not in g["pending"][0] and g["pending"][-1]["error"]
+
+
+def test_restore_never_overrides_local_state():
+    st = {fd.KEY: {"day": {"day": "x", "escrow": 1.0}}}
+    assert not fd.restore(st, {"day": {"day": "x", "escrow": 999.0}}) and st[fd.KEY]["day"]["escrow"] == 1.0
+    assert not fd.restore({}, "garbage")
+
+
+def test_durable_view_trims_oldest_ok_pending_but_keeps_errors():
+    g = _rich_state(30, 3)[fd.KEY]
+    v = fd.durable_view(g, level=3)                                           # bỏ 10 kênh cũ nhất không lỗi
+    assert len(v["pending"]) == 23 and sum(1 for p in v["pending"] if p.get("error")) == 3
+    assert v["pending"][0]["channel"] == g["pending"][10]["channel"] and "model_hash" not in v["pending"][0]
+    assert "stats" not in v
+
+
+def test_agent_persists_direct_state_to_its_own_kv_key_within_the_limit(monkeypatch):
+    writes = []
+    monkeypatch.setattr(ac, "kv_set", lambda pk, did, key, val: writes.append((key, val)) or True)
+    st = _rich_state(40, 3)
+    assert ac.direct_kv_persist(st, KEY)
+    assert len(writes) == 1 and writes[0][0] == ac.DIRECT_KV_KEY and len(writes[0][1]) <= ac.KV_VALUE_MAX
+    body = ac._kv_open(writes[0][1], KEY)
+    assert body["day"]["escrow"] == 900.0 and sum(1 for p in body["pending"] if p.get("error")) == 3
+    assert ac.direct_kv_persist(st, KEY) and len(writes) == 1                # không đổi -> không ghi lại
+    st[fd.KEY]["day"]["escrow"] = 1000.0
+    assert ac.direct_kv_persist(st, KEY) and len(writes) == 2
+
+
+def test_failed_kv_write_is_retried_next_run(monkeypatch):
+    ok = [False]
+    monkeypatch.setattr(ac, "kv_set", lambda *a: ok[0])
+    st = _rich_state(2, 0)
+    assert not ac.direct_kv_persist(st, KEY) and ac.DIRECT_KV_HASH not in st
+    ok[0] = True
+    assert ac.direct_kv_persist(st, KEY) and st.get(ac.DIRECT_KV_HASH)
+
+
+def test_agent_restores_direct_state_from_kv_after_cache_loss(monkeypatch):
+    sealed = ac._kv_seal(KEY, fd.durable_view(_rich_state(2, 1)[fd.KEY]))
+    monkeypatch.setattr(ac, "kv_get", lambda key: sealed if key == ac.DIRECT_KV_KEY else None)
+    st = {}
+    assert ac.direct_kv_hydrate(st, KEY) and st[fd.KEY]["day"]["escrow"] == 900.0
+    assert len(st[fd.KEY]["pending"]) == 3
+    other = Ed25519PrivateKey.from_private_bytes(bytes([1]) * 32)           # bản ký bằng khoá khác -> bỏ
+    monkeypatch.setattr(ac, "kv_get", lambda key: ac._kv_seal(other, {"day": {"day": "x", "escrow": 0.0}}))
+    st2 = {}
+    assert not ac.direct_kv_hydrate(st2, KEY) and fd.KEY not in st2
+    monkeypatch.setattr(ac, "kv_get", lambda key: (_ for _ in ()).throw(RuntimeError("down")))
+    assert not ac.direct_kv_hydrate({}, KEY)
+
+
+def test_agent_miner_capacity_matches_other_ss58_prefixes(monkeypatch):
+    monkeypatch.setenv("FLOP_GATEWAY_PROMPTS", "Explain optimistic versus pessimistic locking in distributed databases.")
+    monkeypatch.setenv("FLOP_DIRECT_MAX_TOKENS", "1024")
+    monkeypatch.setenv("FLOP_DIRECT_MODEL", "Qwen/Qwen3-14B")
+    cli = CLI()
+    monkeypatch.setattr(fd, "_run", cli)
+    other_prefix = fg.ss58_encode(bytes([7]) * 32, prefix=0)                  # cùng ví MINER, prefix khác
+
+    class _R:
+        status_code = 200
+        text = ""
+
+        def __init__(self, data):
+            self._d = data
+
+        def json(self):
+            return self._d
+
+        def raise_for_status(self):
+            return None
+
+    def get(url, **k):
+        if "/api/session-offers" in url:
+            return _R({"data": [offer()]})
+        if url.endswith("/api/compute-channels"):
+            return _R({"data": [{"miner": other_prefix, "capGflopsPerSec": 130}]})
+        if "/api/models" in url:
+            return _R({"models": []})
+        if "/api/accounts/" in url:
+            return _R({"balance": str(10 ** 21)})
+        return _R({})
+
+    monkeypatch.setattr(ac.requests, "get", get)
+    monkeypatch.setattr(ac, "kv_set", lambda *a, **k: True)
+    monkeypatch.setattr(ac, "_telegram_send", lambda m: True)
+    assert ac.direct_session_step({}, KEY, NOW) == "opened"
+    run = cli.sessions()[0]["cmd"]
+    ptok = len(run[run.index("--prompt") + 1]) // 4
+    assert int(run[run.index("--max-tokens") + 1]) > int(10 * 300 / 28.0) - ptok    # đã dùng cap 130, không phải 10
