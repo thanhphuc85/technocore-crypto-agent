@@ -161,3 +161,43 @@ def test_operator_budget_spent_is_neutral():
         r = wd.observe(st, settled_onchain=0, status="0✓ gateway/budget_spent", spent_today_onchain=0,
                        now=now + i * 300)
         assert r["alert"] is None
+
+
+# --- bộ canh cho MUA TRỰC TIẾP (flop_direct) ---------------------------------------------------------------------
+
+def _direct(st, now, outcome, settled=0, reason="", balance=None):
+    return wd.observe_direct(st, {"outcome": outcome, "settled": settled, "reason": reason}, now=now,
+                             network="testnet", balance=balance, alert_runs=6, realert_sec=6 * 3600)
+
+
+def test_direct_low_balance_alerts_after_six_runs():
+    st = {"flop_direct": {"pending": [{"channel": "0x1"}]}}
+    for i in range(5):
+        assert _direct(st, 1000 + i * 300, "low_balance", reason="số dư khả dụng 0 FLOP")["alert"] is None
+    msg = _direct(st, 1000 + 5 * 300, "low_balance", reason="số dư khả dụng 0 FLOP", balance=0.3)["alert"]
+    assert msg and "MUA TRỰC TIẾP (testnet)" in msg and "direct/low_balance ×6" in msg
+    assert "Số dư ví (explorer): 0.3 FLOP" in msg and "kênh chờ explorer: 1" in msg and "faucet" in msg
+
+
+def test_direct_designed_waits_are_neutral():
+    st = {}
+    for i, o in enumerate(["opened", "paced", "daily_cap"] * 5):
+        assert _direct(st, 1000 + i * 300, o)["alert"] is None
+    assert not st.get(wd.DIRECT_KEY)
+
+
+def test_direct_paid_channel_resets_and_reports_recovery():
+    st = {}
+    for i in range(6):
+        _direct(st, 1000 + i * 300, "no_offer")
+    rec = _direct(st, 1000 + 7 * 300, "opened", settled=1)["recovered"]
+    assert rec and "MUA TRỰC TIẾP (testnet)" in rec and st[wd.DIRECT_KEY] == {}
+
+
+def test_direct_and_gateway_counters_are_separate():
+    st = {}
+    for i in range(6):
+        _direct(st, 1000 + i * 300, "error")
+    assert st[wd.DIRECT_KEY]["misses"] == 6 and wd.KEY not in st
+    _miss(st, 5000)
+    assert st[wd.KEY]["misses"] == 1 and st[wd.DIRECT_KEY]["misses"] == 6

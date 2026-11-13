@@ -1580,3 +1580,46 @@ def test_balance_line_accounts_for_pending_direct_escrow():
     assert "⚠️ lệch 25" in ac.balance_line(st, Decimal("925"), "1000")              # faucet nạp mà sổ thiếu
     assert "⚠️" in ac.balance_line({}, Decimal("998.5"), "1000")
     assert "⚠️" not in ac.balance_line({}, Decimal("998.5"), "1000", direct_count=200)   # phí mở 200 kênh
+
+
+# --- bộ canh chi thật cho mua trực tiếp ------------------------------------------------------------------------------
+
+def test_settled_counts_paid_channels_even_without_booking():
+    st = {}
+    step(st, CLI(), network="devnet", book=False)
+    r = step(st, CLI(session=(0, json.dumps({"ok": True, "channel": CH2}), "")), explorer={CH: paid()},
+             network="devnet", book=False, now=NOW + 300)
+    assert r["settled"] == 1 and r["booked"] == 0
+
+
+def test_agent_alerts_when_direct_buying_stalls(monkeypatch):
+    sent = []
+    monkeypatch.setattr(ac, "_telegram_send", lambda m: sent.append(m) or True)
+    st = {}
+    for i in range(6):
+        ac._DIRECT_LAST = ({"outcome": "low_balance", "settled": 0, "reason": "hết FLOP", "balance": 0.2},
+                           "testnet", "https://explorer.testnet.flop.network")
+        ac.direct_watchdog_step(st, NOW + i * 300)
+    assert len(sent) == 1 and "MUA TRỰC TIẾP (testnet)" in sent[0] and ac._DIRECT_LAST is None
+    ac.direct_watchdog_step(st, NOW + 9999)                                 # lượt không chạy bước direct: bỏ qua
+    assert len(sent) == 1
+
+
+def test_agent_direct_watchdog_is_quiet_when_disabled(monkeypatch):
+    sent = []
+    monkeypatch.setattr(ac, "_telegram_send", lambda m: sent.append(m) or True)
+    monkeypatch.setenv("FLOP_DIRECT_ENABLED", "off")
+    st = {}
+    for i in range(10):
+        ac._DIRECT_LAST = ({"outcome": "off"}, "testnet", "")
+        ac.direct_watchdog_step(st, NOW + i * 300)
+    assert sent == [] and not st.get("real_spend_watch_direct")
+
+
+def test_direct_session_step_hands_its_result_to_the_watchdog(monkeypatch):
+    monkeypatch.setattr(fd, "run_step", lambda state, **kw: {"outcome": "no_offer", "opened": 0, "settled": 0})
+    monkeypatch.setattr(ac, "kv_set", lambda *a, **k: True)
+    monkeypatch.setattr(ac, "kv_get", lambda *a, **k: None)
+    ac._DIRECT_LAST = None
+    ac.direct_session_step({}, KEY, NOW)
+    assert ac._DIRECT_LAST and ac._DIRECT_LAST[0]["outcome"] == "no_offer" and ac._DIRECT_LAST[1] == "testnet"

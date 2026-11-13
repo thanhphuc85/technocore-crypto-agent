@@ -1691,7 +1691,8 @@ _TS_DURABLE_KEYS = ("last_seq", "last_telemetry", "last_manifest", "last_digest"
                     "gateway_foreign_seen", "last_attrib_read")
 # gateway_inflight: request gateway đang treo (timeout/5xx mơ hồ) + trần ngày + cờ cấm phát lại — mất
 # Actions cache vẫn đối soát được và không tự đặt lại phanh an toàn.
-_BLOB_DURABLE_KEYS = ("weekly_samples", "last_alert_price", "testnet_radar", "gateway_inflight", "llm_paid")
+_BLOB_DURABLE_KEYS = ("weekly_samples", "last_alert_price", "testnet_radar", "gateway_inflight", "llm_paid",
+                      "real_spend_watch_direct")
 # Khóa BỘ ĐẾM cộng dồn: hợp nhất bằng MAX từng ô (đếm chỉ tăng) — KHÔNG dùng luật blob
 # "local có thì local thắng", vì state.json rỗng sau khi cache mất sẽ nuốt số đã tích.
 _COUNTER_DURABLE_KEYS = ("kibble_lifetime", "kibble_lifetime_clean")
@@ -5344,6 +5345,35 @@ def direct_kv_persist(state: dict, private_key) -> bool:
     return False
 
 
+_DIRECT_LAST = None          # (kết quả run_step, mạng, explorer) của lượt này — cho bộ canh chi thật
+
+
+def direct_watchdog_step(state: dict, now: int) -> None:
+    """Bộ canh chi thật cho MUA TRỰC TIẾP: trước đây chỉ đường gateway có bộ canh, nên bật riêng mua trực tiếp mà
+    nhiều giờ không có kênh nào PAID (ví hết FLOP, miner rút offer, mọi kênh bị hoàn...) thì im lặng. Không ném lỗi."""
+    global _DIRECT_LAST
+    last, _DIRECT_LAST = _DIRECT_LAST, None
+    if not last:
+        return
+    try:
+        import flop_direct
+        import flop_watchdog as _wd
+        if not flop_direct.enabled():
+            return
+        r, network, explorer = last
+        bal = (r or {}).get("balance")
+        w = _wd.observe_direct(state, r, now=now, network=network, balance=bal,
+                               alert_runs=int(_env_float("FLOP_REAL_SPEND_ALERT_RUNS", 6)),
+                               realert_sec=int(_env_float("FLOP_REAL_SPEND_REALERT_HOURS", 6) * 3600))
+        save_state({_wd.DIRECT_KEY: state.get(_wd.DIRECT_KEY)})
+        for _k in ("alert", "recovered"):
+            if w.get(_k):
+                print(f"[real-spend] {w[_k].splitlines()[0]}")
+                _telegram_send(w[_k])
+    except Exception as e:
+        print(f"[real-spend] bộ canh mua trực tiếp bỏ qua ({str(e)[:80]})")
+
+
 def direct_session_step(state: dict, private_key, now: int) -> str:
     """Mua compute TRỰC TIẾP từ một miner (flop_direct): kênh đứng tên ví agent. Testnet tắt -> chạy tập trên
     devnet, KHÔNG ghi sổ. Không ném lỗi; trả trạng thái cho dòng [run]."""
@@ -5470,6 +5500,8 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
             deadline=direct_deadline(), alert=_telegram_send)
         save_state({flop_direct.KEY: state.get(flop_direct.KEY)})
         direct_kv_persist(state, private_key)
+        global _DIRECT_LAST
+        _DIRECT_LAST = (r, network, explorer)
         status = (f"{r.get('outcome')}" + (f"×{r['opened']}" if r.get("opened", 0) > 1 else "")
                   + (f" +{r['booked_flop']:.4g}FLOP" if r.get("booked") else ""))
         print(f"[direct] {status}" + ("" if testnet else " (devnet tập, không ghi sổ)")
@@ -6138,6 +6170,7 @@ def main():
     # 3a9a) (Tùy chọn, GATED) MUA TRỰC TIẾP từ một miner — kênh đứng tên CHÍNH ví agent (flop_direct).
     #       Mặc định TẮT (FLOP_DIRECT_ENABLED). Độc lập với đường gateway ở trên.
     direct_status = direct_session_step(state, private_key, now)
+    direct_watchdog_step(state, now)
 
     # 3a9b) Bộ canh CHI THẬT (chỉ testnet): N run liền không có phiên spent_onchain -> Telegram.
     #       Đường chi thật dựng trên giả định API chưa công bố; im lặng = mất các ngày đầu.

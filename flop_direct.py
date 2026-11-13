@@ -599,7 +599,7 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
     alert = alert or (lambda text: None)
     plist = [p for p in (prompts if prompts is not None else [prompt]) if p]
     g = dict(state.get(KEY) or {})
-    out = {"outcome": "?", "opened": 0, "booked": 0, "booked_flop": 0.0, "sessions": []}
+    out = {"outcome": "?", "opened": 0, "booked": 0, "booked_flop": 0.0, "settled": 0, "sessions": []}
 
     def done(outcome, **kw):
         out.update(outcome=outcome, **kw)
@@ -684,6 +684,7 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
                 if r.get("outcome") == "direct_settled":
                     out["booked"] += 1
                     out["booked_flop"] += amount
+            out["settled"] += 1                        # PAID trên explorer (cả khi tập devnet, không ghi sổ)
             st = dict(g.get("stats") or {})
             st["paid"] = int(st.get("paid") or 0) + 1
             st["paid_flop"] = round(float(st.get("paid_flop") or 0) + amount, 9)
