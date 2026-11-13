@@ -23,6 +23,7 @@ Chế độ: TESTNET_ENABLED tắt -> chạy tập trên devnet, KHÔNG ghi sổ
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -58,6 +59,12 @@ MIN_TOKENS = 16
 GNPT_EMA = 0.5                       # trọng số số đo mới khi học GFLOP/token từ kênh đã settle
 _HASH_RE = re.compile(r"^0x[0-9a-fA-F]{64}$")
 DEFAULT_MAX_PER_DAY = 25.0         # FLOP escrow tối đa mỗi ngày UTC
+# TRẢI ĐỀU trong ngày (FLOP_DIRECT_PACE, mặc định bật): đến giờ h (UTC) chỉ được cam kết tối đa
+# trần_ngày × (h + 1) / cửa_sổ — đường CỘNG DỒN, không phải hạn mức từng giờ, nên lượt lỗi không làm mất phần
+# chi: lượt sau thấy chậm thì mở thêm phiên (tới FLOP_DIRECT_MAX_PER_RUN) để đuổi kịp. Cửa sổ < 24h chừa giờ
+# dự phòng cuối ngày; độ lệch ngẫu nhiên (ổn định trong một giờ) để nhịp không đều tăm tắp.
+DEFAULT_PACE_WINDOW_H = 20
+DEFAULT_PACE_JITTER_PCT = 20
 DEFAULT_TIMEOUT_SEC = 600          # CLI tự chờ hạn on-chain rồi thu hồi khi miner không xác nhận
 ERROR_BACKOFF_SEC = 3600
 UNKNOWN_HOLD_SEC = 6 * 3600        # không rõ kết quả (CLI bị ngắt): không mở kênh mới chừng này
@@ -195,6 +202,9 @@ def config() -> tuple:
            "per_run": max(1, int(_num("FLOP_DIRECT_MAX_PER_RUN", DEFAULT_MAX_PER_RUN))),
            "max_pending": max(1, int(_num("FLOP_DIRECT_MAX_PENDING", DEFAULT_MAX_PENDING))),
            "per_day": _num("FLOP_DIRECT_MAX_PER_DAY", DEFAULT_MAX_PER_DAY),
+           "pace": _env("FLOP_DIRECT_PACE").lower() not in ("off", "0", "false", "no"),
+           "pace_window": max(1.0, min(24.0, _num("FLOP_DIRECT_PACE_WINDOW_H", DEFAULT_PACE_WINDOW_H))),
+           "pace_jitter": max(0.0, min(50.0, _num("FLOP_DIRECT_PACE_JITTER_PCT", DEFAULT_PACE_JITTER_PCT))) / 100,
            "timeout": max(60, int(_num("FLOP_DIRECT_TIMEOUT_SEC", DEFAULT_TIMEOUT_SEC)))}
     return cfg, errs
 
@@ -399,6 +409,26 @@ def _learn(g: dict, ms: dict, p: dict, info: dict) -> None:
         pass
 
 
+def pace_limit(cfg: dict, now: int, salt: str = "") -> tuple[float, bool]:
+    """-> (mức escrow được cam kết TÍNH TỚI lúc `now` trong ngày UTC, đang_bị_nhịp_giới_hạn).
+
+    Đường cộng dồn trần × (giờ_đã_qua + 1) / cửa_sổ, nhân độ lệch ±jitter cố định theo (ngày, giờ, ví). Hết cửa
+    sổ (hoặc tắt nhịp) -> cả trần ngày, không lệch: phần còn thiếu luôn chi kịp trong giờ dự phòng."""
+    per_day = float(cfg["per_day"])
+    if per_day <= 0 or not cfg.get("pace", True):
+        return per_day, False
+    secs = now % 86400
+    frac = (secs / 3600 + 1) / float(cfg["pace_window"])
+    if frac >= 1:
+        return per_day, False
+    hour = time.strftime("%Y-%m-%d-%H", time.gmtime(now))
+    u = int.from_bytes(hashlib.sha256(f"flop-direct-pace|{hour}|{salt}".encode()).digest()[:8], "big") / 2 ** 64
+    frac *= 1 + float(cfg.get("pace_jitter", 0)) * (2 * u - 1)
+    if frac >= 1:
+        return per_day, False
+    return per_day * max(0.0, frac), True
+
+
 def _mkey(miner: str) -> str:
     """Khoá trạng thái theo MINER (khoá công khai hex) — cùng ví khác prefix SS58 là một miner."""
     pk = fg.account_pubkey(miner)
@@ -528,6 +558,18 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
 
     day = time.strftime("%Y-%m-%d", time.gmtime(now))
     ds = g.get("day") if isinstance(g.get("day"), dict) and g["day"].get("day") == day else {"day": day, "escrow": 0.0}
+    limit, paced = pace_limit(cfg, now, salt=addr)
+    # Khi nhịp đang giới hạn: đợi tích đủ ~một phần giờ (trần/24, ≤ trần phiên) rồi mới mở, kẻo mỗi lượt 5 phút
+    # mở một phiên vụn. Hết cửa sổ thì không còn ngưỡng này: phần còn thiếu thu phiên cho vừa.
+    chunk = min(float(cfg["escrow_cap"]), float(cfg["per_day"]) / 24) if paced else 0.0
+    cap_kind = "paced" if paced else "daily_cap"
+
+    def cap_reason():
+        if paced:
+            return (f"trải đều: đến giờ này được cam kết {limit:.4g}/{cfg['per_day']:g} FLOP, đã cam kết "
+                    f"{float(ds['escrow']):.4g} — lượt sau tiếp")
+        return f"đã cam kết {float(ds['escrow']):.4g} FLOP hôm nay, trần {cfg['per_day']:g}"
+
     offer_cache = {}
     work, password, ks = None, None, None
     last = ("idle", "")                                               # (kết quả, lý do) của lần thử cuối
@@ -601,9 +643,9 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
                     # Phần trần NGÀY còn lại cũng là trần của phiên này: thu phiên cho vừa thay vì bỏ hẳn.
                     cap_eff = cfg["escrow_cap"]
                     if cfg["per_day"] > 0:
-                        left = Decimal(str(cfg["per_day"])) - Decimal(str(ds["escrow"]))
-                        if left <= 0:
-                            last = ("daily_cap", f"đã cam kết {ds['escrow']:.4g} FLOP hôm nay, trần {cfg['per_day']:g}")
+                        left = Decimal(str(limit)) - Decimal(str(ds["escrow"]))
+                        if left <= 0 or (paced and float(left) < chunk):
+                            last = (cap_kind, cap_reason())
                             break
                         cap_eff = min(cap_eff, left)
                     plan, why = plan_session(
@@ -614,7 +656,8 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
                         margin=cfg["margin"], max_duration=info["max_duration"])
                     if plan is None:
                         if cap_eff < cfg["escrow_cap"] and "trần" in why:
-                            last = ("daily_cap", f"phần trần ngày còn lại ({_flop_str(cap_eff)} FLOP) không đủ một phiên")
+                            last = (cap_kind, f"phần trần {'tới giờ này' if paced else 'ngày'} còn lại "
+                                              f"({_flop_str(cap_eff)} FLOP) không đủ một phiên")
                             break
                         st.update(wait_until=now + ERROR_BACKOFF_SEC, wait_why="session sizing")
                         last = ("no_offer", why)
@@ -631,8 +674,8 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
                 last = ("unconfigured", "chưa có FLOP_DIRECT_MAX_FLOP và không đọc được offer để định escrow")
                 break
             per_session = float(max_flop)
-            if cfg["per_day"] > 0 and float(ds["escrow"]) + per_session > cfg["per_day"] + 1e-9:
-                last = ("daily_cap", f"đã cam kết {ds['escrow']:.4g} FLOP hôm nay, trần {cfg['per_day']:g}")
+            if cfg["per_day"] > 0 and float(ds["escrow"]) + per_session > limit + 1e-9:
+                last = (cap_kind, cap_reason())
                 break
             # Keystore tạm: nạp MỘT lần cho cả lượt.
             if work is None:
