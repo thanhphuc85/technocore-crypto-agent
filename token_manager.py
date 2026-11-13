@@ -584,7 +584,7 @@ def record_gateway_spend(amount, memo, ref: str, token: str = None, *, path: str
     return {"outcome": "gateway_settled_unverified", "amount": _fmt(amt), "ref": ref}
 
 
-def record_direct_spend(amount, memo, channel_id: str, token: str = None, *, path: str = None,
+def record_direct_spend(amount, memo, channel_id: str, token: str = None, *, escrow=None, path: str = None,
                         log=print) -> dict:
     """Ghi sổ một phiên MUA TRỰC TIẾP đã settle (flop_direct): kênh compute đứng tên CHÍNH ví agent, explorer
     finalized báo PAID. Chain đã xác nhận đứng tên ví mình, nên vào thẳng thước đo airdrop
@@ -593,7 +593,11 @@ def record_direct_spend(amount, memo, channel_id: str, token: str = None, *, pat
     Cộng cả vào `gateway_epoch_done` (phần chi on-chain của ví ĐÃ có trong sổ, theo kỳ chain): cổng đứng tên
     của đường gateway coi "chain ghi cho ví nhiều hơn sổ" là chi gateway đã được xác nhận; thiếu bước này
     thì chi trực tiếp sẽ bị dùng để xác nhận NHẦM khoản gateway đang chờ. Chỉ ở chế độ testnet; chống ghi
-    trùng theo id kênh (bền qua KV)."""
+    trùng theo id kênh (bền qua KV).
+
+    `amount` = minerPaid + burned (đúng số explorer cộng vào chi tiêu của ví — thước đo airdrop). `escrow` = số
+    ví THỰC MẤT: settle hợp tác trả hết escrow, 1% thành phí kiểm toán (computeChannel.AuditFeeEarmarked,
+    auditFeeSplitPpm = 10000) không về ví. Số dư trừ theo escrow, nếu không sổ cao hơn chain 1% mỗi phiên."""
     token = (token or default_token())
     amt = _parse_amount(amount)
     if ledger_mode() != "testnet":
@@ -606,14 +610,21 @@ def record_direct_spend(amount, memo, channel_id: str, token: str = None, *, pat
     if h in refs:
         return {"outcome": "duplicate", "reason": f"kênh {str(channel_id)[:18]} đã ghi sổ"}
     state["gateway_refs"] = (refs + [h])[-GATEWAY_REFS_KEEP:]
+    esc = _parse_amount(escrow) if escrow is not None else None
+    outflow = max(amt, esc) if esc is not None and esc > 0 else amt
     cur = _parse_amount(state["balances"].get(token, "0")) or Decimal(0)
-    new_bal = _fmt(max(Decimal(0), cur - amt))
+    new_bal = _fmt(max(Decimal(0), cur - outflow))
     state["balances"][token] = new_bal
-    state["entries"].append({
+    entry = {
         "kind": "spend", "token": token, "amount": _fmt(amt), "memo": memo, "mode": "testnet",
         "balance_after": new_bal, "ref": str(channel_id)[:80], "via": "direct", "attribution": "onchain",
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    })
+    }
+    if outflow != amt:
+        entry["escrow"] = _fmt(outflow)
+    state["entries"].append(entry)
+    dc = state.setdefault("direct_count", {})
+    dc[token] = int(dc.get(token, 0)) + 1
     _accrue_cumulative(state, token, amt)
     _accrue_day(state, token, amt)
     _accrue_session(state, token, amt)
