@@ -700,6 +700,11 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
             if _CHANNEL_RE.match(ch):
                 g["pending"] = g["pending"] + [{"channel": ch, "ts": now, "network": network, "miner": m["miner"],
                                                 "model": m["model"], "error": msg[:120]}]
+            elif err.get("ok") is False and not ("outcome unknown" in msg.lower() or "recovery failed" in msg.lower()):
+                # CLI từ chối RÕ RÀNG trước khi có kênh (vd. ví thiếu FLOP) -> không khoá đồng nào: trả lại phần đã giữ
+                # trong trần ngày, kẻo vài lần lỗi "ăn" hết trần dù chưa chi gì. Mơ hồ (quá giờ/không JSON) thì giữ.
+                ds = {"day": day, "escrow": round(max(0.0, float(ds["escrow"]) - per_session), 9)}
+                g["day"] = ds
             if "unknown option" in msg.lower() or "unknown command" in msg.lower():
                 g.update(wait_until=now + UNSUPPORTED_BACKOFF_SEC, wait_why="CLI unsupported option")
                 alert(f"⛔ FLOP direct: CLI không nhận tuỳ chọn ({msg[:120]}) — dừng 24h, kiểm phiên bản image/CLI.")
