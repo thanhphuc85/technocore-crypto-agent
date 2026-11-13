@@ -4782,6 +4782,13 @@ def direct_unbooked(state: dict) -> float:
             total += max(0.0, float(p.get("max_flop")))
         except (TypeError, ValueError):
             total += float(flop_direct.DEFAULT_ESCROW_CAP)
+    # Phiên không rõ kết quả (CLI bị ngắt...) chưa tìm ra kênh: kênh có thể đã settle trên chain mà chưa có ở trên.
+    for h in (state.get(flop_direct.KEY) or {}).get("unknown_escrow") or []:
+        try:
+            if isinstance(h, list) and len(h) == 3 and (not h[1] or h[1] == net):
+                total += max(0.0, float(h[2]))
+        except (TypeError, ValueError):
+            total += float(flop_direct.DEFAULT_ESCROW_CAP)
     return total
 
 

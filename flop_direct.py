@@ -423,7 +423,9 @@ def classify_channel(info, addr: str):
             raw = int(str(info.get("minerPaid") or 0)) + int(str(info.get("burned") or 0))
         except ValueError:
             return "open", 0.0
-        return "paid", raw / 1e18
+        # Decimal CHÍNH XÁC từ số raw: float (raw / 1e18) cộng dồn trong sổ lệch chain cỡ 1e-14 — đủ để mọi lần đọc
+        # chain "thấp hơn mốc" khi đã ghi sổ hết, 3 lần là mở kỳ chain mới nhầm (cổng gateway mở toang).
+        return "paid", Decimal(raw) / Decimal(10) ** 18
     if final and (pay == "REFUNDED" or status in ("refunded", "expired", "timedout", "timed_out")):
         return "refunded", 0.0
     if final and status in ("settled", "closed"):
@@ -477,7 +479,7 @@ def pace_limit(cfg: dict, now: int, salt: str = "") -> tuple[float, bool]:
 
 
 _DURABLE_TOP = ("day", "unknown_until", "wait_until", "wait_why", "prompt_idx", "miner_idx", "gnpt", "stats",
-                "last_attempt", "orphan_since", "done")
+                "last_attempt", "orphan_since", "done", "unknown_escrow")
 _DURABLE_MINER = ("unknown_until", "wait_until", "wait_why", "cap", "sessions")
 _PENDING_CORE = ("channel", "ts", "network", "miner", "error", "alerted", "force", "fin_tries", "fin_at", "fin_tx",
                  "fin_alerted")
@@ -559,6 +561,20 @@ def finalize_channels(channels, *, wkey, addr: str, network: str, runner, log=pr
     return res
 
 
+def _mark_orphan(g: dict, now: int, network: str, max_flop) -> None:
+    """Phiên kết thúc KHÔNG RÕ có mở kênh hay không (CLI bị ngắt, thành công mà thiếu id, "outcome unknown"): bật tìm
+    kênh mồ côi và GIỮ escrow của phiên đó trong `unknown_escrow` = [[ts, mạng, escrow]]. Kênh có thể đã settle trên
+    chain mà chưa có trong danh sách chờ; không giữ thì cổng đứng tên của gateway đọc phần chain tăng đó thành
+    "gateway đã đứng tên ví mình" và xác nhận nhầm (rồi sổ vượt chain -> đọc thấp -> có thể mở kỳ chain mới nhầm)."""
+    g["orphan_since"] = min(int(g.get("orphan_since") or now), now)
+    held = [h for h in (g.get("unknown_escrow") or []) if isinstance(h, list) and len(h) == 3]
+    try:
+        esc = _flop_str(Decimal(str(max_flop))) if max_flop is not None else _flop_str(DEFAULT_ESCROW_CAP)
+    except (InvalidOperation, ValueError):
+        esc = _flop_str(DEFAULT_ESCROW_CAP)
+    g["unknown_escrow"] = (held + [[int(now), network, esc]])[-20:]
+
+
 def _short(cid: str) -> str:
     return str(cid or "")[:18].lower()
 
@@ -626,6 +642,7 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
     since = int(g.get("orphan_since") or 0)
     if since and now - since > ORPHAN_WINDOW_SEC:
         g.pop("orphan_since", None)
+        g.pop("unknown_escrow", None)            # hết cửa sổ tìm: thôi giữ (CLI bị ngắt trước khi kịp mở kênh)
     elif since and own_channels_fn is not None:
         try:
             rows = own_channels_fn(addr) or []
@@ -643,9 +660,20 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
                 continue
             if r.get("agent") and not fg.same_account(r.get("agent"), addr):
                 continue
-            pending.append({"channel": cid.lower(), "ts": opened or now, "network": network,
-                            "miner": str(r.get("miner") or ""), "error": "mồ côi (CLI bị ngắt, tìm lại qua explorer)"})
+            rec = {"channel": cid.lower(), "ts": opened or now, "network": network,
+                   "miner": str(r.get("miner") or ""), "error": "mồ côi (CLI bị ngắt, tìm lại qua explorer)"}
+            esc = _flop(r.get("escrow"))
+            if esc:
+                rec["max_flop"] = _flop_str(esc)       # escrow THẬT (cổng gateway trừ đúng số, không lấy trần)
+            pending.append(rec)
             known.add(_short(cid))
+            # Kênh đã tìm thấy thay cho một khoản giữ "không rõ kết quả" (cũ nhất, cùng mạng).
+            held = [h for h in (g.get("unknown_escrow") or []) if isinstance(h, list) and len(h) == 3]
+            for j, h in enumerate(held):
+                if h[1] == network:
+                    del held[j]
+                    break
+            g["unknown_escrow"] = held
             alert(f"⚠️ FLOP direct: tìm thấy kênh {cid[:18]}… của ví mình mà CLI không báo id (lượt bị ngắt) — đã đưa vào "
                   "theo dõi; PAID thì ghi sổ, còn mở thì chặn miner đó tới khi xong.")
 
@@ -683,15 +711,15 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
                     continue
                 if r.get("outcome") == "direct_settled":
                     out["booked"] += 1
-                    out["booked_flop"] += amount
+                    out["booked_flop"] += float(amount)
             out["settled"] += 1                        # PAID trên explorer (cả khi tập devnet, không ghi sổ)
             st = dict(g.get("stats") or {})
             st["paid"] = int(st.get("paid") or 0) + 1
-            st["paid_flop"] = round(float(st.get("paid_flop") or 0) + amount, 9)
+            st["paid_flop"] = round(float(st.get("paid_flop") or 0) + float(amount), 9)
             g["stats"] = st
             _learn(g, ms, p, info)
             _mark_done(g, p["channel"])
-            log(f"[direct] kênh {p['channel'][:12]}… đã settle đứng tên ví mình: {amount:.6g} FLOP"
+            log(f"[direct] kênh {p['channel'][:12]}… đã settle đứng tên ví mình: {float(amount):.6g} FLOP"
                 + ("" if book_fn else " (devnet tập, không ghi sổ)"))
         elif kind == "refunded":
             st = dict(g.get("stats") or {})
@@ -1002,7 +1030,7 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
             rc, so, se = runner(cmd, env_run, sess_timeout)
             if rc is None:
                 st["unknown_until"] = now + UNKNOWN_HOLD_SEC
-                g["orphan_since"] = min(int(g.get("orphan_since") or now), now)
+                _mark_orphan(g, now, network, max_flop)
                 alert(f"⚠️ FLOP direct: phiên với miner {m['miner'][:8]}… quá {sess_timeout}s và bị ngắt — có thể đã mở "
                       f"kênh mà không biết id. Ngừng miner này {UNKNOWN_HOLD_SEC // 3600}h; kiểm ví {addr[:8]}… trên "
                       "explorer/RPC.")
@@ -1013,7 +1041,7 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
                 ch = str(res.get("channel") or "")
                 if not _CHANNEL_RE.match(ch):
                     st["unknown_until"] = now + UNKNOWN_HOLD_SEC
-                    g["orphan_since"] = min(int(g.get("orphan_since") or now), now)
+                    _mark_orphan(g, now, network, max_flop)
                     alert(f"⚠️ FLOP direct: CLI báo thành công nhưng không trả id kênh hợp lệ (miner {m['miner'][:8]}…) — "
                           "ngừng miner này, kiểm tay.")
                     last = ("unknown_outcome", "thành công nhưng thiếu id kênh")
@@ -1058,7 +1086,7 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
             if "outcome unknown" in msg.lower() or "recovery failed" in msg.lower():
                 st["unknown_until"] = now + UNKNOWN_HOLD_SEC
                 if not _CHANNEL_RE.match(ch):
-                    g["orphan_since"] = min(int(g.get("orphan_since") or now), now)
+                    _mark_orphan(g, now, network, max_flop)
                 alert(f"⚠️ FLOP direct (miner {m['miner'][:8]}…): {msg[:160]}" + (f" — kênh {ch[:18]}…" if ch else ""))
                 last = ("unknown_outcome", msg)
                 continue

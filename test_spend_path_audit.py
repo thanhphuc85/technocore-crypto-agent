@@ -1669,3 +1669,47 @@ def test_gateway_ledger_save_failure_keeps_the_receipt_unseen(monkeypatch):
 def test_record_gateway_spend_reports_a_failed_save(monkeypatch):
     monkeypatch.setattr(tm, "_save_ledger", lambda state, path=None: False)
     assert tm.record_gateway_spend("1", "inference-session gateway m", "x")["outcome"] == "save_failed"
+
+
+# --- làm tròn: sổ không được vượt chain vì float; kênh mồ côi giữ chỗ cho cổng gateway ------------------------------
+
+def test_direct_amounts_are_exact_decimals():
+    import flop_direct
+    kind, amt = flop_direct.classify_channel(
+        {"status": "settled", "paymentStatus": "PAID", "observationHead": "finalized",
+         "minerPaid": "98956627838640000001", "burned": "0"}, "")
+    assert kind == "paid" and amt == Decimal("98.956627838640000001")
+
+
+def test_rounding_noise_is_not_a_low_reading_and_never_resets_the_chain_epoch():
+    tm.credit("1000")
+    tm.record_gateway_spend("19.5", "inference-session gateway m", "g-1")
+    for i, a in enumerate((98.993664, 98.956627838640, 98.956627838640)):    # float như trước khi sửa
+        tm.record_direct_spend(a, "inference-session direct m", "0x" + f"{100 + i:064x}")
+    exact = Decimal("296.906919677279991888")                                # raw chain chia 1e18
+    for k in range(5):
+        r = tm.confirm_gateway_attribution(exact, read_at=NOW + k)
+        assert r["outcome"] in ("no_change", "confirmed") and r["outcome"] != "low_reading"
+    led = tm.load_ledger()
+    assert led["gateway_unattributed"]["FLOP"] == "19.5" and not led.get("gateway_chain_low", {}).get("FLOP")
+    assert tm.direct_epoch_done() > 0                                         # kỳ không bị mở lại
+
+
+def test_real_low_readings_still_detect_a_reset():
+    tm.credit("1000")
+    tm.record_direct_spend("100", "inference-session direct m", "0x" + f"{200:064x}")
+    tm.confirm_gateway_attribution("100", read_at=NOW)
+    outs = [tm.confirm_gateway_attribution("5", read_at=NOW + k)["outcome"] for k in range(1, 4)]
+    assert outs[:2] == ["low_reading", "low_reading"] and tm.direct_epoch_done() == Decimal("0")
+
+
+def test_unknown_outcome_holds_its_escrow_for_the_gateway_gate():
+    import flop_direct
+    st = {flop_direct.KEY: {}}
+    flop_direct._mark_orphan(st[flop_direct.KEY], NOW, "testnet", "99.5")
+    assert st[flop_direct.KEY]["orphan_since"] == NOW
+    assert ac.direct_unbooked(st) == pytest.approx(99.5)
+    flop_direct._mark_orphan(st[flop_direct.KEY], NOW + 10, "devnet", "50")   # mạng khác: không tính
+    assert ac.direct_unbooked(st) == pytest.approx(99.5)
+    view = flop_direct.durable_view(st[flop_direct.KEY])
+    assert view["unknown_escrow"][0][2] == "99.5"                             # sao lưu KV

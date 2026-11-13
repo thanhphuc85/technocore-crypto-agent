@@ -1623,3 +1623,24 @@ def test_direct_session_step_hands_its_result_to_the_watchdog(monkeypatch):
     ac._DIRECT_LAST = None
     ac.direct_session_step({}, KEY, NOW)
     assert ac._DIRECT_LAST and ac._DIRECT_LAST[0]["outcome"] == "no_offer" and ac._DIRECT_LAST[1] == "testnet"
+
+
+# --- kênh mồ côi: giữ escrow cho cổng gateway tới khi tìm ra kênh ----------------------------------------------------
+
+def test_cli_timeout_holds_escrow_until_the_orphan_is_found():
+    st = {}
+    step(st, CLI(session=(None, "", "")))
+    held = st[fd.KEY]["unknown_escrow"]
+    assert len(held) == 1 and held[0][1] == "testnet" and Decimal(held[0][2]) > 0
+    rows = [{"channelId": CH, "agent": ADDR, "miner": MINER, "openedAt": (NOW + 5) * 1000, "escrow": str(4 * 10 ** 16)}]
+    step(st, CLI(session=(0, json.dumps({"ok": True, "channel": CH2}), "")), now=NOW + 300,
+         own_channels_fn=lambda a: rows)
+    rec = [p for p in st[fd.KEY]["pending"] if p["channel"] == CH][0]
+    assert rec["max_flop"] == "0.04" and st[fd.KEY]["unknown_escrow"] == []   # escrow thật thay khoản giữ
+
+
+def test_orphan_hold_is_dropped_with_the_search_window():
+    st = {}
+    step(st, CLI(session=(None, "", "")))
+    step(st, CLI(), now=NOW + fd.ORPHAN_WINDOW_SEC + 1, own_channels_fn=lambda a: [])
+    assert "unknown_escrow" not in st[fd.KEY] and "orphan_since" not in st[fd.KEY]

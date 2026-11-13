@@ -19,8 +19,12 @@ MH = "0x" + "11" * 32
 RAW = 10 ** 18
 
 
-@pytest.mark.parametrize("gateway_own", [False, True])
-def test_gateway_and_direct_together_over_many_runs(monkeypatch, tmp_path, gateway_own):
+@pytest.mark.parametrize("gateway_own,scenario", [(False, "normal"), (True, "normal"), (False, "cli_timeout")])
+def test_gateway_and_direct_together_over_many_runs(monkeypatch, tmp_path, gateway_own, scenario):
+    """cli_timeout: lượt 3 CLI bị ngắt sau khi kênh đã settle trên chain (agent không biết id) — kênh mồ côi phải
+    được tìm lại và ghi sổ, và phần chain tăng đó KHÔNG được đọc thành gateway đứng tên ví mình. Sau đó miner bị giữ
+    6 giờ nên mọi kênh đã ghi sổ: sổ = chain đến từng đơn vị raw — trước đây float làm sổ vượt chain ~1e-14 và 3 lần
+    đọc "thấp hơn mốc" mở kỳ chain mới nhầm."""
     env = {"TESTNET_ENABLED": "true", "FLOP_SESSION_ENABLED": "on", "FLOP_WALLET_USE_DID": "on",
            "FLOP_FAUCET_ENABLED": "off", "FLOP_GATEWAY_PROMPTS": "Q one|Q two|Q three",
            "FLOP_GATEWAY_CALL_GAP_SEC": "0", "FLOP_GATEWAY_SKIP_PCT": "0", "FLOP_PACE_JITTER_PCT": "0",
@@ -111,20 +115,24 @@ def test_gateway_and_direct_together_over_many_runs(monkeypatch, tmp_path, gatew
     monkeypatch.setattr(ac.requests, "get", get)
 
     n = [0]
+    import hashlib
+    import time as _clock
 
     def cli(cmd, envx, timeout):
         if "import" in cmd:
             return 0, json.dumps({"ok": True, "address": addr}), ""
         esc = int(float(cmd[cmd.index("--max-flop") + 1]) * RAW)
         n[0] += 1
-        cid = "0x" + f"{n[0]:064x}"
+        cid = "0x" + hashlib.sha256(f"channel-{n[0]}".encode()).hexdigest()
         paid = esc * 99 // 100
         chain["balance"] -= esc + 8 * 10 ** 15            # escrow + phí mở kênh
         chain["spent"] += paid
         chain["channels"][cid] = {"agent": addr, "miner": MINER, "status": "settled", "paymentStatus": "PAID",
                                   "observationHead": "finalized", "minerPaid": str(paid), "burned": "0",
                                   "escrow": str(esc), "aggregateGn": "30000", "capGflopsPerSec": 130,
-                                  "cooperative": True, "openedAt": 0}
+                                  "cooperative": True, "openedAt": int(_clock.time()) * 1000}
+        if scenario == "cli_timeout" and n[0] == 3:
+            return None, "", ""                                # CLI bị ngắt: kênh đã có trên chain, agent không biết id
         return 0, json.dumps({"ok": True, "channel": cid, "completion_tokens": "900", "cooperative": True}), ""
     monkeypatch.setattr(fd, "_run", cli)
 
@@ -141,7 +149,10 @@ def test_gateway_and_direct_together_over_many_runs(monkeypatch, tmp_path, gatew
     unbooked_esc = sum(int(chain["channels"][p["channel"]]["escrow"]) for p in pend_direct) / RAW
     sess = float(led.get("session_cumulative", {}).get("FLOP", "0"))
     bal = float(led["balances"]["FLOP"])
-    assert n[0] == runs                                                     # mỗi lượt một phiên trực tiếp
+    refs = [e.get("ref") for e in led.get("entries", []) if e.get("via") == "direct"]
+    assert len(refs) == len(set(refs)) and len(refs) + len(pend_direct) == n[0]   # mọi kênh: ghi sổ đúng 1 lần / chờ
+    assert n[0] == (3 if scenario == "cli_timeout" else runs)              # timeout: miner bị giữ 6h sau lượt 3
+    assert not led.get("gateway_chain_low", {}).get("FLOP")                # không có lần "đọc thấp" nào
     if not gateway_own:
         assert abs(sess - (chain["spent"] / RAW - unbooked_paid)) < 1e-6   # thước đo airdrop = chain đã ghi sổ
     gw_spent = float(((state.get(gw.KEY) or {}).get("stats") or {}).get("spent") or 0)
