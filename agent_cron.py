@@ -5240,9 +5240,7 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
     try:
         testnet = _tm.testnet_enabled()
         network = "testnet" if testnet else "devnet"
-        g = state.get(flop_direct.KEY) if isinstance(state.get(flop_direct.KEY), dict) else {}
-        prompts = _gateway_prompts(now, "")
-        prompt = prompts[int(g.get("prompt_idx") or 0) % len(prompts)] if prompts else ""
+        prompts = _gateway_prompts(now, "")          # mỗi phiên một đề (flop_direct xoay theo prompt_idx)
         explorer = _explorer_base(network)
 
         def fetch_channel(cid):
@@ -5268,12 +5266,13 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
             return d.get("data") if isinstance(d, dict) and isinstance(d.get("data"), list) else []
 
         r = flop_direct.run_step(
-            state, agent_key=private_key, now=now, prompt=prompt, network=network,
+            state, agent_key=private_key, now=now, prompts=prompts, network=network,
             fetch_channel=fetch_channel, book_fn=book if testnet else None, offers_fn=offers,
             deny=[d for d in PROACTIVE_DENY_DIDS if not d.startswith("did:")],
             deadline=run_deadline(), alert=_telegram_send)
         save_state({flop_direct.KEY: state.get(flop_direct.KEY)})
-        status = f"{r.get('outcome')}" + (f" +{r['booked_flop']:.4g}FLOP" if r.get("booked") else "")
+        status = (f"{r.get('outcome')}" + (f"×{r['opened']}" if r.get("opened", 0) > 1 else "")
+                  + (f" +{r['booked_flop']:.4g}FLOP" if r.get("booked") else ""))
         print(f"[direct] {status}" + ("" if testnet else " (devnet tập, không ghi sổ)")
               + (f" — {str(r['reason'])[:160]}" if r.get("reason") else ""))
         return status

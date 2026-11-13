@@ -40,7 +40,7 @@ def env(monkeypatch, tmp_path):
             monkeypatch.delenv(k)
     for k, v in {"FLOP_DIRECT_ENABLED": "on", "FLOP_DIRECT_MINER": MINER,
                  "FLOP_DIRECT_ENDPOINT": "https://miner.example", "FLOP_DIRECT_MODEL": "qwen/qwen2.5-0.5b-instruct",
-                 "FLOP_WALLET_USE_DID": "on", "TESTNET_ENABLED": "true",
+                 "FLOP_WALLET_USE_DID": "on", "TESTNET_ENABLED": "true", "FLOP_DIRECT_MAX_PER_RUN": "1",
                  "TOKEN_LEDGER_FILE": str(tmp_path / "ledger.json")}.items():
         monkeypatch.setenv(k, v)
     monkeypatch.setattr(ac, "STATE_FILE", str(tmp_path / "state.json"))
@@ -68,6 +68,11 @@ class CLI:
 def paid(agent=ADDR, miner_paid=20 * 10 ** 15, burned=10 ** 15, head="finalized"):
     return {"agent": agent, "status": "settled", "paymentStatus": "PAID", "minerPaid": str(miner_paid),
             "burned": str(burned), "observationHead": head}
+
+
+def mst(state, miner=MINER):
+    """Trạng thái riêng của một miner trong state[flop_direct]."""
+    return state[fd.KEY]["miners"][fd._mkey(miner)]
 
 
 def step(state, cli, explorer=None, book=True, network="testnet", **kw):
@@ -172,7 +177,7 @@ def test_keystore_for_another_address_stops_everything():
     st = {}
     r = step(st, cli, alerts=alerts)
     assert r["outcome"] == "refused" and cli.sessions() == [] and alerts
-    assert st[fd.KEY]["wait_until"] == NOW + fd.UNSUPPORTED_BACKOFF_SEC
+    assert st[fd.KEY]["wait_until"] == NOW + fd.UNSUPPORTED_BACKOFF_SEC       # dừng CHUNG, mọi miner
 
 
 def test_local_cli_mode(monkeypatch):
@@ -230,8 +235,9 @@ def test_channel_not_in_our_name_is_never_booked():
 def test_unfinalized_paid_channel_waits():
     st = {}
     step(st, CLI())
-    r = step(st, CLI(), explorer={CH: paid(head="best")}, now=NOW + 300)
-    assert r["outcome"] == "pending" and r["booked"] == 0
+    nxt = CLI(session=(0, json.dumps({"ok": True, "channel": CH2}), ""))
+    r = step(st, nxt, explorer={CH: paid(head="best")}, now=NOW + 300)
+    assert r["booked"] == 0 and CH in [p["channel"] for p in st[fd.KEY]["pending"]]
 
 
 def test_refunded_channel_is_dropped_with_zero_spend():
@@ -256,14 +262,36 @@ def test_the_same_channel_is_booked_once_even_after_state_loss():
 
 # --- không chồng kênh, quá giờ, lỗi ----------------------------------------------------------
 
-def test_an_unfinished_channel_blocks_a_new_one_and_alerts_once_when_old():
+def test_a_settled_channel_awaiting_the_explorer_does_not_block_and_alerts_once_when_old():
     st, alerts = {}, []
-    step(st, CLI())
+    step(st, CLI())                                                    # CLI báo settle; explorer chưa có
+    cli = CLI(session=(0, json.dumps({"ok": True, "channel": CH2}), ""))
+    assert step(st, cli, now=NOW + 300)["outcome"] == "opened"         # không chặn phiên mới
+    idle = CLI()
+    st[fd.KEY]["miners"][fd._mkey(MINER)]["wait_until"] = NOW + 10 ** 6   # chỉ để không mở thêm
+    step(st, idle, now=NOW + fd.PENDING_ALERT_SEC + 10, alerts=alerts)
+    step(st, idle, now=NOW + fd.PENDING_ALERT_SEC + 400, alerts=alerts)
+    assert len(alerts) == 2 and all("khoá" in a for a in alerts)        # mỗi kênh báo đúng 1 lần
+
+
+def test_a_failed_channel_blocks_only_its_own_miner():
+    err = json.dumps({"ok": False, "code": "SESSION_FAILED", "message": "miner acknowledgement timed out",
+                      "channel": CH2})
+    st = {}
+    step(st, CLI(session=(1, "", err)))
+    mst(st)["wait_until"] = 0                                          # hết nghỉ, kênh lỗi vẫn chưa xong
     cli = CLI()
-    assert step(st, cli, now=NOW + 300)["outcome"] == "pending" and cli.calls == []
-    step(st, cli, now=NOW + fd.PENDING_ALERT_SEC + 10, alerts=alerts)
-    step(st, cli, now=NOW + fd.PENDING_ALERT_SEC + 400, alerts=alerts)
-    assert len(alerts) == 1 and "khoá" in alerts[0] and cli.calls == []
+    r = step(st, cli, now=NOW + 300)
+    assert r["outcome"] == "pending" and cli.calls == []
+
+
+def test_too_many_channels_awaiting_the_explorer_stop_new_sessions(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PENDING", "2")
+    st = {fd.KEY: {"pending": [{"channel": "0x" + f"{i:064x}", "ts": NOW, "network": "testnet", "miner": MINER}
+                               for i in range(2)]}}
+    cli = CLI()
+    r = step(st, cli)
+    assert r["outcome"] == "pending" and cli.calls == []
 
 
 def test_timeout_holds_new_sessions_and_alerts():
@@ -281,7 +309,7 @@ def test_failure_with_a_channel_is_tracked_until_resolved():
     st = {}
     r = step(st, CLI(session=(1, "", err)))
     assert r["outcome"] == "error" and st[fd.KEY]["pending"][0]["channel"] == CH2
-    assert st[fd.KEY]["wait_until"] == NOW + fd.ERROR_BACKOFF_SEC
+    assert mst(st)["wait_until"] == NOW + fd.ERROR_BACKOFF_SEC
 
 
 def test_no_offer_backs_off_without_a_channel():
@@ -298,20 +326,20 @@ def test_unknown_settlement_outcome_holds_like_a_timeout():
                       "channel": CH2})
     st, alerts = {}, []
     assert step(st, CLI(session=(1, "", err)), alerts=alerts)["outcome"] == "unknown_outcome" and alerts
-    assert st[fd.KEY]["unknown_until"] == NOW + fd.UNKNOWN_HOLD_SEC
+    assert mst(st)["unknown_until"] == NOW + fd.UNKNOWN_HOLD_SEC
 
 
 def test_unsupported_cli_option_stops_for_a_day():
     err = json.dumps({"ok": False, "code": "CLI_ERROR", "message": "error: unknown option '--via'"})
     st, alerts = {}, []
     assert step(st, CLI(session=(1, "", err)), alerts=alerts)["outcome"] == "unsupported" and alerts
-    assert st[fd.KEY]["wait_until"] == NOW + fd.UNSUPPORTED_BACKOFF_SEC
+    assert st[fd.KEY]["wait_until"] == NOW + fd.UNSUPPORTED_BACKOFF_SEC       # dừng CHUNG, mọi miner
 
 
 def test_success_without_a_valid_channel_id_is_treated_as_unknown():
     st = {}
     r = step(st, CLI(session=(0, json.dumps({"ok": True, "channel": "nope"}), "")))
-    assert r["outcome"] == "unknown_outcome" and st[fd.KEY]["unknown_until"] > NOW
+    assert r["outcome"] == "unknown_outcome" and mst(st)["unknown_until"] > NOW
 
 
 def test_daily_escrow_cap(monkeypatch):
@@ -366,7 +394,7 @@ def test_offer_above_the_escrow_cap_is_not_bought(monkeypatch):
 def test_no_offer_means_no_cli_call():
     cli, st = CLI(), {}
     r = step(st, cli, offers=[])
-    assert r["outcome"] == "no_offer" and cli.calls == [] and st[fd.KEY]["wait_until"] == NOW + fd.ERROR_BACKOFF_SEC
+    assert r["outcome"] == "no_offer" and cli.calls == [] and mst(st)["wait_until"] == NOW + fd.ERROR_BACKOFF_SEC
 
 
 @pytest.mark.parametrize("bad", [
@@ -422,7 +450,7 @@ def test_offer_lookup_failure_backs_off_briefly():
         raise RuntimeError("explorer down")
     cli, st = CLI(), {}
     r = step(st, cli, offers_fn=boom)
-    assert r["outcome"] == "offer_lookup_error" and cli.calls == [] and st[fd.KEY]["wait_until"] == NOW + 900
+    assert r["outcome"] == "offer_lookup_error" and cli.calls == [] and mst(st)["wait_until"] == NOW + 900
 
 
 def test_force_mode_with_fixed_escrow_does_not_need_offers(monkeypatch):
@@ -497,3 +525,185 @@ def test_agent_step_wires_explorer_prompts_and_booking(monkeypatch):
 def test_agent_step_is_off_by_default(monkeypatch):
     monkeypatch.delenv("FLOP_DIRECT_ENABLED")
     assert ac.direct_session_step({}, KEY, NOW) == "off"
+
+
+# --- nhiều phiên mỗi lượt + nhiều miner ------------------------------------------------------
+
+M2 = fg.ss58_encode(bytes([5]) * 32)
+M3 = fg.ss58_encode(bytes([6]) * 32)
+
+
+class MultiCLI(CLI):
+    """CLI giả: mỗi phiên một kênh mới; `by_miner` = kịch bản riêng cho từng miner (mặc định thành công)."""
+
+    def __init__(self, by_miner=None, clock=None, cost=0):
+        super().__init__()
+        self.by_miner, self.n, self.clock, self.cost = by_miner or {}, 0, clock, cost
+
+    def __call__(self, cmd, env, timeout):
+        if "session" not in cmd:
+            return super().__call__(cmd, env, timeout)
+        self.calls.append({"cmd": list(cmd), "env": dict(env), "timeout": timeout})
+        if self.clock is not None:
+            self.clock[0] += self.cost
+        miner = cmd[cmd.index("--miner") + 1]
+        if miner in self.by_miner:
+            return self.by_miner[miner]
+        self.n += 1
+        return 0, json.dumps({"ok": True, "channel": "0x" + f"{self.n:064x}", "settle_tx": "0x01"}), ""
+
+    def miners(self):
+        return [c["cmd"][c["cmd"].index("--miner") + 1] for c in self.sessions()]
+
+
+def _offers_for(*miners):
+    return lambda miner, mh: [offer(miner=miner, model_hash=mh or MH)] if miner in miners else []
+
+
+@pytest.fixture
+def three_miners(monkeypatch):
+    monkeypatch.delenv("FLOP_DIRECT_MINER")
+    monkeypatch.delenv("FLOP_DIRECT_ENDPOINT")
+    monkeypatch.setenv("FLOP_DIRECT_MINERS", f"{MINER} https://m1.example\n{M2} https://m2.example qwen/qwen3-14b; "
+                                             f"{M3} https://m3.example qwen/qwen3-8b {MH2}")
+
+
+def test_several_sessions_per_run_with_one_keystore_and_distinct_prompts(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_RUN", "4")
+    cli, st = MultiCLI(), {}
+    r = step(st, cli, prompts=["p0", "p1", "p2", "p3", "p4"])
+    assert r["outcome"] == "opened" and r["opened"] == 4 and len(st[fd.KEY]["pending"]) == 4
+    assert sum(1 for c in cli.calls if "import" in c["cmd"]) == 1         # keystore nạp MỘT lần
+    prompts = [c["cmd"][c["cmd"].index("--prompt") + 1] for c in cli.sessions()]
+    assert prompts == ["p0", "p1", "p2", "p3"]
+    step(st, MultiCLI(), prompts=["p0", "p1", "p2", "p3", "p4"], now=NOW + 300)
+    assert st[fd.KEY]["prompt_idx"] == 8
+
+
+def test_sessions_stop_when_the_run_budget_runs_out(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_RUN", "10")
+    monkeypatch.setenv("FLOP_DIRECT_TIMEOUT_SEC", "100")
+    clock = [0.0]
+    cli = MultiCLI(clock=clock, cost=100)
+    r = step({}, cli, deadline=450.0, clock=lambda: clock[0])
+    assert r["opened"] == 4 and "thời gian" in r["reason"]              # bắt đầu ở 0..300 ok; 400+130 > 450
+
+
+def test_daily_cap_stops_mid_run(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_RUN", "10")
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_DAY", "0.12")
+    st = {}
+    r = step(st, MultiCLI())                                             # offer 0.05 FLOP mỗi phiên
+    assert r["opened"] == 2 and "trần" in r["reason"] and st[fd.KEY]["day"]["escrow"] == pytest.approx(0.1)
+
+
+def test_miners_list_is_parsed_and_rotated(monkeypatch, three_miners):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_RUN", "4")
+    cli, st = MultiCLI(), {}
+    step(st, cli, offers_fn=_offers_for(MINER, M2, M3))
+    assert cli.miners() == [MINER, M2, M3, MINER]
+    s = {c["cmd"][c["cmd"].index("--miner") + 1]: c["cmd"] for c in cli.sessions()}
+    assert s[M2][s[M2].index("--endpoint") + 1] == "https://m2.example"
+    assert s[M2][s[M2].index("--model") + 1] == "qwen/qwen3-14b"
+    assert s[MINER][s[MINER].index("--model") + 1] == "qwen/qwen2.5-0.5b-instruct"   # mặc định FLOP_DIRECT_MODEL
+    cli2 = MultiCLI()
+    step(st, cli2, offers_fn=_offers_for(MINER, M2, M3), now=NOW + 300)
+    assert cli2.miners()[0] == M2                                        # lượt sau tiếp vòng xoay
+
+
+def test_miner_entry_model_hash_is_used_for_its_offers(monkeypatch, three_miners):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_RUN", "3")
+    seen = []
+
+    def offers_fn(miner, mh):
+        seen.append((miner, mh))
+        return [offer(miner=miner, model_hash=mh or MH)]
+
+    step({}, MultiCLI(), offers_fn=offers_fn)
+    assert (M3, MH2) in seen
+
+
+def test_a_miner_without_offers_is_skipped_for_the_others(monkeypatch, three_miners):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_RUN", "3")
+    cli, st = MultiCLI(), {}
+    r = step(st, cli, offers_fn=_offers_for(M2, M3))
+    assert set(cli.miners()) == {M2, M3} and MINER not in cli.miners() and r["opened"] == 3
+    assert mst(st, MINER)["wait_until"] == NOW + fd.ERROR_BACKOFF_SEC
+
+
+def test_offers_are_looked_up_once_per_miner_per_run(monkeypatch, three_miners):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_RUN", "6")
+    calls = []
+
+    def offers_fn(miner, mh):
+        calls.append(miner)
+        return [offer(miner=miner, model_hash=mh or MH)]
+
+    step({}, MultiCLI(), offers_fn=offers_fn)
+    assert sorted(calls) == sorted([MINER, M2, M3])
+
+
+def test_a_timed_out_miner_is_held_while_the_others_continue(monkeypatch, three_miners):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_RUN", "3")
+    cli, st, alerts = MultiCLI(by_miner={M2: (None, "", "")}), {}, []
+    r = step(st, cli, offers_fn=_offers_for(MINER, M2, M3), alerts=alerts)
+    assert r["opened"] == 3 and cli.miners().count(M2) == 1 and alerts
+    assert mst(st, M2)["unknown_until"] == NOW + fd.UNKNOWN_HOLD_SEC
+    cli2 = MultiCLI()
+    step(st, cli2, offers_fn=_offers_for(MINER, M2, M3), now=NOW + 300)
+    assert M2 not in cli2.miners()
+
+
+def test_a_failed_channel_blocks_only_that_miner(monkeypatch, three_miners):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_RUN", "3")
+    err = json.dumps({"ok": False, "message": "miner acknowledgement timed out", "channel": CH2})
+    st = {}
+    step(st, MultiCLI(by_miner={M3: (1, "", err)}), offers_fn=_offers_for(MINER, M2, M3))
+    for v in st[fd.KEY]["miners"].values():
+        v["wait_until"] = 0
+    cli = MultiCLI()
+    step(st, cli, offers_fn=_offers_for(MINER, M2, M3), now=NOW + 300)
+    assert M3 not in cli.miners() and set(cli.miners()) == {MINER, M2}
+
+
+def test_unsupported_option_stops_every_miner(monkeypatch, three_miners):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_RUN", "3")
+    err = json.dumps({"ok": False, "message": "error: unknown option '--via'"})
+    cli = MultiCLI(by_miner={MINER: (1, "", err)})
+    st = {}
+    r = step(st, cli, offers_fn=_offers_for(MINER, M2, M3))
+    assert r["outcome"] == "unsupported" and cli.miners() == [MINER]
+    assert step(st, MultiCLI(), offers_fn=_offers_for(MINER, M2, M3), now=NOW + 300)["outcome"] == "backoff"
+
+
+def test_own_wallet_and_denied_entries_are_dropped_but_others_used(monkeypatch):
+    monkeypatch.delenv("FLOP_DIRECT_MINER")
+    monkeypatch.delenv("FLOP_DIRECT_ENDPOINT")
+    own = fg.ss58_encode(fg._raw_pub(KEY), prefix=0)
+    monkeypatch.setenv("FLOP_DIRECT_MINERS", f"{own} https://a.example, {OTHER} https://b.example, {M2} https://c.example")
+    monkeypatch.setenv("FLOP_DIRECT_DENY_MINERS", OTHER)
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_RUN", "2")
+    cli = MultiCLI()
+    r = step({}, cli, offers_fn=_offers_for(own, OTHER, M2))
+    assert set(cli.miners()) == {M2} and r["opened"] == 2
+
+
+def test_duplicate_miner_under_another_prefix_is_listed_once(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_MINERS", f"{MINER} https://a.example; "
+                                             f"{fg.ss58_encode(bytes([7]) * 32, prefix=0)} https://b.example")
+    cfg, errs = fd.config()
+    assert errs == [] and len(cfg["miners"]) == 1 and cfg["miners"][0]["endpoint"] == "https://a.example"
+
+
+@pytest.mark.parametrize("raw,why", [
+    ("5notanaddress https://a.example", "SS58"),
+    (f"{MINER}", "cần"),
+    (f"{MINER} http://a.example", "https://"),
+    (f"{MINER} https://a.example qwen!model", "ký tự lạ"),
+    (f"{MINER} https://a.example qwen 0xnothex", "hash"),
+])
+def test_bad_miner_entries_are_reported(monkeypatch, raw, why):
+    monkeypatch.setenv("FLOP_DIRECT_MINERS", raw)
+    cli = MultiCLI()
+    r = step({}, cli)
+    assert r["outcome"] == "unconfigured" and why in r["reason"] and cli.calls == []

@@ -369,6 +369,13 @@ jobs:
           FLOP_DIRECT_ENABLED: ${{ vars.FLOP_DIRECT_ENABLED }}
           FLOP_DIRECT_MINER: ${{ vars.FLOP_DIRECT_MINER }}
           FLOP_DIRECT_ENDPOINT: ${{ vars.FLOP_DIRECT_ENDPOINT }}
+          # NHIỀU miner độc lập, xoay vòng (thay cho MINER/ENDPOINT): mỗi dòng (hoặc ';' / ',')
+          # `<SS58> <https endpoint> [model slug] [0x model hash]`.
+          FLOP_DIRECT_MINERS: ${{ vars.FLOP_DIRECT_MINERS }}
+          # Phiên tối đa mỗi lượt (mặc định 4; còn bị ngân sách thời gian của lượt chặn).
+          FLOP_DIRECT_MAX_PER_RUN: ${{ vars.FLOP_DIRECT_MAX_PER_RUN }}
+          # Kênh CLI báo đã settle mà explorer chưa ghi nhận: quá ngần này thì ngừng mở thêm (mặc định 20).
+          FLOP_DIRECT_MAX_PENDING: ${{ vars.FLOP_DIRECT_MAX_PENDING }}
           FLOP_DIRECT_MODEL: ${{ vars.FLOP_DIRECT_MODEL }}
           # Escrow = CHI PHÍ phiên (settle hợp tác trả nguyên escrow cho miner). Trống -> lấy minEscrow của offer
           # miner công bố, kẹp dưới FLOP_DIRECT_ESCROW_CAP (mặc định 1, trần cứng 5). Đặt số -> escrow cố định.
