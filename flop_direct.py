@@ -482,8 +482,8 @@ _DURABLE_TOP = ("day", "unknown_until", "wait_until", "wait_why", "prompt_idx", 
                 "last_attempt", "orphan_since", "done", "unknown_escrow")
 _DURABLE_MINER = ("unknown_until", "wait_until", "wait_why", "cap", "sessions")
 _PENDING_CORE = ("channel", "ts", "network", "miner", "error", "alerted", "force", "fin_tries", "fin_at", "fin_tx",
-                 "fin_alerted")
-_PENDING_LEARN = ("model", "model_hash", "ptok", "completion_tokens", "max_flop")
+                 "fin_alerted", "max_flop")
+_PENDING_LEARN = ("model", "model_hash", "ptok", "completion_tokens")
 
 
 def durable_view(g: dict, level: int = 0) -> dict:
@@ -726,6 +726,17 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
             st["refunded"] = int(st.get("refunded") or 0) + 1
             g["stats"] = st
             _mark_done(g, p["channel"])
+            # Escrow đã về ví: trả phần giữ trong trần NGÀY (nếu kênh mở hôm nay), kẻo miner hay hoàn kênh làm cạn trần
+            # ngày mà không chi được gì (~20 lần hoàn 100 FLOP = hết 2000). Kênh mở hôm trước: trần ngày đó đã qua.
+            today = time.strftime("%Y-%m-%d", time.gmtime(now))
+            dd = g.get("day") if isinstance(g.get("day"), dict) else {}
+            if dd.get("day") == today and time.strftime("%Y-%m-%d", time.gmtime(int(p.get("ts") or 0))) == today:
+                try:
+                    esc = Decimal(str(p["max_flop"])) if p.get("max_flop") else _flop((info or {}).get("escrow"))
+                except (InvalidOperation, ValueError):
+                    esc = None
+                if esc:
+                    g["day"] = {"day": today, "escrow": round(max(0.0, float(dd.get("escrow") or 0) - float(esc)), 9)}
             log(f"[direct] kênh {p['channel'][:12]}… đóng không trả tiền (hoàn escrow, 0 FLOP)")
         elif kind == "foreign":
             alert(f"⚠️ FLOP direct: kênh {p['channel'][:18]}… KHÔNG đứng tên ví agent theo explorer — không ghi sổ.")
@@ -1070,7 +1081,7 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
             ch = str(err.get("channel") or "")
             if _CHANNEL_RE.match(ch):
                 g["pending"] = g["pending"] + [{"channel": ch, "ts": now, "network": network, "miner": m["miner"],
-                                                "model": m["model"], "error": msg[:120]}]
+                                                "model": m["model"], "error": msg[:120], "max_flop": max_flop}]
             elif err.get("ok") is False and not ("outcome unknown" in msg.lower() or "recovery failed" in msg.lower()):
                 # CLI từ chối RÕ RÀNG trước khi có kênh (vd. ví thiếu FLOP) -> không khoá đồng nào: trả lại phần đã giữ
                 # trong trần ngày, kẻo vài lần lỗi "ăn" hết trần dù chưa chi gì. Mơ hồ (quá giờ/không JSON) thì giữ.
