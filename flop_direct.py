@@ -73,6 +73,7 @@ PENDING_ALERT_SEC = 6 * 3600       # kênh chưa xong quá chừng này -> báo 
 PENDING_KEEP = 50
 DEFAULT_MAX_PER_RUN = 4            # phiên tối đa mỗi lượt (còn bị ngân sách thời gian của lượt chặn)
 DEFAULT_MAX_PENDING = 20           # kênh CLI báo đã settle nhưng explorer chưa ghi nhận — quá chừng này thì dừng
+DEFAULT_FEE_RESERVE = Decimal("0.5")  # FLOP chừa lại cho phí giao dịch mở/settle kênh (FLOP_DIRECT_FEE_RESERVE)
 SECRET_ENV = "FLOP_DIRECT_IMPORT_SECRET"
 PASSWORD_ENV = "FLOP_DIRECT_KEYSTORE_PASSWORD"
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
@@ -192,7 +193,15 @@ def config() -> tuple:
     except (InvalidOperation, ValueError):
         errs.append("FLOP_DIRECT_PRICE_PER_GN phải là số dương (FLOP mỗi GFLOP)")
         price = None
-    cfg = {"miners": miners, "price": price,
+    try:
+        raw_fee = _env("FLOP_DIRECT_FEE_RESERVE")
+        fee_reserve = Decimal(raw_fee) if raw_fee else DEFAULT_FEE_RESERVE
+        if not fee_reserve.is_finite() or fee_reserve < 0:
+            raise InvalidOperation
+    except (InvalidOperation, ValueError):
+        errs.append("FLOP_DIRECT_FEE_RESERVE phải là số >= 0 (FLOP)")
+        fee_reserve = DEFAULT_FEE_RESERVE
+    cfg = {"miners": miners, "price": price, "fee_reserve": fee_reserve,
            "settle_target": max(30, int(_num("FLOP_DIRECT_SETTLE_TARGET_SEC", DEFAULT_SETTLE_TARGET_SEC))),
            "margin": max(0.0, min(200.0, _num("FLOP_DIRECT_MARGIN_PCT", DEFAULT_MARGIN_PCT))) / 100,
            "default_cap": max(0.1, _num("FLOP_DIRECT_DEFAULT_CAP_GFS", DEFAULT_CAP_GFS)),
@@ -210,12 +219,13 @@ def config() -> tuple:
 
 
 def _flop(raw) -> Decimal:
-    """Số raw (10^18 = 1 FLOP, chuỗi số nguyên) -> Decimal FLOP chính xác; None nếu rác."""
+    """Số raw (10^18 = 1 FLOP, chuỗi số nguyên) -> Decimal FLOP chính xác; None nếu rác hoặc âm. 0 hợp lệ
+    (offer minEscrow = 0: miner nhận mọi mức escrow — SDK chỉ đòi minEscrow <= maxFlop)."""
     try:
         v = int(str(raw))
     except (TypeError, ValueError):
         return None
-    return (Decimal(v) / Decimal(10) ** 18) if v > 0 else None
+    return (Decimal(v) / Decimal(10) ** 18) if v >= 0 else None
 
 
 def _flop_str(d: Decimal) -> str:
@@ -323,7 +333,7 @@ def plan_session(*, prompt: str, max_tokens: int, gn_per_token: float, cap_gfs: 
     return {"escrow": _flop_str(escrow), "max_tokens": tokens, "gn_est": round(gn, 3), "ptok": ptok}, ""
 
 
-def cli_command(workdir: str, env_names) -> tuple:
+def cli_command(workdir: str, env_names, name: str = None) -> tuple:
     """(lệnh gốc, đường dẫn keystore mà CLI thấy). Mặc định image Docker ghim digest; FLOP_DIRECT_CLI =
     lệnh cục bộ (vd `node /path/cli.js`) cho môi trường không có Docker. Biến môi trường chỉ truyền TÊN
     (`-e NAME`) — giá trị không bao giờ nằm trên dòng lệnh."""
@@ -332,6 +342,8 @@ def cli_command(workdir: str, env_names) -> tuple:
         return shlex.split(local), os.path.join(workdir, "keystore.json")
     image = _env("FLOP_DIRECT_IMAGE") or DEFAULT_IMAGE
     cmd = ["docker", "run", "--rm", "--network", "host", "-v", f"{workdir}:/work"]
+    if name:
+        cmd += ["--name", name]               # để giết ĐÚNG container khi hết giờ (giết `docker` không dừng nó)
     for n in env_names:
         cmd += ["-e", n]
     return cmd + [image], "/work/keystore.json"
@@ -344,6 +356,14 @@ def _run(cmd, env_extra, timeout):
                            timeout=timeout)
         return p.returncode, p.stdout or "", p.stderr or ""
     except subprocess.TimeoutExpired:
+        # Giết tiến trình `docker run` KHÔNG dừng container: phiên chạy tiếp và có thể mở/settle kênh mà agent đã
+        # coi là "không rõ kết quả". Dừng hẳn container theo tên.
+        if cmd and os.path.basename(str(cmd[0])).startswith("docker") and "--name" in cmd:
+            try:
+                subprocess.run(["docker", "kill", cmd[cmd.index("--name") + 1]], capture_output=True, text=True,
+                               timeout=30, check=False)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
         return None, "", ""
     except FileNotFoundError as e:
         return 127, "", f'{{"ok":false,"code":"CLI_NOT_FOUND","message":"{type(e).__name__}"}}'
@@ -391,9 +411,12 @@ def _learn(g: dict, ms: dict, p: dict, info: dict) -> None:
     """Học từ một kênh đã settle: GFLOP/token THẬT của model (aggregateGn / token) và công suất của miner."""
     try:
         gn = float(info.get("aggregateGn") or 0)
-        toks = int(p.get("ptok") or 0) + int(p.get("completion_tokens") or 0)
+        # CLI in completion_tokens = receipts[0].completionTokens?.toString() -> có thể VẮNG. Thiếu nó mà vẫn chia
+        # cho riêng token đề thì hệ số phình hàng chục lần (đo: 28 -> 378) và mọi phiên sau vượt trần escrow.
+        ctok = int(p.get("completion_tokens") or 0)
+        toks = int(p.get("ptok") or 0) + ctok
         mh = p.get("model_hash")
-        if gn > 0 and toks > 0 and mh:
+        if gn > 0 and ctok > 0 and mh:
             obs = gn / toks
             gm = dict(g.get("gnpt") or {})
             old = gm.get(mh)
@@ -429,6 +452,53 @@ def pace_limit(cfg: dict, now: int, salt: str = "") -> tuple[float, bool]:
     return per_day * max(0.0, frac), True
 
 
+_DURABLE_TOP = ("day", "unknown_until", "wait_until", "wait_why", "prompt_idx", "miner_idx", "gnpt", "stats",
+                "last_attempt")
+_DURABLE_MINER = ("unknown_until", "wait_until", "wait_why", "cap", "sessions")
+_PENDING_CORE = ("channel", "ts", "network", "miner", "error", "alerted")
+_PENDING_LEARN = ("model", "model_hash", "ptok", "completion_tokens", "max_flop")
+
+
+def durable_view(g: dict, level: int = 0) -> dict:
+    """Bản GỌN của state[KEY] để sao lưu lên KV (giới hạn 8192 ký tự): mất Actions cache mà thiếu nó thì quên
+    trần ngày (chi gấp đôi), kênh chờ ghi sổ, lệnh giữ 6 giờ và miner đang có kênh lỗi.
+
+    level 0: đủ trường; 1: bỏ stats + trường để học của kênh chờ; 2+: thêm việc bỏ dần kênh chờ CŨ NHẤT không lỗi
+    (kênh lỗi luôn giữ — chúng chặn miner đang có thể khoá FLOP), mỗi mức bỏ thêm 5."""
+    g = g if isinstance(g, dict) else {}
+    out = {k: g[k] for k in _DURABLE_TOP if k in g and not (level >= 1 and k == "stats")}
+    out["miners"] = {k: {f: v[f] for f in _DURABLE_MINER if f in v}
+                     for k, v in (g.get("miners") or {}).items() if isinstance(v, dict)}
+    out["miners"] = {k: v for k, v in out["miners"].items() if v}
+    fields = _PENDING_CORE + (() if level >= 1 else _PENDING_LEARN)
+    pend = []
+    for p in g.get("pending") or []:
+        if isinstance(p, dict) and p.get("channel"):
+            q = {f: p[f] for f in fields if f in p}
+            if isinstance(q.get("error"), str):
+                q["error"] = q["error"][:60]
+            pend.append(q)
+    drop = max(0, level - 1) * 5
+    if drop:
+        ok = [i for i, p in enumerate(pend) if not p.get("error")]
+        gone = set(ok[:drop])
+        pend = [p for i, p in enumerate(pend) if i not in gone]
+    out["pending"] = pend
+    return out
+
+
+def restore(state: dict, remote) -> bool:
+    """Khôi phục state[KEY] từ bản KV khi state.json mất phần này (Actions cache mất). Chỉ khi LOCAL TRỐNG: local
+    có thì local là bản mới nhất — trộn sẽ đưa lại kênh đã ghi sổ/đã bỏ. -> True nếu đã khôi phục."""
+    if state.get(KEY) or not isinstance(remote, dict):
+        return False
+    g = {k: remote[k] for k in _DURABLE_TOP if k in remote}
+    g["miners"] = {k: dict(v) for k, v in (remote.get("miners") or {}).items() if isinstance(v, dict)}
+    g["pending"] = [dict(p) for p in (remote.get("pending") or []) if isinstance(p, dict) and p.get("channel")]
+    state[KEY] = g
+    return True
+
+
 def _mkey(miner: str) -> str:
     """Khoá trạng thái theo MINER (khoá công khai hex) — cùng ví khác prefix SS58 là một miner."""
     pk = fg.account_pubkey(miner)
@@ -437,13 +507,15 @@ def _mkey(miner: str) -> str:
 
 def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, prompt: str = None,
              prompts=None, book_fn=None, deny=(), deadline=None, runner=None, alert=None, log=print,
-             clock=time.time, offers_fn=None, price_fn=None, miner_cap_fn=None) -> dict:
+             clock=time.time, offers_fn=None, price_fn=None, miner_cap_fn=None, balance_fn=None) -> dict:
     """Một nhịp mua trực tiếp: tối đa FLOP_DIRECT_MAX_PER_RUN phiên, xoay vòng các miner. Trả {"outcome", ...};
     KHÔNG ném lỗi. `book_fn(amount, channel_id, model)` ghi sổ (None = chạy tập devnet, không ghi).
     `fetch_channel(channel_id)` -> dict explorer | None. `offers_fn(miner, model_hash)` -> các dòng
     /api/session-offers của miner. `prompts` = danh sách đề (mỗi phiên một đề, xoay theo prompt_idx).
     `price_fn(model_hash)` -> FLOP/GFLOP | None; `miner_cap_fn(miner)` -> GFLOP/s đã hiệu chuẩn | None (để định cỡ
     phiên khi chưa học được từ kênh của chính mình).
+    `balance_fn(address)` -> số dư khả dụng FLOP | None: escrow được thu cho vừa (trừ FLOP_DIRECT_FEE_RESERVE),
+    thiếu tiền thì dừng lượt (`low_balance`) thay vì gọi CLI để nhận lỗi rồi nghỉ 1 giờ.
     `alert(text)` gửi cảnh báo (Telegram). Trạng thái bền trong state[KEY].
 
     Chốt chặn theo TỪNG MINER (một miner hỏng không làm dừng miner khác): nghỉ sau lỗi / không có offer, giữ
@@ -570,6 +642,25 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
                     f"{float(ds['escrow']):.4g} — lượt sau tiếp")
         return f"đã cam kết {float(ds['escrow']):.4g} FLOP hôm nay, trần {cfg['per_day']:g}"
 
+    bal = {"read": False, "avail": None}                 # số dư đọc MỘT lần mỗi lượt, trừ dần escrow đã đưa CLI
+
+    def avail():
+        if not bal["read"]:
+            bal["read"] = True
+            if balance_fn is not None:
+                try:
+                    b = balance_fn(addr)
+                    if b is not None:
+                        bal["avail"] = Decimal(str(b)) - cfg["fee_reserve"]
+                        out["balance"] = float(b)
+                except Exception as e:
+                    log(f"[direct] đọc số dư ví lỗi ({type(e).__name__}) — không thu escrow theo số dư lượt này")
+        return bal["avail"]
+
+    def low_reason(need):
+        return (f"số dư khả dụng {_flop_str(max(Decimal(0), avail()))} FLOP (đã chừa {_flop_str(cfg['fee_reserve'])} "
+                f"phí) < {_flop_str(Decimal(str(need)))} FLOP cần cho một phiên")
+
     offer_cache = {}
     work, password, ks = None, None, None
     last = ("idle", "")                                               # (kết quả, lý do) của lần thử cuối
@@ -641,13 +732,22 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
                                             f"{_flop_str(cfg['escrow_cap'])} (FLOP_DIRECT_ESCROW_CAP)")
                         continue
                     # Phần trần NGÀY còn lại cũng là trần của phiên này: thu phiên cho vừa thay vì bỏ hẳn.
-                    cap_eff = cfg["escrow_cap"]
+                    cap_eff, limiter = cfg["escrow_cap"], None
                     if cfg["per_day"] > 0:
                         left = Decimal(str(limit)) - Decimal(str(ds["escrow"]))
                         if left <= 0 or (paced and float(left) < chunk):
                             last = (cap_kind, cap_reason())
                             break
-                        cap_eff = min(cap_eff, left)
+                        if left < cap_eff:
+                            cap_eff, limiter = left, cap_kind
+                    # Số dư ví cũng vậy: chi hết phần đang có bằng một phiên nhỏ hơn, không gọi CLI để nhận lỗi thiếu tiền.
+                    av = avail()
+                    if av is not None:
+                        if av <= 0 or av < info["min_escrow"]:
+                            last = ("low_balance", low_reason(info["min_escrow"]))
+                            break
+                        if av < cap_eff:
+                            cap_eff, limiter = av, "low_balance"
                     plan, why = plan_session(
                         prompt=prompt_i, max_tokens=cfg["max_tokens"], gn_per_token=gnpt,
                         cap_gfs=float(cap or cfg["default_cap"]), price=Decimal(str(price or DEFAULT_PRICE_PER_GN)),
@@ -655,7 +755,10 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
                         settle_target=min(cfg["settle_target"], cfg["timeout"] - 60),
                         margin=cfg["margin"], max_duration=info["max_duration"])
                     if plan is None:
-                        if cap_eff < cfg["escrow_cap"] and "trần" in why:
+                        if limiter == "low_balance" and "trần" in why:
+                            last = ("low_balance", f"số dư khả dụng {_flop_str(cap_eff)} FLOP không đủ một phiên")
+                            break
+                        if limiter and "trần" in why:
                             last = (cap_kind, f"phần trần {'tới giờ này' if paced else 'ngày'} còn lại "
                                               f"({_flop_str(cap_eff)} FLOP) không đủ một phiên")
                             break
@@ -677,11 +780,15 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
             if cfg["per_day"] > 0 and float(ds["escrow"]) + per_session > limit + 1e-9:
                 last = (cap_kind, cap_reason())
                 break
+            av = avail()
+            if av is not None and Decimal(max_flop) > av:
+                last = ("low_balance", low_reason(max_flop))
+                break
             # Keystore tạm: nạp MỘT lần cho cả lượt.
             if work is None:
                 work = tempfile.mkdtemp(prefix="flop-direct-")
                 password = secrets.token_hex(24)
-                base, ks = cli_command(work, [SECRET_ENV, PASSWORD_ENV])
+                base, ks = cli_command(work, [SECRET_ENV, PASSWORD_ENV], name=f"flop-direct-{secrets.token_hex(6)}")
                 rc, so, se = runner(base + ["--output", "agent", "keys", "import", "--secret-env", SECRET_ENV,
                                             "--out", ks, "--password-env", PASSWORD_ENV, "--type", "ed25519"],
                                     {SECRET_ENV: "0x" + fg._raw_priv(wkey).hex(), PASSWORD_ENV: password}, 120)
@@ -695,7 +802,7 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
                     alert("⛔ FLOP direct: CLI nạp khoá ra địa chỉ KHÁC ví agent — dừng mua trực tiếp 24h, kiểm phiên bản CLI.")
                     last = ("refused", "keystore không ra đúng địa chỉ ví agent")
                     break
-            base, ks = cli_command(work, [PASSWORD_ENV])
+            base, ks = cli_command(work, [PASSWORD_ENV], name=f"flop-direct-{secrets.token_hex(6)}")
             cmd = base + ["--network", network, "--keystore", ks, "--password-env", PASSWORD_ENV,
                           "--output", "agent", "session", "run", "--miner", m["miner"], "--model", m["model"],
                           "--endpoint", m["endpoint"], "--prompt", prompt_i[:4000], "--max-flop", max_flop,
@@ -703,6 +810,8 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
             ds = {"day": day, "escrow": round(float(ds["escrow"]) + per_session, 9)}
             g["day"] = ds
             g["last_attempt"] = now
+            if bal["avail"] is not None:
+                bal["avail"] -= Decimal(max_flop)
             rc, so, se = runner(cmd, {PASSWORD_ENV: password}, cfg["timeout"])
             if rc is None:
                 st["unknown_until"] = now + UNKNOWN_HOLD_SEC
@@ -748,6 +857,8 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
                 # trong trần ngày, kẻo vài lần lỗi "ăn" hết trần dù chưa chi gì. Mơ hồ (quá giờ/không JSON) thì giữ.
                 ds = {"day": day, "escrow": round(max(0.0, float(ds["escrow"]) - per_session), 9)}
                 g["day"] = ds
+                if bal["avail"] is not None:
+                    bal["avail"] += Decimal(max_flop)
             if "unknown option" in msg.lower() or "unknown command" in msg.lower():
                 g.update(wait_until=now + UNSUPPORTED_BACKOFF_SEC, wait_why="CLI unsupported option")
                 alert(f"⛔ FLOP direct: CLI không nhận tuỳ chọn ({msg[:120]}) — dừng 24h, kiểm phiên bản image/CLI.")

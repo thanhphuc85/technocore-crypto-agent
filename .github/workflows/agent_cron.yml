@@ -396,6 +396,8 @@ jobs:
           # Trải đều trần ngày (mặc định bật): đến giờ h UTC chỉ cam kết tới trần × (h+1)/WINDOW_H (mặc định 20),
           # lệch ±JITTER_PCT (mặc định 20). Cộng dồn: lượt lỗi thì lượt sau đuổi kịp. PACE=off -> chi dồn như cũ.
           FLOP_DIRECT_PACE: ${{ vars.FLOP_DIRECT_PACE }}
+          # FLOP chừa lại cho phí giao dịch khi thu escrow theo số dư ví (mặc định 0.5).
+          FLOP_DIRECT_FEE_RESERVE: ${{ vars.FLOP_DIRECT_FEE_RESERVE }}
           FLOP_DIRECT_PACE_WINDOW_H: ${{ vars.FLOP_DIRECT_PACE_WINDOW_H }}
           FLOP_DIRECT_PACE_JITTER_PCT: ${{ vars.FLOP_DIRECT_PACE_JITTER_PCT }}
           FLOP_DIRECT_TIMEOUT_SEC: ${{ vars.FLOP_DIRECT_TIMEOUT_SEC }}

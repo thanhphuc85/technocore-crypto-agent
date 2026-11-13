@@ -5230,6 +5230,55 @@ def gateway_session_step(state: dict, private_key, now: int):
     return status, settled, last
 
 
+DIRECT_KV_KEY = "flop_direct"
+DIRECT_KV_HASH = "flop_direct_kv_hash"      # dấu của bản đã đẩy lên KV gần nhất (cục bộ): không đổi thì không ghi lại
+
+
+def direct_kv_hydrate(state: dict, private_key) -> bool:
+    """state.json không có phần flop_direct (Actions cache mất / runner mới) -> lấy bản đã ký trên KV. Thiếu bước này
+    thì quên trần ngày (chi gấp đôi trong ngày), kênh chờ ghi sổ, lệnh giữ 6 giờ và miner đang có kênh lỗi."""
+    import flop_direct
+    if state.get(flop_direct.KEY):
+        return False
+    try:
+        body = _kv_open(kv_get(DIRECT_KV_KEY), private_key)
+    except Exception:
+        return False
+    if flop_direct.restore(state, body):
+        print(f"[direct] khôi phục trạng thái từ KV ({len(state[flop_direct.KEY].get('pending') or [])} kênh chờ)")
+        return True
+    return False
+
+
+def direct_kv_persist(state: dict, private_key) -> bool:
+    """Đẩy bản GỌN của flop_direct lên KV (khoá riêng, niêm phong): không chung khoá `state` vì một khoá chỉ chứa
+    8192 ký tự — vượt thì mất CẢ phần sao lưu các mốc khác. Thu gọn dần tới khi vừa; không đổi thì không ghi."""
+    import flop_direct
+    g = state.get(flop_direct.KEY)
+    if not isinstance(g, dict):
+        return False
+    full = len(g.get("pending") or [])
+    for level in range(0, 2 + (full + 4) // 5 + 1):
+        view = flop_direct.durable_view(g, level)
+        sealed = _kv_seal(private_key, view)
+        if len(sealed) <= KV_VALUE_MAX:
+            break
+    else:
+        print(f"[direct] ⚠️ trạng thái quá lớn cho KV ({len(sealed)} ký tự) — không sao lưu được")
+        return False
+    if len(view["pending"]) < full:
+        print(f"[direct] ⚠️ KV chỉ chứa {len(view['pending'])}/{full} kênh chờ (bỏ kênh cũ nhất không lỗi)")
+    digest = hashlib.sha256(json.dumps(view, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+    if state.get(DIRECT_KV_HASH) == digest:
+        return True
+    if kv_set(private_key, did_of(private_key), DIRECT_KV_KEY, sealed):
+        state[DIRECT_KV_HASH] = digest
+        save_state({DIRECT_KV_HASH: digest})
+        return True
+    print("[direct] ⚠️ đẩy trạng thái lên KV thất bại — lượt sau thử lại")
+    return False
+
+
 def direct_session_step(state: dict, private_key, now: int) -> str:
     """Mua compute TRỰC TIẾP từ một miner (flop_direct): kênh đứng tên ví agent. Testnet tắt -> chạy tập trên
     devnet, KHÔNG ghi sổ. Không ném lỗi; trả trạng thái cho dòng [run]."""
@@ -5242,6 +5291,7 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
         network = "testnet" if testnet else "devnet"
         prompts = _gateway_prompts(now, "")          # mỗi phiên một đề (flop_direct xoay theo prompt_idx)
         explorer = _explorer_base(network)
+        direct_kv_hydrate(state, private_key)
 
         def fetch_channel(cid):
             r = requests.get(f"{explorer}/api/compute-channels/{cid}", headers={"User-Agent": UA}, timeout=15)
@@ -5290,19 +5340,35 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
             caps = []
             for c in (r.json().get("data") or []):
                 try:
-                    if isinstance(c, dict) and c.get("miner") == miner and float(c.get("capGflopsPerSec") or 0) > 0:
+                    if isinstance(c, dict) and flop_direct.fg.same_account(c.get("miner") or "", miner) \
+                            and float(c.get("capGflopsPerSec") or 0) > 0:
                         caps.append(float(c["capGflopsPerSec"]))
                 except (TypeError, ValueError):
                     continue
             return min(caps) if caps else None
 
+        def balance(addr):
+            # Số dư khả dụng của ví trên explorer đúng mạng (FLOP); không đọc được -> None (không thu theo số dư).
+            r = requests.get(f"{explorer}/api/accounts/{addr}", headers={"User-Agent": UA}, timeout=15)
+            if r.status_code == 404:
+                return None
+            r.raise_for_status()
+            d = r.json()
+            raw = d.get("balance") if isinstance(d, dict) else None
+            from decimal import Decimal as _D
+            try:
+                return _D(int(str(raw))) / _D(10) ** 18 if raw is not None else None
+            except ValueError:
+                return None
+
         r = flop_direct.run_step(
             state, agent_key=private_key, now=now, prompts=prompts, network=network,
             fetch_channel=fetch_channel, book_fn=book if testnet else None, offers_fn=offers,
-            price_fn=price, miner_cap_fn=miner_cap,
+            price_fn=price, miner_cap_fn=miner_cap, balance_fn=balance,
             deny=[d for d in PROACTIVE_DENY_DIDS if not d.startswith("did:")],
             deadline=run_deadline(), alert=_telegram_send)
         save_state({flop_direct.KEY: state.get(flop_direct.KEY)})
+        direct_kv_persist(state, private_key)
         status = (f"{r.get('outcome')}" + (f"×{r['opened']}" if r.get("opened", 0) > 1 else "")
                   + (f" +{r['booked_flop']:.4g}FLOP" if r.get("booked") else ""))
         print(f"[direct] {status}" + ("" if testnet else " (devnet tập, không ghi sổ)")
