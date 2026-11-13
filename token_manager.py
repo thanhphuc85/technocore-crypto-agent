@@ -581,6 +581,50 @@ def record_gateway_spend(amount, memo, ref: str, token: str = None, *, path: str
     return {"outcome": "gateway_settled_unverified", "amount": _fmt(amt), "ref": ref}
 
 
+def record_direct_spend(amount, memo, channel_id: str, token: str = None, *, path: str = None,
+                        log=print) -> dict:
+    """Ghi sổ một phiên MUA TRỰC TIẾP đã settle (flop_direct): kênh compute đứng tên CHÍNH ví agent, explorer
+    finalized báo PAID. Chain đã xác nhận đứng tên ví mình, nên vào thẳng thước đo airdrop
+    (session_cumulative, spent_testnet) và trừ số dư — không qua phần "chờ xác nhận" như gateway.
+
+    Cộng cả vào `gateway_epoch_done` (phần chi on-chain của ví ĐÃ có trong sổ, theo kỳ chain): cổng đứng tên
+    của đường gateway coi "chain ghi cho ví nhiều hơn sổ" là chi gateway đã được xác nhận; thiếu bước này
+    thì chi trực tiếp sẽ bị dùng để xác nhận NHẦM khoản gateway đang chờ. Chỉ ở chế độ testnet; chống ghi
+    trùng theo id kênh (bền qua KV)."""
+    token = (token or default_token())
+    amt = _parse_amount(amount)
+    if ledger_mode() != "testnet":
+        return {"outcome": "skipped_simulation", "reason": "chỉ ghi sổ chi trực tiếp khi TESTNET_ENABLED"}
+    if amt is None or amt <= 0 or not channel_id:
+        return {"outcome": "skipped_insufficient", "reason": f"thiếu số lượng/kênh ({amount!r}, {channel_id!r})"}
+    state = load_ledger(path)
+    h = hashlib.sha256(f"direct:{channel_id}".encode("utf-8")).hexdigest()[:16]
+    refs = [x for x in (state.get("gateway_refs") or []) if isinstance(x, str)]
+    if h in refs:
+        return {"outcome": "duplicate", "reason": f"kênh {str(channel_id)[:18]} đã ghi sổ"}
+    state["gateway_refs"] = (refs + [h])[-GATEWAY_REFS_KEEP:]
+    cur = _parse_amount(state["balances"].get(token, "0")) or Decimal(0)
+    new_bal = _fmt(max(Decimal(0), cur - amt))
+    state["balances"][token] = new_bal
+    state["entries"].append({
+        "kind": "spend", "token": token, "amount": _fmt(amt), "memo": memo, "mode": "testnet",
+        "balance_after": new_bal, "ref": str(channel_id)[:80], "via": "direct", "attribution": "onchain",
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    })
+    _accrue_cumulative(state, token, amt)
+    _accrue_day(state, token, amt)
+    _accrue_session(state, token, amt)
+    _accrue_unlock(state, token, amt)
+    da = state.setdefault("direct_attributed", {})
+    da[token] = _fmt((_parse_amount(da.get(token, "0")) or Decimal(0)) + amt)
+    ep_map = state.setdefault("gateway_epoch_done", {})
+    done = (state.get("gateway_attributed") or {}).get(token, "0")
+    ep_map[token] = _fmt((_parse_amount(ep_map.get(token, done)) or Decimal(0)) + amt)
+    _save_ledger(state, path)
+    log(f"[ledger] chi trực tiếp {_fmt(amt)} {token} đứng tên ví mình (kênh {str(channel_id)[:12]}…)")
+    return {"outcome": "direct_settled", "amount": _fmt(amt)}
+
+
 def gateway_attribution(token: str = None, path: str = None) -> dict:
     """{'unattributed', 'attributed'}: chi qua gateway CHƯA / ĐÃ được chain xác nhận đứng tên ví mình."""
     token = (token or default_token())

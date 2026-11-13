@@ -364,6 +364,22 @@ jobs:
           FLOP_TESTNET_RADAR: ${{ vars.FLOP_TESTNET_RADAR }}
           FLOP_TESTNET_RADAR_HOURS: ${{ vars.FLOP_TESTNET_RADAR_HOURS }}
           FLOP_RADAR_EXPLORER_URL: ${{ vars.FLOP_RADAR_EXPLORER_URL }}
+          # MUA TRỰC TIẾP từ một miner (flop_direct): kênh đứng tên CHÍNH ví agent. Mặc định TẮT. Chạy CLI
+          # chính thức của FLOP qua image ghim digest. Cần: miner SS58 + HTTPS endpoint + model của miner.
+          FLOP_DIRECT_ENABLED: ${{ vars.FLOP_DIRECT_ENABLED }}
+          FLOP_DIRECT_MINER: ${{ vars.FLOP_DIRECT_MINER }}
+          FLOP_DIRECT_ENDPOINT: ${{ vars.FLOP_DIRECT_ENDPOINT }}
+          FLOP_DIRECT_MODEL: ${{ vars.FLOP_DIRECT_MODEL }}
+          FLOP_DIRECT_MAX_FLOP: ${{ vars.FLOP_DIRECT_MAX_FLOP }}
+          FLOP_DIRECT_MAX_TOKENS: ${{ vars.FLOP_DIRECT_MAX_TOKENS }}
+          FLOP_DIRECT_MAX_PER_DAY: ${{ vars.FLOP_DIRECT_MAX_PER_DAY }}
+          FLOP_DIRECT_TIMEOUT_SEC: ${{ vars.FLOP_DIRECT_TIMEOUT_SEC }}
+          # offer (mặc định) = chỉ dùng offer có chữ ký của miner. auto/force có thể mở kênh cưỡng bức (khoá
+          # FLOP tới hạn nếu miner không xác nhận) -> cần thêm FLOP_DIRECT_ALLOW_FORCE=on.
+          FLOP_DIRECT_VIA: ${{ vars.FLOP_DIRECT_VIA }}
+          FLOP_DIRECT_ALLOW_FORCE: ${{ vars.FLOP_DIRECT_ALLOW_FORCE }}
+          FLOP_DIRECT_DENY_MINERS: ${{ vars.FLOP_DIRECT_DENY_MINERS }}
+          FLOP_DIRECT_IMAGE: ${{ vars.FLOP_DIRECT_IMAGE }}
           # Bộ canh chi thật (testnet): báo Telegram sau N run liền không có phiên spent_onchain.
           FLOP_REAL_SPEND_ALERT_RUNS: ${{ vars.FLOP_REAL_SPEND_ALERT_RUNS }}
           FLOP_REAL_SPEND_REALERT_HOURS: ${{ vars.FLOP_REAL_SPEND_REALERT_HOURS }}
