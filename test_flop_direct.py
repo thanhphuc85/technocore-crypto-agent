@@ -588,7 +588,9 @@ def test_sessions_stop_when_the_run_budget_runs_out(monkeypatch):
     monkeypatch.setenv("FLOP_DIRECT_TIMEOUT_SEC", "100")
     clock = [0.0]
     cli = MultiCLI(clock=clock, cost=100)
-    r = step({}, cli, deadline=450.0, clock=lambda: clock[0])
+    no_dur = offer()
+    no_dur["offer"]["maxDuration"] = "0"                                  # không có thời hạn -> timeout theo cấu hình
+    r = step({}, cli, deadline=450.0, clock=lambda: clock[0], offers=[no_dur])
     assert r["opened"] == 4 and "thời gian" in r["reason"]              # bắt đầu ở 0..300 ok; 400+130 > 450
 
 
@@ -1182,3 +1184,197 @@ def test_agent_miner_capacity_matches_other_ss58_prefixes(monkeypatch):
     run = cli.sessions()[0]["cmd"]
     ptok = len(run[run.index("--prompt") + 1]) // 4
     assert int(run[run.index("--max-tokens") + 1]) > int(10 * 300 / 28.0) - ptok    # đã dùng cap 130, không phải 10
+
+
+# --- audit vòng 2 (2026-11-13): CLI 0.4.4 trong image ------------------------------------------------------------
+
+def _dur_offer(seconds, **kw):
+    o = offer(**kw)
+    o["offer"]["maxDuration"] = str(seconds)
+    return o
+
+
+def test_cli_gets_the_indexer_url_for_offer_discovery():
+    cli = CLI()
+    step({}, cli, indexer_url="https://explorer.testnet.flop.network/")
+    run = cli.sessions()[0]
+    assert run["env"]["FLOP_INDEXER_URL"] == "https://explorer.testnet.flop.network"
+    assert run["cmd"][run["cmd"].index("FLOP_INDEXER_URL") - 1] == "-e"              # chỉ TÊN trên dòng lệnh
+    cli2 = CLI()
+    step({}, cli2)
+    assert "FLOP_INDEXER_URL" not in cli2.sessions()[0]["env"]
+
+
+def test_session_timeout_covers_the_channel_max_duration():
+    cli = CLI()
+    step({}, cli, offers=[_dur_offer(600)])
+    assert cli.sessions()[0]["timeout"] == 600 + fd.MAXDUR_MARGIN_SEC
+    cli = CLI()
+    step({}, cli, offers=[_dur_offer(120)])
+    assert cli.sessions()[0]["timeout"] == fd.DEFAULT_TIMEOUT_SEC                    # không thấp hơn cấu hình
+
+
+def test_a_session_that_cannot_outlive_its_channel_is_not_started():
+    cli = CLI()
+    r = step({}, cli, offers=[_dur_offer(900)], deadline=NOW + 900.0, clock=lambda: float(NOW))
+    assert r["outcome"] == "run_budget" and cli.sessions() == [] and str(900 + fd.MAXDUR_MARGIN_SEC) in r["reason"]
+
+
+def test_a_long_offer_is_skipped_for_a_miner_that_fits(monkeypatch, three_miners):
+    def offers_fn(miner, mh):
+        return [_dur_offer(900 if miner == MINER else 200, miner=miner, model_hash=mh or MH)]
+
+    cli = MultiCLI()
+    r = step({}, cli, offers_fn=offers_fn, deadline=NOW + 900.0, clock=lambda: float(NOW))
+    assert MINER not in cli.miners() and r["opened"] >= 1
+
+
+def test_sizing_uses_the_shortest_offer_duration(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_TOKENS", "1024")
+    monkeypatch.setenv("FLOP_DIRECT_MODEL", "Qwen/Qwen3-14B")
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_DAY", "2000")
+    cli = CLI()
+    step({}, cli, prompt=LONG, offers=[_dur_offer(600), _dur_offer(60)], miner_cap_fn=lambda m: 130.0)
+    run = cli.sessions()[0]
+    assert int(run["cmd"][run["cmd"].index("--max-tokens") + 1]) == int(130 * 60 / 28.0) - len(LONG) // 4
+    assert run["timeout"] == 600 + fd.MAXDUR_MARGIN_SEC                                 # chờ theo offer DÀI nhất
+
+
+def test_escrow_fits_every_precision_the_miner_offers():
+    lo, hi = offer(min_escrow=5 * 10 ** 16), offer(min_escrow=2 * 10 ** 17)
+    lo["offer"]["precision"], hi["offer"]["precision"] = 0, 1
+    esc, why, mh = fd.choose_escrow([lo, hi], MINER, None, Decimal(100))
+    assert esc == "0.2" and mh == MH
+    same = offer(min_escrow=2 * 10 ** 17)
+    same["offer"]["precision"] = 0
+    assert fd.choose_escrow([lo, same], MINER, None, Decimal(100))[0] == "0.05"      # cùng precision: thấp nhất
+
+
+def test_cli_timeout_marks_the_run_for_orphan_discovery_and_finds_the_channel():
+    st, alerts = {}, []
+    step(st, CLI(session=(None, "", "")), alerts=alerts)
+    assert st[fd.KEY]["orphan_since"] == NOW and mst(st)["unknown_until"] == NOW + fd.UNKNOWN_HOLD_SEC
+    rows = [{"channelId": CH, "agent": ADDR, "miner": MINER, "openedAt": (NOW + 5) * 1000},
+            {"channelId": CH2, "agent": OTHER, "miner": MINER, "openedAt": (NOW + 5) * 1000},          # ví khác
+            {"channelId": "0x" + "ef" * 32, "agent": ADDR, "miner": MINER, "openedAt": (NOW - 3600) * 1000}]  # cũ
+    r = step(st, CLI(), now=NOW + 300, own_channels_fn=lambda a: rows, alerts=alerts)
+    pend = st[fd.KEY]["pending"]
+    assert [p["channel"] for p in pend] == [CH] and pend[0]["error"] and any("mồ côi" in a or "CLI không báo id" in a
+                                                                             for a in alerts)
+    assert r["outcome"] in ("pending", "hold_unknown")                                 # miner bị chặn tới khi kênh xong
+    step(st, CLI(), explorer={CH: paid()}, now=NOW + 600, own_channels_fn=lambda a: rows)
+    assert st[fd.KEY]["pending"] == [] and fd._short(CH) in st[fd.KEY]["done"]
+    assert tm.load_ledger()["session_cumulative"]["FLOP"] == "0.021"                 # kênh mồ côi PAID -> ghi sổ
+    step(st, CLI(), explorer={CH: paid()}, now=NOW + 900, own_channels_fn=lambda a: rows)
+    assert st[fd.KEY]["pending"] == []                                                # không thêm lại kênh đã xong
+
+
+def test_orphan_search_stops_after_its_window():
+    st = {fd.KEY: {"orphan_since": NOW}}
+    seen = []
+    step(st, CLI(), now=NOW + fd.ORPHAN_WINDOW_SEC + 1, own_channels_fn=lambda a: seen.append(a) or [])
+    assert seen == [] and "orphan_since" not in st[fd.KEY]
+
+
+def test_orphan_lookup_failure_is_harmless():
+    def boom(addr):
+        raise RuntimeError("explorer down")
+
+    st = {fd.KEY: {"orphan_since": NOW}}
+    assert step(st, CLI(), now=NOW + 300, own_channels_fn=boom)["outcome"] == "opened"
+
+
+def test_unknown_outcome_message_without_channel_also_starts_orphan_discovery():
+    err = json.dumps({"ok": False, "message": "settlement outcome unknown"})
+    st = {}
+    step(st, CLI(session=(1, "", err)))
+    assert st[fd.KEY]["orphan_since"] == NOW
+
+
+def test_ledger_write_failure_keeps_the_channel_pending(monkeypatch):
+    st = {}
+    step(st, CLI())
+    real, broken = tm._save_ledger, [True]
+    monkeypatch.setattr(tm, "_save_ledger", lambda state, path=None: False if broken[0] else real(state, path))
+    other = (0, json.dumps({"ok": True, "channel": CH2}), "")
+    r = step(st, CLI(session=other), explorer={CH: paid()}, now=NOW + 300)
+    assert r["booked"] == 0 and any(p["channel"] == CH for p in st[fd.KEY]["pending"])
+    broken[0] = False
+    step(st, CLI(session=other), explorer={CH: paid()}, now=NOW + 600)
+    assert all(p["channel"] != CH for p in st[fd.KEY]["pending"])
+
+
+def test_record_direct_spend_reports_a_failed_save(monkeypatch):
+    monkeypatch.setattr(tm, "_save_ledger", lambda state, path=None: False)
+    assert tm.record_direct_spend("1.5", "m", CH)["outcome"] == "save_failed"
+
+
+def test_channels_missing_from_the_explorer_for_two_days_are_dropped_with_an_alert():
+    st, alerts = {}, []
+    step(st, CLI())
+    step(st, CLI(session=(0, json.dumps({"ok": True, "channel": CH2}), "")), now=NOW + 3600)  # 404 một giờ: vẫn giữ
+    assert any(p["channel"] == CH for p in st[fd.KEY]["pending"])
+    step(st, CLI(session=(0, json.dumps({"ok": True, "channel": CH2}), "")), now=NOW + fd.MISSING_DROP_SEC + 1,
+         alerts=alerts)
+    assert all(p["channel"] != CH for p in st[fd.KEY]["pending"])
+    assert st[fd.KEY]["stats"]["missing"] == 1 and any("không có trên explorer" in a for a in alerts)
+
+
+def test_open_channels_are_never_dropped_by_age():
+    st = {}
+    step(st, CLI())
+    still_open = {"agent": ADDR, "status": "open", "paymentStatus": "LOCKED", "observationHead": "finalized"}
+    step(st, CLI(), explorer={CH: still_open}, now=NOW + fd.MISSING_DROP_SEC + 1)
+    assert any(p["channel"] == CH for p in st[fd.KEY]["pending"])
+
+
+def test_direct_deadline_defaults_and_clamps(monkeypatch):
+    monkeypatch.setattr(ac, "_RUN_STARTED", 1000.0)
+    monkeypatch.delenv("FLOP_DIRECT_RUN_BUDGET_SEC", raising=False)
+    assert ac.direct_deadline() == 2020.0
+    monkeypatch.setenv("FLOP_DIRECT_RUN_BUDGET_SEC", "5000")
+    assert ac.direct_deadline() == 2080.0
+    monkeypatch.setattr(ac, "_RUN_STARTED", None)
+    assert ac.direct_deadline() == float("inf")
+
+
+def test_agent_filters_expired_offers_and_passes_the_indexer(monkeypatch):
+    monkeypatch.setenv("FLOP_GATEWAY_PROMPTS", "q1")
+    cli = CLI()
+    monkeypatch.setattr(fd, "_run", cli)
+    seen = []
+    expired = offer(min_escrow=1)
+    expired["offer"]["expiry"] = "100"
+    live = offer(min_escrow=5 * 10 ** 16)
+    live["offer"]["expiry"] = "99999999"
+
+    class _R:
+        status_code = 200
+        text = ""
+
+        def __init__(self, data):
+            self._d = data
+
+        def json(self):
+            return self._d
+
+        def raise_for_status(self):
+            return None
+
+    def get(url, **k):
+        seen.append((url, dict(k.get("params") or {})))
+        if url.endswith("/api/stats"):
+            return _R({"latestBlockNumber": 5000})
+        if "/api/session-offers" in url:
+            return _R({"data": [expired, live]})
+        return _R({})
+
+    monkeypatch.setattr(ac.requests, "get", get)
+    monkeypatch.setattr(ac, "kv_set", lambda *a, **k: True)
+    monkeypatch.setattr(ac, "_telegram_send", lambda m: True)
+    assert ac.direct_session_step({}, KEY, NOW) == "opened"
+    offer_q = [p for u, p in seen if "/api/session-offers" in u][0]
+    assert offer_q["minExpiry"] == "5001"
+    run = cli.sessions()[0]
+    assert Decimal(run["cmd"][run["cmd"].index("--max-flop") + 1]) >= Decimal("0.05")  # không theo offer hết hạn
+    assert run["env"]["FLOP_INDEXER_URL"] == "https://explorer.testnet.flop.network"

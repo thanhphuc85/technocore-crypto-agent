@@ -620,7 +620,9 @@ def record_direct_spend(amount, memo, channel_id: str, token: str = None, *, pat
     ep_map = state.setdefault("gateway_epoch_done", {})
     done = (state.get("gateway_attributed") or {}).get(token, "0")
     ep_map[token] = _fmt((_parse_amount(ep_map.get(token, done)) or Decimal(0)) + amt)
-    _save_ledger(state, path)
+    if not _save_ledger(state, path):
+        # Báo thành công khi sổ KHÔNG được ghi thì flop_direct bỏ kênh khỏi danh sách chờ -> khoản chi mất hẳn.
+        return {"outcome": "save_failed", "reason": "không ghi được sổ cái — giữ kênh, thử lại lượt sau"}
     log(f"[ledger] chi trực tiếp {_fmt(amt)} {token} đứng tên ví mình (kênh {str(channel_id)[:12]}…)")
     return {"outcome": "direct_settled", "amount": _fmt(amt)}
 

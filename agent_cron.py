@@ -5307,10 +5307,44 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
                 persist_ledger_to_kv(private_key, did_of(private_key))
             return res
 
+        _head = {}
+
+        def head_block():
+            # Block mới nhất (explorer /api/stats), đọc MỘT lần mỗi lượt; None nếu không đọc được.
+            if "n" not in _head:
+                try:
+                    r = requests.get(f"{explorer}/api/stats", headers={"User-Agent": UA}, timeout=15)
+                    r.raise_for_status()
+                    _head["n"] = int(r.json().get("latestBlockNumber"))
+                except Exception:
+                    _head["n"] = None
+            return _head["n"]
+
         def offers(miner, model_hash):
-            # Cùng nguồn SDK dùng khi chọn offer (indexer /api/session-offers); lọc theo miner (và model nếu biết).
-            params = {"miner": miner, "limit": "100", **({"model": model_hash} if model_hash else {})}
+            # Cùng nguồn và CÙNG LỌC SDK dùng khi chọn offer (indexer /api/session-offers, minExpiry = block + 1): offer
+            # sắp hết hạn mà vẫn dùng để định cỡ thì CLI không khớp được -> "no live signed offer" và nghỉ 1 giờ.
+            block = head_block()
+            params = {"miner": miner, "limit": "100", **({"model": model_hash} if model_hash else {}),
+                      **({"minExpiry": str(block + 1)} if block is not None else {})}
             r = requests.get(f"{explorer}/api/session-offers", params=params, headers={"User-Agent": UA}, timeout=15)
+            r.raise_for_status()
+            d = r.json()
+            rows = d.get("data") if isinstance(d, dict) and isinstance(d.get("data"), list) else []
+            if block is None:
+                return rows
+            live = []
+            for row in rows:
+                try:
+                    if int(str(((row or {}).get("offer") or {}).get("expiry"))) > block + 1:
+                        live.append(row)
+                except (TypeError, ValueError, AttributeError):
+                    continue
+            return live
+
+        def own_channels(addr):
+            # Kênh gần đây đứng tên ví mình (explorer ?agent=) — tìm kênh mồ côi khi CLI bị ngắt không báo id.
+            r = requests.get(f"{explorer}/api/compute-channels", params={"agent": addr, "limit": "50"},
+                             headers={"User-Agent": UA}, timeout=15)
             r.raise_for_status()
             d = r.json()
             return d.get("data") if isinstance(d, dict) and isinstance(d.get("data"), list) else []
@@ -5365,8 +5399,9 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
             state, agent_key=private_key, now=now, prompts=prompts, network=network,
             fetch_channel=fetch_channel, book_fn=book if testnet else None, offers_fn=offers,
             price_fn=price, miner_cap_fn=miner_cap, balance_fn=balance,
+            indexer_url=explorer, own_channels_fn=own_channels,
             deny=[d for d in PROACTIVE_DENY_DIDS if not d.startswith("did:")],
-            deadline=run_deadline(), alert=_telegram_send)
+            deadline=direct_deadline(), alert=_telegram_send)
         save_state({flop_direct.KEY: state.get(flop_direct.KEY)})
         direct_kv_persist(state, private_key)
         status = (f"{r.get('outcome')}" + (f"×{r['opened']}" if r.get("opened", 0) > 1 else "")
@@ -5417,6 +5452,15 @@ _RUN_STARTED = None                  # main() đặt; ngoài main (thư viện/t
 def _mempool_blocked() -> bool:
     import token_manager
     return token_manager.testnet_enabled() and not MEMPOOL_TESTNET_ALLOWED
+
+
+def direct_deadline() -> float:
+    """Hạn của bước MUA TRỰC TIẾP (giây epoch). Phiên phải sống quá maxDuration của kênh (thường 600 s) + biên, nên
+    không vừa ngân sách chung 900 s; sau bước này chỉ còn việc nhẹ (radar, telemetry, sao lưu KV). Mặc định 1020 s,
+    trần 1080 s: job có timeout-minutes 20 và còn các bước dựng môi trường/lưu cache ngoài Python."""
+    if _RUN_STARTED is None:
+        return float("inf")
+    return _RUN_STARTED + max(60.0, min(1080.0, _env_float("FLOP_DIRECT_RUN_BUDGET_SEC", 1020)))
 
 
 def run_deadline() -> float:
