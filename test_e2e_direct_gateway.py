@@ -19,7 +19,8 @@ MH = "0x" + "11" * 32
 RAW = 10 ** 18
 
 
-@pytest.mark.parametrize("gateway_own,scenario", [(False, "normal"), (True, "normal"), (False, "cli_timeout")])
+@pytest.mark.parametrize("gateway_own,scenario", [(False, "normal"), (True, "normal"), (False, "cli_timeout"),
+                                                   (False, "chain_reset")])
 def test_gateway_and_direct_together_over_many_runs(monkeypatch, tmp_path, gateway_own, scenario):
     """cli_timeout: lượt 3 CLI bị ngắt sau khi kênh đã settle trên chain (agent không biết id) — kênh mồ côi phải
     được tìm lại và ghi sổ, và phần chain tăng đó KHÔNG được đọc thành gateway đứng tên ví mình. Sau đó miner bị giữ
@@ -138,13 +139,27 @@ def test_gateway_and_direct_together_over_many_runs(monkeypatch, tmp_path, gatew
 
     import time as _t
     t0 = 1_800_000_000
-    runs = 8
+    runs = 12 if scenario == "chain_reset" else 8
+    old_spent = 0
     for i in range(runs):
+        if scenario == "chain_reset" and i == 5:
+            # testnet reset (không có genesis để so): chain mới, kênh cũ biến mất, tổng chi đếm lại từ 0. Agent cần
+            # CHAIN_RESET_READINGS lần đọc thấp mới mở kỳ mới — các phiên ghi sổ trong lúc đó thuộc chain MỚI.
+            old_spent = chain["spent"]
+            chain.update(spent=0, channels={}, balance=1000 * RAW)
         monkeypatch.setattr(_t, "time", lambda i=i: t0 + i * 3600)
         ac.main()
 
     led = tm.load_ledger()
-    pend_direct = [p for p in (state.get(fd.KEY) or {}).get("pending") or []]
+    pend_direct = [p for p in (state.get(fd.KEY) or {}).get("pending") or [] if p["channel"] in chain["channels"]]
+    if scenario == "chain_reset":
+        new_refs = [e for e in led.get("entries", []) if e.get("via") == "direct" and e.get("ref") in chain["channels"]]
+        new_booked = sum(float(e["amount"]) for e in new_refs)
+        unbooked_new = sum(int(chain["channels"][p["channel"]]["minerPaid"]) for p in pend_direct) / RAW
+        assert old_spent > 0 and abs(new_booked - (chain["spent"] / RAW - unbooked_new)) < 1e-9
+        assert float(led["direct_epoch_done"]["FLOP"]) == pytest.approx(new_booked)   # kỳ mới biết chi trực tiếp
+        assert float((led.get("gateway_attributed") or {}).get("FLOP", "0")) == 0.0   # broker: không xác nhận nhầm
+        return
     unbooked_paid = sum(int(chain["channels"][p["channel"]]["minerPaid"]) for p in pend_direct) / RAW
     unbooked_esc = sum(int(chain["channels"][p["channel"]]["escrow"]) for p in pend_direct) / RAW
     sess = float(led.get("session_cumulative", {}).get("FLOP", "0"))

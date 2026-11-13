@@ -1713,3 +1713,39 @@ def test_unknown_outcome_holds_its_escrow_for_the_gateway_gate():
     assert ac.direct_unbooked(st) == pytest.approx(99.5)
     view = flop_direct.durable_view(st[flop_direct.KEY])
     assert view["unknown_escrow"][0][2] == "99.5"                             # sao lưu KV
+
+
+# --- chain reset phát hiện trễ: chi trực tiếp trong lúc chờ thuộc kỳ MỚI ---------------------------------------------
+
+def test_direct_spend_booked_while_detecting_a_reset_moves_to_the_new_epoch():
+    tm.credit("5000")
+    tm.record_direct_spend("500", "inference-session direct m", "0x" + f"{300:064x}")
+    tm.confirm_gateway_attribution("500", read_at=NOW)                      # đọc nhất quán, kỳ cũ = 500
+    tm.record_gateway_spend("20", "inference-session gateway m", "g-x")    # gateway (broker) chờ
+    # chain reset: chain mới ghi 0, rồi các phiên trực tiếp MỚI được ghi sổ trong 3 lần đọc thấp
+    totals = []
+    for k in range(3):
+        tm.record_direct_spend("99", "inference-session direct m", "0x" + f"{400 + k:064x}")
+        totals.append(99 * (k + 1))
+        tm.confirm_gateway_attribution(str(totals[-1]), read_at=NOW + k + 1)
+    led = tm.load_ledger()
+    assert tm.direct_epoch_done() == Decimal("297") and led["gateway_epoch_done"]["FLOP"] == "297"
+    assert tm.gateway_attribution()["unattributed"] == Decimal("20")        # KHÔNG xác nhận nhầm gateway
+
+
+def test_consistent_reading_clears_the_since_ok_counter():
+    tm.credit("1000")
+    tm.record_direct_spend("10", "inference-session direct m", "0x" + f"{500:064x}")
+    assert tm.load_ledger()["direct_since_ok"]["FLOP"] == "10"
+    tm.confirm_gateway_attribution("10", read_at=NOW)
+    assert tm.load_ledger()["direct_since_ok"]["FLOP"] == "0"
+
+
+def test_genesis_change_reset_also_carries_direct_booked_since_the_last_good_read():
+    tm.credit("1000")
+    tm.record_direct_spend("100", "inference-session direct m", "0x" + f"{600:064x}")
+    tm.confirm_gateway_attribution("100", chain_id="0xaa", read_at=NOW)
+    tm.record_gateway_spend("30", "inference-session gateway m", "g-y")
+    tm.record_direct_spend("40", "inference-session direct m", "0x" + f"{601:064x}")    # phiên đầu trên chain mới
+    tm.confirm_gateway_attribution("40", chain_id="0xbb", read_at=NOW + 1)            # genesis đổi: reset ngay
+    assert tm.direct_epoch_done() == Decimal("40") and tm.gateway_attribution()["unattributed"] == Decimal("30")
