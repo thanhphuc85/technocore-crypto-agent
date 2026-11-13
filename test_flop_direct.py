@@ -3,6 +3,7 @@
 CLI chính thức và explorer được giả (runner/fetch_channel tiêm vào): không Docker, không Node, không mạng."""
 import json
 import os
+import time
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -41,7 +42,7 @@ def env(monkeypatch, tmp_path):
     for k, v in {"FLOP_DIRECT_ENABLED": "on", "FLOP_DIRECT_MINER": MINER,
                  "FLOP_DIRECT_ENDPOINT": "https://miner.example", "FLOP_DIRECT_MODEL": "qwen/qwen2.5-0.5b-instruct",
                  "FLOP_WALLET_USE_DID": "on", "TESTNET_ENABLED": "true", "FLOP_DIRECT_MAX_PER_RUN": "1",
-                 "FLOP_DIRECT_MAX_TOKENS": "8",
+                 "FLOP_DIRECT_MAX_TOKENS": "8", "FLOP_DIRECT_PACE": "off",
                  "TOKEN_LEDGER_FILE": str(tmp_path / "ledger.json")}.items():
         monkeypatch.setenv(k, v)
     monkeypatch.setattr(ac, "STATE_FILE", str(tmp_path / "state.json"))
@@ -883,3 +884,88 @@ def test_ambiguous_or_channel_failures_keep_the_daily_reservation(session):
     st = {}
     step(st, CLI(session=session))
     assert st[fd.KEY]["day"]["escrow"] == pytest.approx(0.05)
+
+
+# --- trải đều trong ngày (đường cộng dồn, đuổi kịp khi lượt lỗi) -----------------------------------------------
+
+DAY_START = NOW - NOW % 86400                                                  # NOW = 08:00 UTC
+
+
+def _pcfg(**kw):
+    base = {"per_day": 2000.0, "pace": True, "pace_window": 20.0, "pace_jitter": 0.0}
+    base.update(kw)
+    return base
+
+
+def test_pace_limit_is_a_cumulative_line_reaching_the_full_cap_before_day_end():
+    assert fd.pace_limit(_pcfg(), DAY_START) == (pytest.approx(100.0), True)            # 00:00 -> 1/20
+    assert fd.pace_limit(_pcfg(), DAY_START + 8 * 3600) == (pytest.approx(900.0), True)
+    assert fd.pace_limit(_pcfg(), DAY_START + 19 * 3600) == (2000.0, False)             # hết cửa sổ: cả trần
+    assert fd.pace_limit(_pcfg(), DAY_START + 23 * 3600 + 3599) == (2000.0, False)
+    assert fd.pace_limit(_pcfg(pace=False), DAY_START) == (2000.0, False)
+    assert fd.pace_limit(_pcfg(per_day=0.0), DAY_START) == (0.0, False)
+
+
+def test_pace_jitter_is_bounded_and_stable_within_the_hour():
+    ratios = {round(fd.pace_limit(_pcfg(pace_jitter=0.2), DAY_START + 8 * 3600 + s, salt="w")[0]
+                    / fd.pace_limit(_pcfg(), DAY_START + 8 * 3600 + s)[0], 9) for s in (0, 900, 3599)}
+    assert len(ratios) == 1 and 0.8 - 1e-9 <= ratios.pop() <= 1.2 + 1e-9                # cùng hệ số cả giờ
+    other_hours = {round(fd.pace_limit(_pcfg(pace_jitter=0.2), DAY_START + h * 3600, salt="w")[0]
+                         / ((h + 1) / 20 * 2000), 6) for h in range(15)}
+    assert len(other_hours) > 1                                                         # thật sự lệch theo giờ
+
+
+def test_pace_is_on_by_default(monkeypatch):
+    monkeypatch.delenv("FLOP_DIRECT_PACE")
+    cfg, errs = fd.config()
+    assert errs == [] and cfg["pace"] is True and cfg["pace_window"] == 20 and cfg["pace_jitter"] == 0.2
+
+
+@pytest.fixture
+def paced_big(monkeypatch):
+    for k, v in {"FLOP_DIRECT_PACE": "on", "FLOP_DIRECT_PACE_JITTER_PCT": "0", "FLOP_DIRECT_MAX_PER_DAY": "2000",
+                 "FLOP_DIRECT_MAX_TOKENS": "1024", "FLOP_DIRECT_MODEL": "Qwen/Qwen3-14B",
+                 "FLOP_DIRECT_MAX_PER_RUN": "10"}.items():
+        monkeypatch.setenv(k, v)
+
+
+def _day_state(escrow):
+    return {fd.KEY: {"day": {"day": time.strftime("%Y-%m-%d", time.gmtime(NOW)), "escrow": escrow}}}
+
+
+def test_behind_schedule_catches_up_within_the_run(paced_big):
+    cli = MultiCLI()
+    st = _day_state(300.0)                                                              # 08:00: được 900
+    r = step(st, cli, prompt=LONG, miner_cap_fn=lambda m: 130.0)
+    assert r["opened"] == 6 and st[fd.KEY]["day"]["escrow"] == pytest.approx(900.0, abs=1)
+
+
+def test_on_schedule_waits_and_says_why(paced_big):
+    cli = MultiCLI()
+    r = step(_day_state(860.0), cli, prompt=LONG, miner_cap_fn=lambda m: 130.0)        # còn 40 < phần giờ 83
+    assert r["outcome"] == "paced" and cli.sessions() == [] and "trải đều" in r["reason"]
+
+
+def test_after_the_window_the_remainder_is_spent_even_in_a_small_session(paced_big):
+    cli = MultiCLI()
+    st = _day_state(1960.0)
+    r = step(st, cli, prompt=LONG, miner_cap_fn=lambda m: 130.0, now=DAY_START + 20 * 3600)
+    assert r["opened"] == 1 and st[fd.KEY]["day"]["escrow"] == pytest.approx(2000.0, abs=0.5)
+
+
+def test_failed_runs_lose_nothing_over_a_day(paced_big):
+    """Mô phỏng 1 ngày, lượt 5 phút; hỏng 6 giờ liền (02:00–08:00) + cứ 3 lượt hỏng 1 -> vẫn đủ 2000."""
+    class Settled:                                                                      # mọi kênh settle kịp
+        def get(self, cid):
+            return paid()
+
+    st, opened, cli = {}, 0, MultiCLI()
+    for i in range(288):
+        t = DAY_START + i * 300
+        hour = (t - DAY_START) // 3600
+        if 2 <= hour < 8 or i % 3 == 0:
+            continue
+        r = step(st, cli, explorer=Settled(), prompt=LONG, miner_cap_fn=lambda m: 130.0, now=t)
+        opened += r.get("opened", 0)
+        assert st[fd.KEY]["day"]["escrow"] <= fd.pace_limit(fd.config()[0], t)[0] + 1e-6
+    assert st[fd.KEY]["day"]["escrow"] == pytest.approx(2000.0, abs=0.5) and opened <= 30

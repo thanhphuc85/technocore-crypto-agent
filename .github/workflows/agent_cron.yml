@@ -393,6 +393,11 @@ jobs:
           FLOP_DIRECT_MODEL_HASH: ${{ vars.FLOP_DIRECT_MODEL_HASH }}
           FLOP_DIRECT_MAX_TOKENS: ${{ vars.FLOP_DIRECT_MAX_TOKENS }}
           FLOP_DIRECT_MAX_PER_DAY: ${{ vars.FLOP_DIRECT_MAX_PER_DAY }}
+          # Trải đều trần ngày (mặc định bật): đến giờ h UTC chỉ cam kết tới trần × (h+1)/WINDOW_H (mặc định 20),
+          # lệch ±JITTER_PCT (mặc định 20). Cộng dồn: lượt lỗi thì lượt sau đuổi kịp. PACE=off -> chi dồn như cũ.
+          FLOP_DIRECT_PACE: ${{ vars.FLOP_DIRECT_PACE }}
+          FLOP_DIRECT_PACE_WINDOW_H: ${{ vars.FLOP_DIRECT_PACE_WINDOW_H }}
+          FLOP_DIRECT_PACE_JITTER_PCT: ${{ vars.FLOP_DIRECT_PACE_JITTER_PCT }}
           FLOP_DIRECT_TIMEOUT_SEC: ${{ vars.FLOP_DIRECT_TIMEOUT_SEC }}
           # offer (mặc định) = chỉ dùng offer có chữ ký của miner. auto/force có thể mở kênh cưỡng bức (khoá
           # FLOP tới hạn nếu miner không xác nhận) -> cần thêm FLOP_DIRECT_ALLOW_FORCE=on.
