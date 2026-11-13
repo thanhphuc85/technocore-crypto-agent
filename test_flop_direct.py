@@ -245,9 +245,9 @@ def test_unfinalized_paid_channel_waits():
 def test_refunded_channel_is_dropped_with_zero_spend():
     st = {}
     step(st, CLI())
-    r = step(st, CLI(), explorer={CH: {"agent": ADDR, "status": "settled", "paymentStatus": "LOCKED",
-                                       "observationHead": "finalized", "minerPaid": "0", "burned": "0"}},
-             now=NOW + 300)
+    r = step(st, CLI(session=(0, json.dumps({"ok": True, "channel": CH2}), "")),
+             explorer={CH: {"agent": ADDR, "status": "timedout", "paymentStatus": "REFUNDED",
+                            "observationHead": "finalized", "minerPaid": "0", "burned": "0"}}, now=NOW + 300)
     assert r["outcome"] == "opened" and st[fd.KEY]["stats"]["refunded"] == 1
     assert tm.load_ledger().get("session_cumulative") is None
 
@@ -1488,3 +1488,57 @@ def test_agent_reconciles_while_disabled(monkeypatch):
     monkeypatch.setattr(ac, "kv_set", lambda *a, **k: True)
     assert ac.direct_session_step({}, KEY, NOW) == "off" and called == []
     assert ac.direct_session_step({fd.KEY: {"pending": [{"channel": CH}]}}, KEY, NOW) == "off" and called == [1]
+
+
+# --- audit vòng 4: "settled mà chưa PAID" không phải hoàn tiền; finalize không gọi lại ---------------------------------
+
+POSTED = {"agent": ADDR, "status": "settled", "paymentStatus": "LOCKED", "observationHead": "finalized"}
+
+
+@pytest.mark.parametrize("info,kind", [
+    ({"agent": ADDR, "status": "timedout", "paymentStatus": "REFUNDED", "observationHead": "finalized"}, "refunded"),
+    ({"agent": ADDR, "status": "settled", "paymentStatus": "REFUNDED", "observationHead": "finalized"}, "refunded"),
+    ({"agent": ADDR, "status": "expired", "paymentStatus": "LOCKED", "observationHead": "finalized"}, "refunded"),
+    (POSTED, "posted"),
+    ({**POSTED, "status": "closed"}, "posted"),
+    ({**POSTED, "observationHead": "best"}, "open"),
+    ({"agent": ADDR, "status": "open", "paymentStatus": "LOCKED", "observationHead": "finalized"}, "open"),
+])
+def test_only_explicit_refunds_are_refunds(info, kind):
+    assert fd.classify_channel(info, ADDR)[0] == kind
+
+
+def test_settled_but_unpaid_channel_is_kept_and_finalized_later():
+    st, alerts = {}, []
+    step(st, CLI())                                                               # phiên thường (không cờ cưỡng bức)
+    step(st, CLI(session=OTHER_SESSION), explorer={CH: POSTED}, now=NOW + 7 * 3600, alerts=alerts)
+    rec = [p for p in st[fd.KEY]["pending"] if p["channel"] == CH][0]
+    assert rec["force"] is True and "refunded" not in (st[fd.KEY].get("stats") or {})
+    assert not any(CH[:18] in a for a in alerts)                                  # không báo "kẹt" sau 6 giờ
+    cli = FinCLI(session=OTHER_SESSION)
+    step(st, cli, explorer={CH: POSTED}, now=NOW + fd.FINALIZE_AFTER_SEC + 1)
+    assert len(cli.finalizes()) == 1
+
+
+def test_successful_finalize_is_not_repeated_and_a_slow_explorer_alerts_once():
+    st, alerts = {}, []
+    step(st, CLI(session=FORCED))
+    t = NOW + fd.FINALIZE_AFTER_SEC + 1
+    step(st, FinCLI(session=OTHER_SESSION), explorer={CH: POSTED}, now=t)
+    calls = 0
+    for i in range(1, 6):
+        cli = FinCLI(session=OTHER_SESSION)
+        step(st, cli, explorer={CH: POSTED}, now=t + i * fd.FINALIZE_RETRY_SEC, alerts=alerts)
+        calls += len(cli.finalizes())
+    assert calls == 0                                                              # đã có tx: không gọi lại
+    assert sum(1 for a in alerts if "đã finalize" in a) == 1
+    assert not any("thất bại" in a for a in alerts)
+
+
+def test_finalize_tx_survives_the_kv_round_trip():
+    g = {"pending": [{"channel": CH, "ts": NOW, "network": "testnet", "miner": MINER, "force": True,
+                      "fin_tries": 1, "fin_at": NOW, "fin_tx": "0x" + "aa" * 32, "fin_alerted": NOW}]}
+    new = {}
+    assert fd.restore(new, json.loads(json.dumps(fd.durable_view(g, level=1))))
+    p = new[fd.KEY]["pending"][0]
+    assert p["fin_tx"] == "0x" + "aa" * 32 and p["force"] is True and p["fin_alerted"] == NOW
