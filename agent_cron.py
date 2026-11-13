@@ -5265,9 +5265,41 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
             d = r.json()
             return d.get("data") if isinstance(d, dict) and isinstance(d.get("data"), list) else []
 
+        _prices = {}
+
+        def price(model_hash):
+            # Giá công bố của model (registry: epochPricePerGflop, raw/GFLOP) -> FLOP mỗi GFLOP; None nếu không thấy.
+            if "_all" not in _prices:
+                r = requests.get(f"{explorer}/api/models", params={"limit": "200"}, headers={"User-Agent": UA}, timeout=15)
+                r.raise_for_status()
+                _prices["_all"] = {str(m.get("modelHash") or "").lower(): m.get("epochPricePerGflop")
+                                   for m in (r.json().get("models") or []) if isinstance(m, dict)}
+            raw = _prices["_all"].get(str(model_hash or "").lower())
+            from decimal import Decimal as _D
+            try:
+                return (_D(str(int(str(raw)))) / _D(10) ** 18) if raw is not None and int(str(raw)) > 0 else None
+            except ValueError:
+                return None
+
+        def miner_cap(miner):
+            # Công suất hiệu chuẩn của miner (GFLOP/s) theo các kênh GẦN ĐÂY của nó trên explorer (kênh của ai cũng
+            # được: capGflopsPerSec là của miner). Lấy giá trị nhỏ nhất trong vài kênh gần nhất cho an toàn.
+            r = requests.get(f"{explorer}/api/compute-channels", params={"miner": miner, "limit": "5"},
+                             headers={"User-Agent": UA}, timeout=15)
+            r.raise_for_status()
+            caps = []
+            for c in (r.json().get("data") or []):
+                try:
+                    if isinstance(c, dict) and c.get("miner") == miner and float(c.get("capGflopsPerSec") or 0) > 0:
+                        caps.append(float(c["capGflopsPerSec"]))
+                except (TypeError, ValueError):
+                    continue
+            return min(caps) if caps else None
+
         r = flop_direct.run_step(
             state, agent_key=private_key, now=now, prompts=prompts, network=network,
             fetch_channel=fetch_channel, book_fn=book if testnet else None, offers_fn=offers,
+            price_fn=price, miner_cap_fn=miner_cap,
             deny=[d for d in PROACTIVE_DENY_DIDS if not d.startswith("did:")],
             deadline=run_deadline(), alert=_telegram_send)
         save_state({flop_direct.KEY: state.get(flop_direct.KEY)})

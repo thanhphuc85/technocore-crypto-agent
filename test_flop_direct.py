@@ -41,6 +41,7 @@ def env(monkeypatch, tmp_path):
     for k, v in {"FLOP_DIRECT_ENABLED": "on", "FLOP_DIRECT_MINER": MINER,
                  "FLOP_DIRECT_ENDPOINT": "https://miner.example", "FLOP_DIRECT_MODEL": "qwen/qwen2.5-0.5b-instruct",
                  "FLOP_WALLET_USE_DID": "on", "TESTNET_ENABLED": "true", "FLOP_DIRECT_MAX_PER_RUN": "1",
+                 "FLOP_DIRECT_MAX_TOKENS": "8",
                  "TOKEN_LEDGER_FILE": str(tmp_path / "ledger.json")}.items():
         monkeypatch.setenv(k, v)
     monkeypatch.setattr(ac, "STATE_FILE", str(tmp_path / "state.json"))
@@ -103,7 +104,7 @@ def test_off_by_default_makes_no_calls(monkeypatch):
     ("FLOP_DIRECT_MINER", "5notanaddress", "không phải địa chỉ SS58"),
     ("FLOP_DIRECT_ENDPOINT", "http://miner.example", "https://"),
     ("FLOP_DIRECT_MODEL", "qwen; rm -rf /", "ký tự lạ"),
-    ("FLOP_DIRECT_MAX_FLOP", "9", "<= 5"),
+    ("FLOP_DIRECT_MAX_FLOP", "999", "<= 200"),
     ("FLOP_DIRECT_MAX_FLOP", "-1", "số dương"),
     ("FLOP_DIRECT_VIA", "force", "FLOP_DIRECT_ALLOW_FORCE=on"),
     ("FLOP_DIRECT_VIA", "auto", "FLOP_DIRECT_ALLOW_FORCE=on"),
@@ -382,13 +383,14 @@ def test_exact_raw_amount_is_preserved(monkeypatch):
 
 
 def test_offer_above_the_escrow_cap_is_not_bought(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_ESCROW_CAP", "1")
     cli = CLI()
     r = step({}, cli, offers=[offer(min_escrow=2 * 10 ** 18)])          # 2 FLOP > trần mặc định 1
     assert r["outcome"] == "no_offer" and "FLOP_DIRECT_ESCROW_CAP" in r["reason"] and cli.calls == []
     monkeypatch.setenv("FLOP_DIRECT_ESCROW_CAP", "3")
     assert step({}, CLI(), offers=[offer(min_escrow=2 * 10 ** 18)])["outcome"] == "opened"
-    monkeypatch.setenv("FLOP_DIRECT_ESCROW_CAP", "50")                   # trần cứng 5 vẫn áp
-    assert step({}, CLI(), offers=[offer(min_escrow=6 * 10 ** 18)])["outcome"] == "no_offer"
+    monkeypatch.setenv("FLOP_DIRECT_ESCROW_CAP", "5000")                 # trần cứng 200 vẫn áp
+    assert step({}, CLI(), offers=[offer(min_escrow=300 * 10 ** 18)])["outcome"] == "no_offer"
 
 
 def test_no_offer_means_no_cli_call():
@@ -707,3 +709,155 @@ def test_bad_miner_entries_are_reported(monkeypatch, raw, why):
     cli = MultiCLI()
     r = step({}, cli)
     assert r["outcome"] == "unconfigured" and why in r["reason"] and cli.calls == []
+
+
+# --- định cỡ phiên theo việc thật (giá × GFLOP, công suất miner, học từ kênh đã settle) ------------
+
+from decimal import Decimal  # noqa: E402
+
+LONG = "Explain the trade-offs of optimistic versus pessimistic locking in distributed databases. " * 4
+
+
+def _plan(**kw):
+    base = dict(prompt=LONG, max_tokens=1024, gn_per_token=28.0, cap_gfs=130.0, price=Decimal("0.003"),
+                min_escrow=Decimal("0.05"), escrow_cap=Decimal("100"), settle_target=300, margin=0.2)
+    base.update(kw)
+    return fd.plan_session(**base)
+
+
+def test_big_model_on_a_strong_miner_is_sized_up_to_the_escrow_cap():
+    plan, why = _plan()
+    ptok = len(LONG) // 4
+    unit = Decimal("0.003") * Decimal("28") * Decimal("1.2")
+    assert plan["max_tokens"] == int(Decimal(100) / unit) - ptok            # trần escrow cắt trước thời gian
+    assert Decimal(plan["escrow"]) <= Decimal(100) and Decimal(plan["escrow"]) > Decimal(95)
+    assert plan["gn_est"] == pytest.approx(28.0 * (ptok + plan["max_tokens"]))
+
+
+def test_the_settle_time_bounds_the_session_on_a_weaker_miner():
+    plan, _ = _plan(cap_gfs=32.0)
+    ptok = len(LONG) // 4
+    assert plan["max_tokens"] == int(32.0 * 300 / 28.0) - ptok
+    assert plan["gn_est"] <= 32.0 * 300 + 1e-6                              # settle trong ~300 s
+
+
+def test_offer_max_duration_shortens_the_window():
+    plan, _ = _plan(cap_gfs=130.0, max_duration=60)
+    assert plan["gn_est"] <= 130.0 * 60 + 1e-6
+
+
+def test_a_miner_too_weak_for_the_model_is_skipped():
+    plan, why = _plan(gn_per_token=54.0, cap_gfs=10.0)
+    assert plan is None and "GFLOP/s" in why
+
+
+def test_escrow_never_goes_below_the_offer_minimum():
+    plan, _ = _plan(prompt="hi", max_tokens=16, gn_per_token=1.0, min_escrow=Decimal("0.5"))
+    assert plan["escrow"] == "0.5"
+
+
+def test_offer_minimum_above_the_cap_is_refused():
+    plan, why = _plan(min_escrow=Decimal("150"))
+    assert plan is None and "FLOP_DIRECT_ESCROW_CAP" in why
+
+
+def test_cap_too_small_for_even_the_minimum_session():
+    plan, why = _plan(escrow_cap=Decimal("0.5"))
+    assert plan is None and "trần" in why
+
+
+@pytest.mark.parametrize("slug,size", [("Qwen/Qwen3-14B", 14.0), ("qwen/qwen2.5-0.5b-instruct", 0.5),
+                                       ("NousResearch/Arete-27B", 27.0), ("Qwen/Qwen3.8-27B", 27.0),
+                                       ("flop-ops-demo", None), ("llama-3-70b-instruct", 70.0)])
+def test_model_size_from_slug(slug, size):
+    assert fd.model_size_b(slug) == size
+
+
+def test_session_uses_the_planned_tokens_and_escrow(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_TOKENS", "1024")
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_DAY", "2000")
+    monkeypatch.setenv("FLOP_DIRECT_MODEL", "Qwen/Qwen3-14B")
+    cli = CLI()
+    r = step({}, cli, prompt=LONG, miner_cap_fn=lambda m: 130.0, price_fn=lambda mh: Decimal("0.003"))
+    run = cli.sessions()[0]["cmd"]
+    tok, esc = int(run[run.index("--max-tokens") + 1]), Decimal(run[run.index("--max-flop") + 1])
+    assert r["outcome"] == "opened" and 800 < tok <= 1024 and Decimal(95) < esc <= Decimal(100)
+
+
+def test_unknown_miner_capacity_falls_back_to_a_small_safe_session(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_TOKENS", "1024")
+    monkeypatch.setenv("FLOP_DIRECT_MODEL", "Qwen/Qwen3-14B")
+    cli = CLI()
+    step({}, cli, prompt=LONG)                                               # không biết cap -> 10 GFLOP/s
+    run = cli.sessions()[0]["cmd"]
+    assert int(run[run.index("--max-tokens") + 1]) == int(10 * 300 / 28.0) - len(LONG) // 4
+
+
+def test_the_rest_of_the_daily_cap_shrinks_the_last_session(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_TOKENS", "1024")
+    monkeypatch.setenv("FLOP_DIRECT_MODEL", "Qwen/Qwen3-14B")
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_RUN", "5")
+    st, cli = {}, MultiCLI()
+    r = step(st, cli, prompt=LONG, miner_cap_fn=lambda m: 130.0)            # ~100 FLOP/phiên > trần ngày 25
+    esc = Decimal(cli.sessions()[0]["cmd"][cli.sessions()[0]["cmd"].index("--max-flop") + 1])
+    assert r["opened"] == 1 and Decimal(24) < esc <= Decimal(25)            # thu cho vừa 25, không bỏ hẳn
+    assert r["reason"] and "trần" in r["reason"]
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_DAY", "2000")
+    r = step({}, MultiCLI(), prompt=LONG, miner_cap_fn=lambda m: 130.0)
+    assert r["opened"] == 5
+
+
+def test_settled_channels_teach_gflops_per_token_and_miner_capacity(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_TOKENS", "1024")
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_DAY", "2000")
+    monkeypatch.setenv("FLOP_DIRECT_MODEL", "Qwen/Qwen3-14B")
+    st = {}
+    cli = CLI(session=(0, json.dumps({"ok": True, "channel": CH, "completion_tokens": "400"}), ""))
+    step(st, cli, prompt=LONG, miner_cap_fn=lambda m: 130.0)
+    ptok = len(LONG) // 4
+    info = {**paid(), "aggregateGn": str(20 * (ptok + 400)), "capGflopsPerSec": 60}
+    nxt = CLI(session=(0, json.dumps({"ok": True, "channel": CH2}), ""))
+    step(st, nxt, prompt=LONG, explorer={CH: info}, now=NOW + 300, miner_cap_fn=lambda m: 130.0)
+    assert st[fd.KEY]["gnpt"][MH] == pytest.approx(20.0)                     # GFLOP/token đo được
+    assert mst(st)["cap"] == 60.0                                            # công suất thật thay ước lượng
+    run = nxt.sessions()[0]["cmd"]
+    assert int(run[run.index("--max-tokens") + 1]) == int(60 * 300 / 20.0) - ptok
+
+
+def test_learning_is_smoothed():
+    g, ms = {"gnpt": {MH: 10.0}}, {}
+    fd._learn(g, ms, {"model_hash": MH, "ptok": 10, "completion_tokens": 90, "miner": MINER},
+              {"aggregateGn": "3000", "capGflopsPerSec": 50})
+    assert g["gnpt"][MH] == pytest.approx(10 * 0.5 + 30 * 0.5) and ms[fd._mkey(MINER)]["cap"] == 50.0
+
+
+def test_learning_ignores_bad_numbers():
+    g, ms = {}, {}
+    fd._learn(g, ms, {"model_hash": MH, "ptok": 0, "completion_tokens": None, "miner": MINER},
+              {"aggregateGn": "abc", "capGflopsPerSec": "x"})
+    assert g == {} and ms == {}
+
+
+def test_price_from_the_registry_and_override(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_TOKENS", "64")
+    cli = CLI()
+    step({}, cli, prompt="hi there", price_fn=lambda mh: Decimal("0.03"))   # giá x10
+    esc_registry = Decimal(cli.sessions()[0]["cmd"][cli.sessions()[0]["cmd"].index("--max-flop") + 1])
+    monkeypatch.setenv("FLOP_DIRECT_PRICE_PER_GN", "0.003")
+    cli = CLI()
+    step({}, cli, prompt="hi there", price_fn=lambda mh: Decimal("0.03"))   # biến môi trường thắng
+    esc_env = Decimal(cli.sessions()[0]["cmd"][cli.sessions()[0]["cmd"].index("--max-flop") + 1])
+    assert esc_registry == pytest.approx(esc_env * 10, rel=0.01)
+
+
+def test_capacity_lookup_failure_uses_the_safe_default(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_TOKENS", "1024")
+    monkeypatch.setenv("FLOP_DIRECT_MODEL", "Qwen/Qwen3-14B")
+
+    def boom(miner):
+        raise RuntimeError("explorer down")
+
+    cli = CLI()
+    assert step({}, cli, prompt=LONG, miner_cap_fn=boom)["outcome"] == "opened"
+    run = cli.sessions()[0]["cmd"]
+    assert int(run[run.index("--max-tokens") + 1]) == int(10 * 300 / 28.0) - len(LONG) // 4

@@ -43,8 +43,19 @@ DEFAULT_IMAGE = ("ghcr.io/flop-labs/flop-core/cli:v0.1.321"
 # ESCROW LÀ CHI PHÍ: SDK (compute-channel/session-estimate) ghi "A cooperative spot settle pays the whole escrow
 # to the miner (D-0403), so the escrow is the cost, not a ceiling". Không đặt FLOP_DIRECT_MAX_FLOP -> escrow =
 # minEscrow của offer miner công bố (mức thấp nhất miner nhận), kẹp dưới FLOP_DIRECT_ESCROW_CAP.
-DEFAULT_ESCROW_CAP = Decimal("1")  # trần escrow MỘT phiên khi tự lấy theo offer (kênh devnet thật: 0.2–1.05 FLOP)
-HARD_MAX_FLOP = Decimal("5")       # trần cứng mỗi phiên, kể cả khi cấu hình sai
+DEFAULT_ESCROW_CAP = Decimal("100")  # trần escrow MỘT phiên (FLOP_DIRECT_ESCROW_CAP)
+HARD_MAX_FLOP = Decimal("200")       # trần cứng mỗi phiên, kể cả khi cấu hình sai
+# ĐỊNH CỠ PHIÊN (đo devnet 2026-11-13): mọi model trong registry giá 0.003 FLOP/GFLOP (epochPricePerGflop 3e15 raw),
+# kênh thật khớp 0.00288–0.00299; công suất miner hiệu chuẩn 10–130 GFLOP/s. Một miner chạy liên tục chi được
+# cap × giá × 86400 (10 GF/s ≈ 2600 FLOP/ngày) — nút thắt là CỠ phiên, không phải số phiên. Settle phải chờ tới
+# khi khối lượng <= cap × số block đã trôi, nên phiên được thu cho vừa cap × FLOP_DIRECT_SETTLE_TARGET_SEC.
+DEFAULT_PRICE_PER_GN = Decimal("0.003")
+DEFAULT_CAP_GFS = 10.0               # công suất giả định khi chưa biết gì về miner (thấp -> phiên nhỏ, an toàn)
+DEFAULT_SETTLE_TARGET_SEC = 300      # thời gian chờ settle mục tiêu (< FLOP_DIRECT_TIMEOUT_SEC mặc định 600)
+DEFAULT_MARGIN_PCT = 20              # dư escrow so với ước lượng (thiếu -> CLI từ chối lượt, kênh chờ hạn để hoàn)
+DEFAULT_GN_PER_TOKEN = 2.0           # GFLOP/token khi không suy được cỡ model (≈ 2 × 1B tham số)
+MIN_TOKENS = 16
+GNPT_EMA = 0.5                       # trọng số số đo mới khi học GFLOP/token từ kênh đã settle
 _HASH_RE = re.compile(r"^0x[0-9a-fA-F]{64}$")
 DEFAULT_MAX_PER_DAY = 25.0         # FLOP escrow tối đa mỗi ngày UTC
 DEFAULT_TIMEOUT_SEC = 600          # CLI tự chờ hạn on-chain rồi thu hồi khi miner không xác nhận
@@ -161,13 +172,23 @@ def config() -> tuple:
         errs.append(f"FLOP_DIRECT_VIA={via} có thể mở kênh cưỡng bức (khoá FLOP tới hạn nếu miner không "
                     "xác nhận) — cần FLOP_DIRECT_ALLOW_FORCE=on")
     try:
-        max_tokens = int(_env("FLOP_DIRECT_MAX_TOKENS") or 256)
+        max_tokens = int(_env("FLOP_DIRECT_MAX_TOKENS") or 1024)
         if max_tokens <= 0:
             raise ValueError
     except ValueError:
         errs.append("FLOP_DIRECT_MAX_TOKENS phải là số nguyên dương")
-        max_tokens = 256
-    cfg = {"miners": miners,
+        max_tokens = 1024
+    try:
+        price = Decimal(_env("FLOP_DIRECT_PRICE_PER_GN")) if _env("FLOP_DIRECT_PRICE_PER_GN") else None
+        if price is not None and not (price > 0):
+            raise InvalidOperation
+    except (InvalidOperation, ValueError):
+        errs.append("FLOP_DIRECT_PRICE_PER_GN phải là số dương (FLOP mỗi GFLOP)")
+        price = None
+    cfg = {"miners": miners, "price": price,
+           "settle_target": max(30, int(_num("FLOP_DIRECT_SETTLE_TARGET_SEC", DEFAULT_SETTLE_TARGET_SEC))),
+           "margin": max(0.0, min(200.0, _num("FLOP_DIRECT_MARGIN_PCT", DEFAULT_MARGIN_PCT))) / 100,
+           "default_cap": max(0.1, _num("FLOP_DIRECT_DEFAULT_CAP_GFS", DEFAULT_CAP_GFS)),
            "max_flop": format(max_flop, "f") if max_flop is not None else None,
            "escrow_cap": escrow_cap,
            "max_tokens": max_tokens, "via": via,
@@ -235,6 +256,63 @@ def choose_escrow(rows, miner: str, model_hash, cap: Decimal):
     return _flop_str(esc), f"escrow theo offer {_flop_str(esc)} FLOP", hashes[0]
 
 
+def pick_offer(rows, miner: str, model_hash):
+    """({model_hash, min_escrow Decimal, max_duration int|None} | None, lý do) — offer spot của `miner` (cùng luật
+    chọn như choose_escrow, không áp trần)."""
+    esc, why, mh = choose_escrow(rows, miner, model_hash, HARD_MAX_FLOP * 1000)
+    if esc is None:
+        return None, why
+    durs = []
+    for row in rows or []:
+        o = row.get("offer") if isinstance(row, dict) else None
+        if isinstance(o, dict) and not o.get("forward") and str(o.get("modelHash") or "").lower() == mh \
+                and fg.same_account(o.get("miner"), miner):
+            try:
+                durs.append(int(str(o.get("maxDuration"))))
+            except (TypeError, ValueError):
+                pass
+    return {"model_hash": mh, "min_escrow": Decimal(esc), "max_duration": max(durs) if durs else None}, ""
+
+
+def model_size_b(slug: str):
+    """Cỡ model (tỷ tham số) suy từ slug, vd 'Qwen/Qwen3-14B' -> 14, 'qwen2.5-0.5b-instruct' -> 0.5; None nếu
+    không thấy. Chỉ để ƯỚC LƯỢNG ban đầu — số đo thật từ kênh đã settle thay thế nó."""
+    m = re.findall(r"(?<![0-9.])(\d+(?:\.\d+)?)\s*[bB](?![a-zA-Z])", slug or "")
+    try:
+        return float(m[-1]) if m else None
+    except ValueError:
+        return None
+
+
+def plan_session(*, prompt: str, max_tokens: int, gn_per_token: float, cap_gfs: float, price: Decimal,
+                 min_escrow: Decimal, escrow_cap: Decimal, settle_target: int, margin: float,
+                 max_duration=None):
+    """({escrow, max_tokens, gn_est} | None, lý do). Khối lượng ước lượng = GFLOP/token × (token đề + token trả
+    lời). Thu số token trả lời cho vừa (a) cap × thời gian chờ settle mục tiêu (và maxDuration của offer, block
+    1 giây), (b) trần escrow. Escrow = giá × khối lượng × (1 + biên), không thấp hơn minEscrow của offer.
+    Escrow LÀ chi phí, nên không đặt dư hơn mức cần."""
+    ptok = max(1, len(prompt or "") // 4)
+    secs = settle_target if not max_duration else min(settle_target, int(max_duration))
+    if gn_per_token <= 0 or cap_gfs <= 0 or price <= 0:
+        return None, "thiếu giá/công suất/cỡ model để định cỡ phiên"
+    tokens = min(int(max_tokens), int(cap_gfs * secs / gn_per_token) - ptok)
+    unit = price * Decimal(str(gn_per_token)) * Decimal(str(1 + margin))          # FLOP mỗi token
+    by_cap = int(escrow_cap / unit) - ptok
+    tokens = min(tokens, by_cap)
+    floor = min(MIN_TOKENS, int(max_tokens))          # operator tự đặt ít token hơn thì sàn là số đó
+    if tokens < floor:
+        if by_cap < floor:
+            return None, (f"một phiên tối thiểu vượt trần {_flop_str(escrow_cap)} FLOP (FLOP_DIRECT_ESCROW_CAP)")
+        return None, (f"miner công suất {cap_gfs:g} GFLOP/s không settle kịp {floor} token của model này trong "
+                      f"{secs}s")
+    gn = gn_per_token * (ptok + tokens)
+    escrow = max(min_escrow, unit * Decimal(ptok + tokens))
+    if escrow > escrow_cap:
+        return None, (f"minEscrow của offer {_flop_str(min_escrow)} FLOP > trần {_flop_str(escrow_cap)} "
+                      "(FLOP_DIRECT_ESCROW_CAP)")
+    return {"escrow": _flop_str(escrow), "max_tokens": tokens, "gn_est": round(gn, 3), "ptok": ptok}, ""
+
+
 def cli_command(workdir: str, env_names) -> tuple:
     """(lệnh gốc, đường dẫn keystore mà CLI thấy). Mặc định image Docker ghim digest; FLOP_DIRECT_CLI =
     lệnh cục bộ (vd `node /path/cli.js`) cho môi trường không có Docker. Biến môi trường chỉ truyền TÊN
@@ -299,6 +377,28 @@ def classify_channel(info, addr: str):
     return "open", 0.0
 
 
+def _learn(g: dict, ms: dict, p: dict, info: dict) -> None:
+    """Học từ một kênh đã settle: GFLOP/token THẬT của model (aggregateGn / token) và công suất của miner."""
+    try:
+        gn = float(info.get("aggregateGn") or 0)
+        toks = int(p.get("ptok") or 0) + int(p.get("completion_tokens") or 0)
+        mh = p.get("model_hash")
+        if gn > 0 and toks > 0 and mh:
+            obs = gn / toks
+            gm = dict(g.get("gnpt") or {})
+            old = gm.get(mh)
+            gm[mh] = round(obs if not isinstance(old, (int, float)) else old * (1 - GNPT_EMA) + obs * GNPT_EMA, 6)
+            g["gnpt"] = gm
+    except (TypeError, ValueError):
+        pass
+    try:
+        cap = float(info.get("capGflopsPerSec") or 0)
+        if cap > 0 and p.get("miner"):
+            ms.setdefault(_mkey(p["miner"]), {})["cap"] = cap
+    except (TypeError, ValueError):
+        pass
+
+
 def _mkey(miner: str) -> str:
     """Khoá trạng thái theo MINER (khoá công khai hex) — cùng ví khác prefix SS58 là một miner."""
     pk = fg.account_pubkey(miner)
@@ -307,11 +407,13 @@ def _mkey(miner: str) -> str:
 
 def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, prompt: str = None,
              prompts=None, book_fn=None, deny=(), deadline=None, runner=None, alert=None, log=print,
-             clock=time.time, offers_fn=None) -> dict:
+             clock=time.time, offers_fn=None, price_fn=None, miner_cap_fn=None) -> dict:
     """Một nhịp mua trực tiếp: tối đa FLOP_DIRECT_MAX_PER_RUN phiên, xoay vòng các miner. Trả {"outcome", ...};
     KHÔNG ném lỗi. `book_fn(amount, channel_id, model)` ghi sổ (None = chạy tập devnet, không ghi).
     `fetch_channel(channel_id)` -> dict explorer | None. `offers_fn(miner, model_hash)` -> các dòng
     /api/session-offers của miner. `prompts` = danh sách đề (mỗi phiên một đề, xoay theo prompt_idx).
+    `price_fn(model_hash)` -> FLOP/GFLOP | None; `miner_cap_fn(miner)` -> GFLOP/s đã hiệu chuẩn | None (để định cỡ
+    phiên khi chưa học được từ kênh của chính mình).
     `alert(text)` gửi cảnh báo (Telegram). Trạng thái bền trong state[KEY].
 
     Chốt chặn theo TỪNG MINER (một miner hỏng không làm dừng miner khác): nghỉ sau lỗi / không có offer, giữ
@@ -381,6 +483,7 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
             st["paid"] = int(st.get("paid") or 0) + 1
             st["paid_flop"] = round(float(st.get("paid_flop") or 0) + amount, 9)
             g["stats"] = st
+            _learn(g, ms, p, info)
             log(f"[direct] kênh {p['channel'][:12]}… đã settle đứng tên ví mình: {amount:.6g} FLOP"
                 + ("" if book_fn else " (devnet tập, không ghi sổ)"))
         elif kind == "refunded":
@@ -449,7 +552,8 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
             m, st = pick, mstate(pick)
             # Escrow: cố định (FLOP_DIRECT_MAX_FLOP) hoặc theo offer miner công bố. Chế độ offer mà miner không có
             # offer -> không gọi CLI (khỏi kéo image + mở kết nối chain chỉ để nhận "no live signed offer").
-            max_flop = cfg["max_flop"]
+            max_flop, tokens, plan = cfg["max_flop"], cfg["max_tokens"], None
+            prompt_i = plist[int(g.get("prompt_idx") or 0) % len(plist)]
             if offers_fn is not None and (max_flop is None or cfg["via"] == "offer"):
                 k = _mkey(m["miner"])
                 if k not in offer_cache:
@@ -462,13 +566,61 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
                     st.update(wait_until=now + 900, wait_why="offer lookup")
                     last = ("offer_lookup_error", f"không đọc được session-offers ({rows})")
                     continue
-                esc, why, _mh = choose_escrow(rows, m["miner"], m["model_hash"], cfg["escrow_cap"])
-                if esc is None:
+                info, why = pick_offer(rows, m["miner"], m["model_hash"])
+                if info is None:
                     st.update(wait_until=now + ERROR_BACKOFF_SEC, wait_why="no offer")
                     last = ("no_offer", why)
                     continue
+                esc = _flop_str(info["min_escrow"])
                 if max_flop is None:
-                    max_flop = esc
+                    # Định cỡ theo việc thật: GFLOP/token (đã học, hoặc suy từ cỡ model), công suất miner, giá.
+                    mh = info["model_hash"]
+                    learned = (g.get("gnpt") or {}).get(mh)
+                    size = model_size_b(m["model"])
+                    gnpt = float(learned) if isinstance(learned, (int, float)) and learned > 0 else (
+                        2.0 * size if size else DEFAULT_GN_PER_TOKEN)
+                    cap = st.get("cap")
+                    if not cap and miner_cap_fn is not None:
+                        try:
+                            cap = miner_cap_fn(m["miner"])
+                        except Exception:
+                            cap = None
+                        if cap:
+                            st["cap"] = float(cap)
+                    price = cfg["price"]
+                    if price is None and price_fn is not None:
+                        try:
+                            price = price_fn(mh)
+                        except Exception:
+                            price = None
+                    if info["min_escrow"] > cfg["escrow_cap"]:
+                        st.update(wait_until=now + ERROR_BACKOFF_SEC, wait_why="offer above cap")
+                        last = ("no_offer", f"minEscrow của offer {_flop_str(info['min_escrow'])} FLOP > trần "
+                                            f"{_flop_str(cfg['escrow_cap'])} (FLOP_DIRECT_ESCROW_CAP)")
+                        continue
+                    # Phần trần NGÀY còn lại cũng là trần của phiên này: thu phiên cho vừa thay vì bỏ hẳn.
+                    cap_eff = cfg["escrow_cap"]
+                    if cfg["per_day"] > 0:
+                        left = Decimal(str(cfg["per_day"])) - Decimal(str(ds["escrow"]))
+                        if left <= 0:
+                            last = ("daily_cap", f"đã cam kết {ds['escrow']:.4g} FLOP hôm nay, trần {cfg['per_day']:g}")
+                            break
+                        cap_eff = min(cap_eff, left)
+                    plan, why = plan_session(
+                        prompt=prompt_i, max_tokens=cfg["max_tokens"], gn_per_token=gnpt,
+                        cap_gfs=float(cap or cfg["default_cap"]), price=Decimal(str(price or DEFAULT_PRICE_PER_GN)),
+                        min_escrow=info["min_escrow"], escrow_cap=cap_eff,
+                        settle_target=min(cfg["settle_target"], cfg["timeout"] - 60),
+                        margin=cfg["margin"], max_duration=info["max_duration"])
+                    if plan is None:
+                        if cap_eff < cfg["escrow_cap"] and "trần" in why:
+                            last = ("daily_cap", f"phần trần ngày còn lại ({_flop_str(cap_eff)} FLOP) không đủ một phiên")
+                            break
+                        st.update(wait_until=now + ERROR_BACKOFF_SEC, wait_why="session sizing")
+                        last = ("no_offer", why)
+                        continue
+                    max_flop, tokens = plan["escrow"], plan["max_tokens"]
+                    plan = {**plan, "model_hash": mh}
                 elif Decimal(max_flop) < Decimal(esc):
                     st.update(wait_until=now + ERROR_BACKOFF_SEC, wait_why="escrow below offer")
                     last = ("no_offer", f"FLOP_DIRECT_MAX_FLOP {max_flop} < minEscrow của offer {esc} — CLI sẽ không "
@@ -501,11 +653,10 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
                     last = ("refused", "keystore không ra đúng địa chỉ ví agent")
                     break
             base, ks = cli_command(work, [PASSWORD_ENV])
-            prompt_i = plist[int(g.get("prompt_idx") or 0) % len(plist)]
             cmd = base + ["--network", network, "--keystore", ks, "--password-env", PASSWORD_ENV,
                           "--output", "agent", "session", "run", "--miner", m["miner"], "--model", m["model"],
                           "--endpoint", m["endpoint"], "--prompt", prompt_i[:4000], "--max-flop", max_flop,
-                          "--max-tokens", str(cfg["max_tokens"]), "--via", cfg["via"]]
+                          "--max-tokens", str(tokens), "--via", cfg["via"]]
             ds = {"day": day, "escrow": round(float(ds["escrow"]) + per_session, 9)}
             g["day"] = ds
             g["last_attempt"] = now
@@ -526,12 +677,18 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
                           "ngừng miner này, kiểm tay.")
                     last = ("unknown_outcome", "thành công nhưng thiếu id kênh")
                     continue
-                g["pending"] = g["pending"] + [{"channel": ch, "ts": now, "network": network, "miner": m["miner"],
-                                                "model": m["model"], "settle_tx": str(res.get("settle_tx") or "")[:80],
-                                                "max_flop": max_flop}]
+                rec = {"channel": ch, "ts": now, "network": network, "miner": m["miner"], "model": m["model"],
+                       "settle_tx": str(res.get("settle_tx") or "")[:80], "max_flop": max_flop}
+                if plan:
+                    rec.update(model_hash=plan["model_hash"], ptok=plan["ptok"], gn_est=plan["gn_est"])
+                try:
+                    rec["completion_tokens"] = int(str(res.get("completion_tokens")))
+                except (TypeError, ValueError):
+                    pass
+                g["pending"] = g["pending"] + [rec]
                 g["prompt_idx"] = int(g.get("prompt_idx") or 0) + 1
                 out["opened"] += 1
-                out["sessions"].append({"miner": m["miner"], "channel": ch, "escrow": max_flop})
+                out["sessions"].append({"miner": m["miner"], "channel": ch, "escrow": max_flop, "max_tokens": tokens})
                 st["sessions"] = int(st.get("sessions") or 0) + 1
                 log(f"[direct] phiên với miner {m['miner'][:8]}… xong, kênh {ch[:12]}… "
                     f"({res.get('completion_tokens') or '?'} token, escrow {max_flop}) — chờ explorer finalized để ghi sổ")

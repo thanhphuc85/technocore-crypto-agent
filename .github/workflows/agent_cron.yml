@@ -377,10 +377,18 @@ jobs:
           # Kênh CLI báo đã settle mà explorer chưa ghi nhận: quá ngần này thì ngừng mở thêm (mặc định 20).
           FLOP_DIRECT_MAX_PENDING: ${{ vars.FLOP_DIRECT_MAX_PENDING }}
           FLOP_DIRECT_MODEL: ${{ vars.FLOP_DIRECT_MODEL }}
-          # Escrow = CHI PHÍ phiên (settle hợp tác trả nguyên escrow cho miner). Trống -> lấy minEscrow của offer
-          # miner công bố, kẹp dưới FLOP_DIRECT_ESCROW_CAP (mặc định 1, trần cứng 5). Đặt số -> escrow cố định.
+          # Escrow = CHI PHÍ phiên. Trống -> ĐỊNH CỠ theo việc thật: giá model × GFLOP ước lượng (học từ kênh đã
+          # settle) cho vừa công suất miner × FLOP_DIRECT_SETTLE_TARGET_SEC, không thấp hơn minEscrow của offer,
+          # kẹp dưới FLOP_DIRECT_ESCROW_CAP (mặc định 100, trần cứng 200) và phần trần ngày còn lại.
+          # Đặt số -> escrow cố định.
           FLOP_DIRECT_MAX_FLOP: ${{ vars.FLOP_DIRECT_MAX_FLOP }}
           FLOP_DIRECT_ESCROW_CAP: ${{ vars.FLOP_DIRECT_ESCROW_CAP }}
+          # Định cỡ phiên: thời gian chờ settle mục tiêu (mặc định 300s), biên escrow % (mặc định 20), giá
+          # FLOP/GFLOP ghi đè registry, công suất giả định khi chưa biết miner (mặc định 10 GFLOP/s).
+          FLOP_DIRECT_SETTLE_TARGET_SEC: ${{ vars.FLOP_DIRECT_SETTLE_TARGET_SEC }}
+          FLOP_DIRECT_MARGIN_PCT: ${{ vars.FLOP_DIRECT_MARGIN_PCT }}
+          FLOP_DIRECT_PRICE_PER_GN: ${{ vars.FLOP_DIRECT_PRICE_PER_GN }}
+          FLOP_DIRECT_DEFAULT_CAP_GFS: ${{ vars.FLOP_DIRECT_DEFAULT_CAP_GFS }}
           # Miner có offer cho nhiều model: chỉ định hash model (0x…64). Không đoán model theo tên.
           FLOP_DIRECT_MODEL_HASH: ${{ vars.FLOP_DIRECT_MODEL_HASH }}
           FLOP_DIRECT_MAX_TOKENS: ${{ vars.FLOP_DIRECT_MAX_TOKENS }}
