@@ -5259,9 +5259,17 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
                 persist_ledger_to_kv(private_key, did_of(private_key))
             return res
 
+        def offers(miner, model_hash):
+            # Cùng nguồn SDK dùng khi chọn offer (indexer /api/session-offers); lọc theo miner (và model nếu biết).
+            params = {"miner": miner, "limit": "100", **({"model": model_hash} if model_hash else {})}
+            r = requests.get(f"{explorer}/api/session-offers", params=params, headers={"User-Agent": UA}, timeout=15)
+            r.raise_for_status()
+            d = r.json()
+            return d.get("data") if isinstance(d, dict) and isinstance(d.get("data"), list) else []
+
         r = flop_direct.run_step(
             state, agent_key=private_key, now=now, prompt=prompt, network=network,
-            fetch_channel=fetch_channel, book_fn=book if testnet else None,
+            fetch_channel=fetch_channel, book_fn=book if testnet else None, offers_fn=offers,
             deny=[d for d in PROACTIVE_DENY_DIDS if not d.startswith("did:")],
             deadline=run_deadline(), alert=_telegram_send)
         save_state({flop_direct.KEY: state.get(flop_direct.KEY)})

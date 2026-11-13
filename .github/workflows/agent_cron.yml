@@ -370,7 +370,12 @@ jobs:
           FLOP_DIRECT_MINER: ${{ vars.FLOP_DIRECT_MINER }}
           FLOP_DIRECT_ENDPOINT: ${{ vars.FLOP_DIRECT_ENDPOINT }}
           FLOP_DIRECT_MODEL: ${{ vars.FLOP_DIRECT_MODEL }}
+          # Escrow = CHI PHÍ phiên (settle hợp tác trả nguyên escrow cho miner). Trống -> lấy minEscrow của offer
+          # miner công bố, kẹp dưới FLOP_DIRECT_ESCROW_CAP (mặc định 1, trần cứng 5). Đặt số -> escrow cố định.
           FLOP_DIRECT_MAX_FLOP: ${{ vars.FLOP_DIRECT_MAX_FLOP }}
+          FLOP_DIRECT_ESCROW_CAP: ${{ vars.FLOP_DIRECT_ESCROW_CAP }}
+          # Miner có offer cho nhiều model: chỉ định hash model (0x…64). Không đoán model theo tên.
+          FLOP_DIRECT_MODEL_HASH: ${{ vars.FLOP_DIRECT_MODEL_HASH }}
           FLOP_DIRECT_MAX_TOKENS: ${{ vars.FLOP_DIRECT_MAX_TOKENS }}
           FLOP_DIRECT_MAX_PER_DAY: ${{ vars.FLOP_DIRECT_MAX_PER_DAY }}
           FLOP_DIRECT_TIMEOUT_SEC: ${{ vars.FLOP_DIRECT_TIMEOUT_SEC }}
