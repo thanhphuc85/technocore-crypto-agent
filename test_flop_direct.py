@@ -1378,3 +1378,113 @@ def test_agent_filters_expired_offers_and_passes_the_indexer(monkeypatch):
     run = cli.sessions()[0]
     assert Decimal(run["cmd"][run["cmd"].index("--max-flop") + 1]) >= Decimal("0.05")  # không theo offer hết hạn
     assert run["env"]["FLOP_INDEXER_URL"] == "https://explorer.testnet.flop.network"
+
+
+# --- audit vòng 3: settle cưỡng bức, đối soát khi tắt, đổi mạng -----------------------------------------------------
+
+class FinCLI(CLI):
+    """CLI giả có lệnh `channel finalize`."""
+
+    def __init__(self, fin=(0, json.dumps({"ok": True, "channel_id": CH, "tx_hash": "0x" + "aa" * 32}), ""), **kw):
+        super().__init__(**kw)
+        self.fin = fin
+
+    def __call__(self, cmd, env, timeout):
+        if "finalize" in cmd:
+            self.calls.append({"cmd": list(cmd), "env": dict(env), "timeout": timeout})
+            return self.fin
+        return super().__call__(cmd, env, timeout)
+
+    def finalizes(self):
+        return [c for c in self.calls if "finalize" in c["cmd"]]
+
+
+FORCED = (0, json.dumps({"ok": True, "channel": CH, "cooperative": False, "completion_tokens": "2"}), "")
+OTHER_SESSION = (0, json.dumps({"ok": True, "channel": CH2}), "")
+STILL_OPEN = {"agent": ADDR, "status": "open", "paymentStatus": "LOCKED", "observationHead": "finalized"}
+
+
+def test_force_settled_session_is_finalized_after_the_challenge_window():
+    st, alerts = {}, []
+    step(st, CLI(session=FORCED))
+    assert st[fd.KEY]["pending"][0]["force"] is True
+    cli = FinCLI(session=OTHER_SESSION)
+    step(st, cli, explorer={CH: STILL_OPEN}, now=NOW + 7 * 3600, alerts=alerts)
+    assert cli.finalizes() == [] and not any(CH[:18] in a for a in alerts)            # chờ 7 ngày là bình thường
+    cli = FinCLI(session=OTHER_SESSION)
+    t = NOW + fd.FINALIZE_AFTER_SEC + 1
+    step(st, cli, explorer={CH: STILL_OPEN}, now=t)
+    fin = cli.finalizes()
+    c = fin[0]["cmd"]
+    assert len(fin) == 1 and c[-1] == CH and c[len(c) - 1 - c[::-1].index("--network") + 1] == "testnet"
+    rec = [p for p in st[fd.KEY]["pending"] if p["channel"] == CH][0]
+    assert rec["fin_tries"] == 1 and rec["fin_tx"].startswith("0xaa")
+    cli = FinCLI(session=OTHER_SESSION)
+    step(st, cli, explorer={CH: STILL_OPEN}, now=t + 3600)
+    assert cli.finalizes() == []                                                        # mỗi ngày một lần
+    step(st, FinCLI(session=OTHER_SESSION), explorer={CH: paid()}, now=t + 7200)
+    assert all(p["channel"] != CH for p in st[fd.KEY]["pending"])
+    assert tm.load_ledger()["session_cumulative"]["FLOP"] == "0.021"                    # PAID sau finalize -> ghi sổ
+
+
+def test_finalize_gives_up_after_three_failures_with_an_alert():
+    st, alerts = {}, []
+    step(st, CLI(session=FORCED))
+    bad = (1, "", json.dumps({"ok": False, "message": "ChallengeWindowOpen"}))
+    t = NOW + fd.FINALIZE_AFTER_SEC + 1
+    for i in range(4):
+        cli = FinCLI(fin=bad, session=OTHER_SESSION)
+        step(st, cli, explorer={CH: STILL_OPEN}, now=t + i * fd.FINALIZE_RETRY_SEC, alerts=alerts)
+        assert len(cli.finalizes()) == (1 if i < 3 else 0)
+    assert sum(1 for a in alerts if "finalize" in a) == 1
+
+
+def test_disabled_agent_still_books_channels_left_pending(monkeypatch):
+    st = {}
+    step(st, CLI())
+    monkeypatch.setenv("FLOP_DIRECT_ENABLED", "off")
+    cli = CLI()
+    r = step(st, cli, explorer={CH: paid()}, now=NOW + 300)
+    assert r["outcome"] == "off" and r["booked"] == 1 and cli.calls == [] and st[fd.KEY]["pending"] == []
+    assert step(st, CLI(), now=NOW + 600)["outcome"] == "off"
+
+
+def test_bad_config_or_denied_miners_still_reconcile(monkeypatch):
+    st = {}
+    step(st, CLI())
+    monkeypatch.setenv("FLOP_DIRECT_VIA", "nonsense")
+    r = step(st, CLI(), explorer={CH: paid()}, now=NOW + 300)
+    assert r["outcome"] == "unconfigured" and r["booked"] == 1
+    monkeypatch.setenv("FLOP_DIRECT_VIA", "offer")
+    st2 = {}
+    step(st2, CLI(session=OTHER_SESSION))
+    monkeypatch.setenv("FLOP_DIRECT_DENY_MINERS", MINER)
+    r = step(st2, CLI(), explorer={CH2: paid()}, now=NOW + 300)
+    assert r["outcome"] == "refused" and r["booked"] == 1
+
+
+def test_channels_of_the_other_network_are_dropped_without_lookup():
+    st = {}
+    step(st, CLI(), network="devnet")
+    seen = []
+    explorer = type("E", (), {"get": lambda self, c: seen.append(c) or None})()
+    step(st, CLI(session=OTHER_SESSION), explorer=explorer, now=NOW + 300)
+    assert CH not in seen and all(p["channel"] != CH for p in st[fd.KEY]["pending"])
+    assert st[fd.KEY]["stats"]["other_network"] == 1
+
+
+def test_learned_capacity_survives_an_early_stop():
+    st = {}
+    step(st, CLI(session=(0, json.dumps({"ok": True, "channel": CH, "completion_tokens": "2"}), "")))
+    st[fd.KEY]["wait_until"] = NOW + 99999                                              # chốt chung dừng sớm
+    step(st, CLI(), explorer={CH: {**paid(), "capGflopsPerSec": 77}}, now=NOW + 300)
+    assert mst(st)["cap"] == 77.0
+
+
+def test_agent_reconciles_while_disabled(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_ENABLED", "off")
+    called = []
+    monkeypatch.setattr(fd, "run_step", lambda state, **kw: called.append(1) or {"outcome": "off", "opened": 0})
+    monkeypatch.setattr(ac, "kv_set", lambda *a, **k: True)
+    assert ac.direct_session_step({}, KEY, NOW) == "off" and called == []
+    assert ac.direct_session_step({fd.KEY: {"pending": [{"channel": CH}]}}, KEY, NOW) == "off" and called == [1]
