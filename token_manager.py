@@ -635,6 +635,10 @@ def record_direct_spend(amount, memo, channel_id: str, token: str = None, *, esc
     # không tách được hai đường). Mở kỳ mới (mạng reset) thì về 0 cùng gateway_epoch_done.
     de = state.setdefault("direct_epoch_done", {})
     de[token] = _fmt((_parse_amount(de.get(token, "0")) or Decimal(0)) + amt)
+    # ... và phần ghi sổ KỂ TỪ lần đọc chain nhất quán gần nhất: nếu lần đọc sau hoá ra là chain đã reset (phát hiện
+    # trễ tới CHAIN_RESET_READINGS lượt khi không có genesis), các phiên này thuộc chain MỚI — chuyển sang kỳ mới.
+    dso = state.setdefault("direct_since_ok", {})
+    dso[token] = _fmt((_parse_amount(dso.get(token, "0")) or Decimal(0)) + amt)
     ep_map = state.setdefault("gateway_epoch_done", {})
     done = (state.get("gateway_attributed") or {}).get(token, "0")
     ep_map[token] = _fmt((_parse_amount(ep_map.get(token, done)) or Decimal(0)) + amt)
@@ -769,9 +773,14 @@ def confirm_gateway_attribution(onchain_total, token: str = None, *, path: str =
         log(f"[ledger] chain reset ({'genesis đổi' if reset else f'{CHAIN_RESET_READINGS} lần đọc thấp liền'}): "
             f"tổng on-chain {_fmt(total)} < mốc {_fmt(hw)} — mở kỳ mới "
             f"({_fmt(epoch_done)} {token} đã xác nhận ở kỳ cũ giữ nguyên)")
-        epoch_done, hw = Decimal(0), total
+        # Chi TRỰC TIẾP ghi sổ từ lần đọc nhất quán gần nhất nằm trên chain MỚI (lúc đó chain cũ còn khớp): đưa vào
+        # kỳ mới. Đặt 0 thì chain mới đã có khoản đó mà kỳ mới không biết -> cổng gateway đọc nó thành "gateway đứng
+        # tên ví mình" và xác nhận nhầm (đo: 58.5 FLOP). Lỡ có một phiên chain cũ trong đó thì cổng chỉ chặt hơn.
+        carry = min(total, _parse_amount((state.get("direct_since_ok") or {}).get(token, "0")) or Decimal(0))
+        epoch_done, hw = carry, total
         low_map.pop(token, None)
-        state.setdefault("direct_epoch_done", {})[token] = "0"     # phần trực tiếp cũng theo kỳ
+        state.setdefault("direct_epoch_done", {})[token] = _fmt(carry)    # phần trực tiếp cũng theo kỳ
+        state.setdefault("direct_since_ok", {})[token] = "0"
         if cid:
             id_map[token] = cid
         else:
@@ -779,6 +788,7 @@ def confirm_gateway_attribution(onchain_total, token: str = None, *, path: str =
     else:
         low_map.pop(token, None)
         hw = total
+        state.setdefault("direct_since_ok", {})[token] = "0"   # lần đọc nhất quán: chi trực tiếp tới đây thuộc kỳ này
         # Ghi genesis của kỳ ở lần đọc NHẤT QUÁN. Genesis khác mà tổng không tụt: không kết luận gì
         # (gateway báo nhầm, hoặc chain mới đã vượt mốc cũ) — giữ cái đã ghi, lần đọc thấp sau sẽ quyết.
         if cid and (not known or cid == known):

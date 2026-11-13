@@ -125,6 +125,18 @@ def observe(state: dict, *, settled_onchain: int, status: str, spent_today_oncha
     return out
 
 
+def unmark_alert(state: dict, key: str, prev) -> None:
+    """Gửi cảnh báo THẤT BẠI: trả mốc "đã báo" về giá trị trước lượt này, để lượt sau (đủ ngưỡng) báo lại thay vì im
+    tới hết realert_sec (tới 6 giờ). Đếm lượt trượt giữ nguyên."""
+    w = state.get(key)
+    if not isinstance(w, dict):
+        return
+    if prev:
+        w["alerted_ts"] = prev
+    else:
+        w.pop("alerted_ts", None)
+
+
 DIRECT_KEY = "real_spend_watch_direct"
 # Mua trực tiếp: "đã mở phiên, chờ explorer ghi PAID" (opened), chạm nhịp trải đều (paced) và trần ngày
 # (daily_cap, phanh operator đặt) là ĐÚNG THIẾT KẾ. Còn lại — low_balance (ví hết FLOP), no_offer (miner chưa/không

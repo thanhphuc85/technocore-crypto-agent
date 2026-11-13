@@ -1697,3 +1697,33 @@ def test_pending_escrow_survives_the_trimmed_kv_view():
                       "model_hash": MH, "ptok": 10}]}
     v = fd.durable_view(g, level=1)
     assert v["pending"][0]["max_flop"] == "99.5" and "model_hash" not in v["pending"][0]
+
+
+# --- gửi Telegram lỗi thì lượt sau báo lại -------------------------------------------------------------------------
+
+def test_failed_alert_is_retried_next_run(monkeypatch):
+    sent, ok = [], [False]
+    monkeypatch.setattr(ac, "_telegram_send", lambda m: sent.append(m) or ok[0])
+    st = {}
+
+    def run(i):
+        ac._DIRECT_LAST = ({"outcome": "low_balance", "settled": 0, "reason": "hết FLOP"}, "testnet", "")
+        ac.direct_watchdog_step(st, NOW + i * 300)
+
+    for i in range(6):
+        run(i)
+    assert len(sent) == 1 and not st["real_spend_watch_direct"].get("alerted_ts")   # gửi lỗi: chưa coi là đã báo
+    ok[0] = True
+    run(6)
+    assert len(sent) == 2 and st["real_spend_watch_direct"]["alerted_ts"] == NOW + 6 * 300
+    run(7)
+    assert len(sent) == 2                                                             # đã báo: chờ realert
+
+
+def test_unmark_alert_restores_the_previous_mark():
+    import flop_watchdog as wd
+    st = {wd.DIRECT_KEY: {"misses": 9, "alerted_ts": 500}}
+    wd.unmark_alert(st, wd.DIRECT_KEY, 100)
+    assert st[wd.DIRECT_KEY] == {"misses": 9, "alerted_ts": 100}
+    wd.unmark_alert(st, wd.DIRECT_KEY, None)
+    assert "alerted_ts" not in st[wd.DIRECT_KEY]

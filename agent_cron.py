@@ -2090,7 +2090,8 @@ def persist_ledger_to_kv(private_key, did) -> None:
                 "direct_attributed": led.get("direct_attributed", {}),
                 # Phần trực tiếp trong kỳ chain hiện tại: cổng đứng tên gateway trừ nó khỏi số chain.
                 "direct_epoch_done": led.get("direct_epoch_done", {}),
-                "direct_count": led.get("direct_count", {})}
+                "direct_count": led.get("direct_count", {}),
+                "direct_since_ok": led.get("direct_since_ok", {})}
         entries = (led.get("entries", []) or [])
         body = None
         # Cắt dần tới khi VỪA giới hạn. Số dư và các tổng chạy không suy từ entries, nên
@@ -5369,14 +5370,16 @@ def direct_watchdog_step(state: dict, now: int) -> None:
             return
         r, network, explorer = last
         bal = (r or {}).get("balance")
+        prev_alert = (state.get(_wd.DIRECT_KEY) or {}).get("alerted_ts")
         w = _wd.observe_direct(state, r, now=now, network=network, balance=bal,
                                alert_runs=int(_env_float("FLOP_REAL_SPEND_ALERT_RUNS", 6)),
                                realert_sec=int(_env_float("FLOP_REAL_SPEND_REALERT_HOURS", 6) * 3600))
-        save_state({_wd.DIRECT_KEY: state.get(_wd.DIRECT_KEY)})
         for _k in ("alert", "recovered"):
             if w.get(_k):
                 print(f"[real-spend] {w[_k].splitlines()[0]}")
-                _telegram_send(w[_k])
+                if not _telegram_send(w[_k]) and _k == "alert":
+                    _wd.unmark_alert(state, _wd.DIRECT_KEY, prev_alert)   # gửi lỗi: lượt sau báo lại
+        save_state({_wd.DIRECT_KEY: state.get(_wd.DIRECT_KEY)})
     except Exception as e:
         print(f"[real-spend] bộ canh mua trực tiếp bỏ qua ({str(e)[:80]})")
 
@@ -6187,6 +6190,7 @@ def main():
             if _tmw.testnet_enabled():
                 import flop_watchdog as _wd
                 _pend = _wd.note_pending(state, _wd_last, now)
+                _prev_alert = (state.get(_wd.KEY) or {}).get("alerted_ts")
                 _led = _tmw.load_ledger()
                 _today = time.strftime("%Y-%m-%d", time.gmtime(now))
                 _sbd = ((_led.get("session_by_day") or {}).get(_tmw.default_token()) or {})
@@ -6197,11 +6201,12 @@ def main():
                     reason=_wd_last.get("reason", ""),
                     alert_runs=int(_env_float("FLOP_REAL_SPEND_ALERT_RUNS", 6)),
                     realert_sec=int(_env_float("FLOP_REAL_SPEND_REALERT_HOURS", 6) * 3600))
-                save_state({_wd.KEY: state.get(_wd.KEY), _wd.PENDING_KEY: state.get(_wd.PENDING_KEY)})
                 for _k in ("alert", "recovered"):
                     if _w.get(_k):
                         print(f"[real-spend] {_w[_k].splitlines()[0]}")
-                        _telegram_send(_w[_k])
+                        if not _telegram_send(_w[_k]) and _k == "alert":
+                            _wd.unmark_alert(state, _wd.KEY, _prev_alert)   # gửi lỗi: lượt sau báo lại
+                save_state({_wd.KEY: state.get(_wd.KEY), _wd.PENDING_KEY: state.get(_wd.PENDING_KEY)})
         except Exception as e:
             print(f"[real-spend] bỏ qua ({str(e)[:100]})")
 
