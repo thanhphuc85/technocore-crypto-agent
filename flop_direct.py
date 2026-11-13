@@ -407,7 +407,10 @@ def last_json(text: str):
 
 def classify_channel(info, addr: str):
     """(kết quả, FLOP) cho một kênh theo explorer: 'paid' (đứng tên ví mình, PAID, finalized),
-    'refunded' (đóng mà không trả), 'foreign' (không đứng tên ví mình), 'open' (chưa xong), 'missing'."""
+    'refunded' (explorer báo RÕ đã hoàn: paymentStatus REFUNDED hoặc timedout/refunded/expired), 'posted' (settled/
+    closed mà chưa PAID — settle cưỡng bức chờ hết cửa sổ tranh chấp rồi finalize), 'foreign' (không đứng tên ví
+    mình), 'open' (chưa xong), 'missing'. Devnet thật chỉ có open/LOCKED, timedout/REFUNDED, settled/PAID: không
+    được coi "settled mà chưa PAID" là hoàn tiền — bỏ nó là bỏ luôn khoản chi chờ finalize."""
     if not isinstance(info, dict):
         return "missing", 0.0
     if info.get("agent") and not fg.same_account(info.get("agent"), addr):
@@ -421,8 +424,10 @@ def classify_channel(info, addr: str):
         except ValueError:
             return "open", 0.0
         return "paid", raw / 1e18
-    if final and status in ("settled", "closed", "refunded", "expired", "timedout", "timed_out"):
+    if final and (pay == "REFUNDED" or status in ("refunded", "expired", "timedout", "timed_out")):
         return "refunded", 0.0
+    if final and status in ("settled", "closed"):
+        return "posted", 0.0
     return "open", 0.0
 
 
@@ -474,7 +479,8 @@ def pace_limit(cfg: dict, now: int, salt: str = "") -> tuple[float, bool]:
 _DURABLE_TOP = ("day", "unknown_until", "wait_until", "wait_why", "prompt_idx", "miner_idx", "gnpt", "stats",
                 "last_attempt", "orphan_since", "done")
 _DURABLE_MINER = ("unknown_until", "wait_until", "wait_why", "cap", "sessions")
-_PENDING_CORE = ("channel", "ts", "network", "miner", "error", "alerted", "force", "fin_tries", "fin_at")
+_PENDING_CORE = ("channel", "ts", "network", "miner", "error", "alerted", "force", "fin_tries", "fin_at", "fin_tx",
+                 "fin_alerted")
 _PENDING_LEARN = ("model", "model_hash", "ptok", "completion_tokens", "max_flop")
 
 
@@ -700,9 +706,19 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
                   f"{MISSING_DROP_SEC // 3600}h — bỏ theo dõi (không ghi sổ). Kiểm ví {addr[:8]}… trên RPC nếu nghi FLOP bị khoá.")
         else:
             age = now - int(p.get("ts") or now)
+            if kind == "posted" and not p.get("force"):
+                p = {**p, "force": True}            # explorer cho thấy settle cưỡng bức (kênh mồ côi / khôi phục từ KV)
             if p.get("force"):
                 # Settle cưỡng bức: chờ cửa sổ tranh chấp 7 ngày là BÌNH THƯỜNG — không báo "kẹt" sau 6 giờ.
-                if age >= FINALIZE_AFTER_SEC and now - int(p.get("fin_at") or 0) >= FINALIZE_RETRY_SEC \
+                if p.get("fin_tx"):
+                    # Đã finalize thành công: chỉ chờ explorer ghi PAID, KHÔNG gọi lại (lần sau sẽ lỗi vì kênh đã xong,
+                    # tốn phí và báo nhầm "thất bại"). Quá FINALIZE_RETRY_SEC × 3 mà chưa PAID thì báo một lần.
+                    if now - int(p.get("fin_at") or now) >= FINALIZE_RETRY_SEC * FINALIZE_MAX_TRIES \
+                            and not p.get("fin_alerted"):
+                        p = {**p, "fin_alerted": now}
+                        alert(f"⚠️ FLOP direct: kênh {p['channel'][:18]}… đã finalize (tx {str(p['fin_tx'])[:18]}…) "
+                              f"{FINALIZE_MAX_TRIES} ngày mà explorer chưa ghi PAID — kiểm kênh trên explorer/RPC.")
+                elif age >= FINALIZE_AFTER_SEC and now - int(p.get("fin_at") or 0) >= FINALIZE_RETRY_SEC \
                         and int(p.get("fin_tries") or 0) < FINALIZE_MAX_TRIES:
                     to_finalize.append(p["channel"])
                 keep.append(p)
