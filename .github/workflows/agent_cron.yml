@@ -398,6 +398,9 @@ jobs:
           FLOP_DIRECT_PACE: ${{ vars.FLOP_DIRECT_PACE }}
           # FLOP chừa lại cho phí giao dịch khi thu escrow theo số dư ví (mặc định 0.5).
           FLOP_DIRECT_FEE_RESERVE: ${{ vars.FLOP_DIRECT_FEE_RESERVE }}
+          # Hạn riêng của bước mua trực tiếp (giây từ đầu lượt, mặc định 1020, trần 1080): phiên phải sống quá
+          # maxDuration của kênh để SDK tự thu hồi kênh hỏng.
+          FLOP_DIRECT_RUN_BUDGET_SEC: ${{ vars.FLOP_DIRECT_RUN_BUDGET_SEC }}
           FLOP_DIRECT_PACE_WINDOW_H: ${{ vars.FLOP_DIRECT_PACE_WINDOW_H }}
           FLOP_DIRECT_PACE_JITTER_PCT: ${{ vars.FLOP_DIRECT_PACE_JITTER_PCT }}
           FLOP_DIRECT_TIMEOUT_SEC: ${{ vars.FLOP_DIRECT_TIMEOUT_SEC }}
