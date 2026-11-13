@@ -61,11 +61,21 @@ def pending_block(state: dict, now: int, cap: int, window_sec: int = DEFAULT_BLO
     return (cap > 0 and n >= cap), n
 
 
+_GATEWAY_NEUTRAL = r"gateway/(pace_wait|daily_cap|attribution_hold|overloaded|budget_spent)$"
+_GATEWAY_HINT = "→ Xem log run, sửa adapter theo checklist ngày 1 trong STRATEGY.md."
+_GATEWAY_RECOVERED = ("✅ TESTNET: agent đã có phiên settle lại sau khoảng {mins} phút gián đoạn (chưa phải bằng "
+                      "chứng chain đã ghi cho ví mình).")
+
+
 def observe(state: dict, *, settled_onchain: int, status: str, spent_today_onchain,
             now: int, balance=None, pending: int = 0, reason: str = "",
-            alert_runs: int = 6, realert_sec: int = 6 * 3600) -> dict:
-    """Ghi nhận MỘT run. Trả {"alert": str|None, "recovered": str|None}."""
-    w = state.get(KEY)
+            alert_runs: int = 6, realert_sec: int = 6 * 3600, key: str = KEY,
+            neutral: str = _GATEWAY_NEUTRAL, title: str = "TESTNET", hint: str = _GATEWAY_HINT,
+            recovered: str = _GATEWAY_RECOVERED, pending_label: str = "phiên chờ proof",
+            balance_label: str = "Số dư sổ") -> dict:
+    """Ghi nhận MỘT run. Trả {"alert": str|None, "recovered": str|None}. `key` = khoá trạng thái (mỗi đường chi
+    một khoá, không lẫn đếm); `neutral` = regex trạng thái "không chi nhưng đúng thiết kế" (không đếm, không xoá)."""
+    w = state.get(key)
     w = dict(w) if isinstance(w, dict) else {}
     out = {"alert": None, "recovered": None}
     healthy_wait = str(status).endswith("pace-wait") and _num(spent_today_onchain) > 0
@@ -79,22 +89,21 @@ def observe(state: dict, *, settled_onchain: int, status: str, spent_today_oncha
     # `overloaded` (gateway hết kênh với miner, flop-labs/network#31) và lượt nghỉ ngay sau nó cũng
     # trung tính: lỗi phía FLOP, agent không sửa được, và sẽ tự mua lại khi gateway thông.
     if settled_onchain <= 0 and (
-            re.search(r"gateway/(pace_wait|daily_cap|attribution_hold|overloaded|budget_spent)$", str(status))
+            (neutral and re.search(neutral, str(status)))
             or (str(status).endswith("gateway/backoff") and "overloaded" in str(reason).lower())):
         return out
     if settled_onchain > 0 or healthy_wait:
         if w.get("alerted_ts") and settled_onchain > 0:
             mins = max(0, int((now - int(_num(w.get("since", now)))) / 60))
             # Gateway settle chưa chứng minh chi tiêu đứng tên ví; dòng "đứng tên ví" mới nói điều đó.
-            out["recovered"] = (f"✅ TESTNET: agent đã có phiên settle lại sau khoảng {mins} phút gián "
-                                "đoạn (chưa phải bằng chứng chain đã ghi cho ví mình).")
-        state[KEY] = {}
+            out["recovered"] = recovered.format(mins=mins)
+        state[key] = {}
         return out
     w["misses"] = int(_num(w.get("misses"))) + 1
     w.setdefault("since", int(now))
     bd = dict(w.get("breakdown") or {})
-    key = str(status or "?")[:60]
-    bd[key] = int(_num(bd.get(key))) + 1
+    sk = str(status or "?")[:60]
+    bd[sk] = int(_num(bd.get(sk))) + 1
     if len(bd) > BREAKDOWN_CAP:
         bd = dict(sorted(bd.items(), key=lambda kv: -kv[1])[:BREAKDOWN_CAP])
     w["breakdown"] = bd
@@ -103,14 +112,39 @@ def observe(state: dict, *, settled_onchain: int, status: str, spent_today_oncha
     if w["misses"] >= max(1, int(alert_runs)) and (not last_alert or now - last_alert >= realert_sec):
         mins = max(0, int((now - int(w["since"])) / 60))
         top = ", ".join(f"{k} ×{v}" for k, v in sorted(bd.items(), key=lambda kv: -kv[1])[:3])
-        lines = [f"⚠️ TESTNET: {w['misses']} run liền (~{mins} phút) KHÔNG có phiên chi thật nào.",
+        lines = [f"⚠️ {title}: {w['misses']} run liền (~{mins} phút) KHÔNG có phiên chi thật nào.",
                  f"Kẹt ở: {top}"]
         if w["last_reason"]:
             lines.append(f"Lý do gần nhất: {w['last_reason']}")
-        lines.append(f"Số dư sổ: {balance if balance is not None else '?'} FLOP · "
-                     f"phiên chờ proof: {pending}")
-        lines.append("→ Xem log run, sửa adapter theo checklist ngày 1 trong STRATEGY.md.")
+        lines.append(f"{balance_label}: {balance if balance is not None else '?'} FLOP · "
+                     f"{pending_label}: {pending}")
+        lines.append(hint)
         out["alert"] = "\n".join(lines)
         w["alerted_ts"] = int(now)
-    state[KEY] = w
+    state[key] = w
     return out
+
+
+DIRECT_KEY = "real_spend_watch_direct"
+# Mua trực tiếp: "đã mở phiên, chờ explorer ghi PAID" (opened), chạm nhịp trải đều (paced) và trần ngày
+# (daily_cap, phanh operator đặt) là ĐÚNG THIẾT KẾ. Còn lại — low_balance (ví hết FLOP), no_offer (miner chưa/không
+# còn offer), pending (đủ kênh chờ explorer), run_budget, backoff, hold_unknown, error, unconfigured... — kéo dài
+# là không chi được: phải báo. "opened" mãi mà không PAID thì kênh chờ dồn tới FLOP_DIRECT_MAX_PENDING -> "pending".
+_DIRECT_NEUTRAL = r"direct/(opened|paced|daily_cap)$"
+_DIRECT_HINT = ("→ Xem dòng [direct] trong log run. low_balance = cần nhận faucet; no_offer = miner chưa/không còn "
+                "công bố offer; pending = kênh chờ explorer ghi PAID quá nhiều.")
+
+
+def observe_direct(state: dict, result: dict, *, now: int, network: str, balance=None,
+                   alert_runs: int = 6, realert_sec: int = 6 * 3600) -> dict:
+    """Bộ canh cho đường MUA TRỰC TIẾP (flop_direct): đếm lượt liền không có kênh nào PAID trên explorer
+    (`settled` của run_step — không phụ thuộc ghi sổ, nên chạy cả khi tập trên devnet)."""
+    r = result if isinstance(result, dict) else {}
+    pend = len(((state.get("flop_direct") or {}).get("pending")) or [])
+    return observe(state, settled_onchain=int(_num(r.get("settled"))), status=f"direct/{r.get('outcome') or '?'}",
+                   spent_today_onchain=0, now=now, balance=balance, pending=pend,
+                   reason=str(r.get("reason") or ""), alert_runs=alert_runs, realert_sec=realert_sec,
+                   key=DIRECT_KEY, neutral=_DIRECT_NEUTRAL, title=f"MUA TRỰC TIẾP ({network})",
+                   hint=_DIRECT_HINT, pending_label="kênh chờ explorer", balance_label="Số dư ví (explorer)",
+                   recovered=("✅ MUA TRỰC TIẾP (" + network + "): đã có kênh đứng tên ví mình PAID lại sau khoảng "
+                              "{mins} phút gián đoạn."))
