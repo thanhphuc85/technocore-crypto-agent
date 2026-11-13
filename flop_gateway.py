@@ -1333,14 +1333,18 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
                     waiting.pop(k, None)
                 if a is None or k in seen:
                     continue
-                seen.append(k)
-                new.append(rc)
-                amt += a
                 if book_fn and a > 0:
-                    book_fn(a, k[:80], str(rc.get("model") or model_id))
+                    br = book_fn(a, k[:80], str(rc.get("model") or model_id))
+                    if isinstance(br, dict) and br.get("outcome") == "save_failed":
+                        # Sổ không ghi được: KHÔNG đánh dấu đã thấy — lượt sau ghi lại (chống trùng ở sổ).
+                        log(f"[gateway] ⚠️ không ghi được sổ cho biên nhận {k[:12]}… — thử lại lượt sau")
+                        continue
                 elif book_fn:
                     log(f"[gateway] ⚠️ biên nhận {k[:12]}… đã settle nhưng không có số tiền "
                         f"(keys: {sorted(rc)[:10]})")
+                seen.append(k)
+                new.append(rc)
+                amt += a
             # /keys/me/receipts không phân trang: biên nhận rời phản hồi khi chưa settle thì không
             # còn đọc được số tiền. Không ghi sổ theo ước tính — đếm và báo để đối soát tay.
             if odd:
@@ -1818,6 +1822,8 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
             tally(calls, spent, n_sent=calls + unknown)
         if unknown:
             hold_day()
+            if fb is not None:
+                _fb_charge(g, fb, float((g.get("inflight") or {}).get("max_cost") or 0))
         backoff(unknown_backoff_sec(g.get("inflight")) if unknown else 900, type(e).__name__)
         if unknown:
             return done("unknown_outcome",
