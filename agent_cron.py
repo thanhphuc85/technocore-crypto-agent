@@ -2086,7 +2086,9 @@ def persist_ledger_to_kv(private_key, did) -> None:
                 # Chi qua kênh không đứng tên ví mình, đã chuyển khỏi phần chờ (không tính airdrop).
                 "gateway_written_off": led.get("gateway_written_off", {}),
                 # Chi MUA TRỰC TIẾP (flop_direct) đã settle đứng tên ví mình.
-                "direct_attributed": led.get("direct_attributed", {})}
+                "direct_attributed": led.get("direct_attributed", {}),
+                # Phần trực tiếp trong kỳ chain hiện tại: cổng đứng tên gateway trừ nó khỏi số chain.
+                "direct_epoch_done": led.get("direct_epoch_done", {})}
         entries = (led.get("entries", []) or [])
         body = None
         # Cắt dần tới khi VỪA giới hạn. Số dư và các tổng chạy không suy từ entries, nên
@@ -4764,6 +4766,38 @@ def chain_balance(state: dict, now: int):
     return Decimal(vals[0]) / Decimal(10 ** 18) if vals else None
 
 
+def direct_unbooked(state: dict) -> float:
+    """FLOP các kênh MUA TRỰC TIẾP còn chờ ghi sổ (đúng mạng đang đối chiếu): có thể ĐÃ nằm trong số chain ghi
+    cho ví (explorer cộng khi kênh PAID, sổ chỉ ghi ở lượt đối soát sau). Lấy escrow (cận trên; thực trả ~99%);
+    kênh không rõ escrow (mồ côi) lấy trần escrow mỗi phiên. Dư thì cổng gateway chặt hơn, không bao giờ lỏng."""
+    import flop_direct
+    net = _attrib_net()
+    total = 0.0
+    for p in (state.get(flop_direct.KEY) or {}).get("pending") or []:
+        if not isinstance(p, dict) or (p.get("network") and p.get("network") != net):
+            continue
+        try:
+            total += max(0.0, float(p.get("max_flop")))
+        except (TypeError, ValueError):
+            total += float(flop_direct.DEFAULT_ESCROW_CAP)
+    return total
+
+
+def direct_on_chain(state: dict) -> float:
+    """Phần số chain ghi cho ví có thể là MUA TRỰC TIẾP: đã ghi sổ trong kỳ + còn chờ ghi sổ."""
+    import token_manager as tm
+    return float(tm.direct_epoch_done()) + direct_unbooked(state)
+
+
+def gateway_chain(chain, state: dict):
+    """Số chain ghi cho ví TRỪ phần mua trực tiếp — phần có thể là chi qua gateway. None nếu chain None.
+    Chain chỉ cho TỔNG chi đứng tên ví; không trừ thì chi trực tiếp (đúng tên ví) bị đọc thành "gateway đã
+    đứng tên ví mình": xác nhận nhầm khoản chờ, nới cổng, và lượt thăm dò báo ổn sai."""
+    if chain is None:
+        return None
+    return max(0.0, float(chain) - direct_on_chain(state))
+
+
 def attribution_room(state: dict, now: int):
     """Số FLOP còn được mua trước khi chain xác nhận; None = không giới hạn (không ở testnet hoặc
     FLOP_ATTRIB_GATE=off). Hạn mức = max(FLOP_ATTRIB_GATE_MIN, số chain đã ghi cho ví): chain càng
@@ -4778,7 +4812,7 @@ def attribution_room(state: dict, now: int):
     if os.environ.get("FLOP_ATTRIB_GATE", "").strip().lower() in ("0", "false", "off", "no"):
         return None
     total, chain_d = _attrib_pending(state, now)
-    chain = float(chain_d or Decimal(0))
+    chain = gateway_chain(float(chain_d or Decimal(0)), state)
     if state.get(FOREIGN_SEEN_KEY) and total > 0 and chain < total:
         return 0.0
     return max(_env_float("FLOP_ATTRIB_GATE_MIN", ATTRIB_ALERT_MIN), chain) - total
@@ -4801,7 +4835,8 @@ def _attrib_pending(state: dict, now: int):
     g = state.get(flop_gateway.KEY)
     pend = float(tm.gateway_attribution()["unattributed"])
     chain_d, _src = chain_for_gate(state, now)
-    surplus = max(0.0, float(chain_d or 0) - float(tm.gateway_epoch_done()) - pend)
+    # Phần chain chưa có trong sổ: trừ cả kênh trực tiếp chờ ghi sổ (không phải biên nhận gateway chờ).
+    surplus = max(0.0, float(chain_d or 0) - float(tm.gateway_epoch_done()) - pend - direct_unbooked(state))
     unbooked = flop_gateway.open_exposure(g) + flop_gateway.lost_exposure(g, now)
     return pend + max(0.0, unbooked - surplus), chain_d
 
@@ -4813,7 +4848,8 @@ def attribution_hold(state: dict, now: int):
         return None
     total, chain = _attrib_pending(state, now)
     _src = chain_for_gate(state, now)[1]
-    seen = (f"chain ghi {chain:.4g}" + (" (số cũ trong sổ, explorer chưa đọc lại được)" if _src == "ledger" else "")
+    chain = gateway_chain(chain, state)
+    seen = (f"chain ghi {chain:.4g} (ngoài mua trực tiếp)" + (" (số cũ trong sổ, explorer chưa đọc lại được)" if _src == "ledger" else "")
             if chain is not None else "chưa đọc được explorer")
     return (f"{total:.4g} FLOP gateway chưa được chain xác nhận, {seen}"
             + (" · có kênh đứng tên người khác" if state.get(FOREIGN_SEEN_KEY) else ""))
@@ -4849,6 +4885,11 @@ def _probe_baseline(state: dict, now: int) -> float:
     return max(float(onchain_spent(state, now) or 0), float(tm.gateway_chain_high()))
 
 
+def _probe_direct(state: dict) -> float:
+    """Phần mua trực tiếp trong số chain lúc ghi mốc thăm dò (để so tăng trưởng CHỈ của gateway)."""
+    return direct_on_chain(state)
+
+
 def _attrib_probe_result(state: dict, now: int, chain: float) -> None:
     """Sau một lượt thăm dò, chain ghi cho ví NHIỀU HƠN lúc thăm dò = các lần mua mới đã đứng tên ví
     mình. Khoản chờ có từ trước lượt thăm dò (đã quá FLOP_ATTRIB_PROBE_HOURS giờ mà chain không ghi) là
@@ -4859,9 +4900,12 @@ def _attrib_probe_result(state: dict, now: int, chain: float) -> None:
         return
     try:
         base, before = float(p.get("chain") or 0), p.get("pend")
+        base_direct = float(p.get("direct") or 0)
     except (TypeError, ValueError):
-        base, before = 0.0, None
-    if chain <= base + 1e-9:
+        base, before, base_direct = 0.0, None, 0.0
+    # Chỉ phần tăng KHÔNG phải mua trực tiếp mới là bằng chứng lần mua gateway đứng tên ví mình. Mốc cũ không có
+    # "direct" -> coi 0 (an toàn: trừ toàn bộ phần trực tiếp hiện có khỏi phần tăng).
+    if chain - direct_on_chain(state) <= base - base_direct + 1e-9:
         return
     off = tm.write_off_gateway_pending(before)
     state.pop(ATTRIB_PROBE_KEY, None)
@@ -4923,12 +4967,14 @@ def gateway_attribution_step(state: dict, now: int) -> str:
         # Genesis do gateway báo (lượt mua vừa rồi) = dấu nhận diện chain: phân biệt mạng reset thật
         # với explorer đọc thiếu (xem confirm_gateway_attribution).
         _gen = (state.get(flop_gateway.KEY) or {}).get("genesis")
-        tm.confirm_gateway_attribution(onchain, read_at=onchain_read_at(state), chain_id=_gen)
+        tm.confirm_gateway_attribution(onchain, read_at=onchain_read_at(state), chain_id=_gen,
+                                       exclude=str(round(direct_unbooked(state), 9)))
         _attrib_probe_result(state, now, float(onchain))
         pend = tm.gateway_attribution()["unattributed"]
-        if onchain < pend and pend >= Decimal(str(ATTRIB_ALERT_MIN)) and _due(state, "last_attrib_alert", 24, now):
+        _gw = Decimal(str(gateway_chain(onchain, state)))
+        if _gw < pend and pend >= Decimal(str(ATTRIB_ALERT_MIN)) and _due(state, "last_attrib_alert", 24, now):
             msg = (f"⚠️ Sổ còn {pend:.4g} FLOP chi qua gateway chưa xác nhận trong khi explorer {own} ghi ví "
-                   f"mình {onchain:.4g} FLOP chi tiêu. Chi tiêu có thể đang ĐỨNG TÊN broker của gateway, không tính "
+                   f"mình {onchain:.4g} FLOP chi tiêu ({_gw:.4g} ngoài mua trực tiếp). Chi tiêu có thể đang ĐỨNG TÊN broker của gateway, không tính "
                    "airdrop cho mình (yellowpaper#172). Kiểm tra /api/accounts/<ví>/inference-spend.")
             print(f"[attrib] {msg}")
             if _telegram_send(msg):
@@ -5108,7 +5154,8 @@ def gateway_session_step(state: dict, private_key, now: int):
             _old = state.get(ATTRIB_PROBE_KEY) if isinstance(state.get(ATTRIB_PROBE_KEY), dict) else {}
             state[ATTRIB_PROBE_KEY] = {
                 "at": now, "pend": str(_tmp.gateway_attribution()["unattributed"]),
-                "chain": _old["chain"] if "chain" in _old else _probe_baseline(state, now)}
+                "chain": _old["chain"] if "chain" in _old else _probe_baseline(state, now),
+                "direct": _old["direct"] if "direct" in _old else _probe_direct(state)}
             state["last_attrib_probe"] = now
             print("[attrib] đã mua thăm dò 1 lần — chờ explorer ghi chi tiêu cho ví mình")
         elif r.get("gate_open"):
