@@ -1644,3 +1644,56 @@ def test_orphan_hold_is_dropped_with_the_search_window():
     step(st, CLI(session=(None, "", "")))
     step(st, CLI(), now=NOW + fd.ORPHAN_WINDOW_SEC + 1, own_channels_fn=lambda a: [])
     assert "unknown_escrow" not in st[fd.KEY] and "orphan_since" not in st[fd.KEY]
+
+
+# --- kênh bị hoàn trả phần giữ trong trần ngày ------------------------------------------------------------------------
+
+REFUNDED = {"agent": ADDR, "status": "timedout", "paymentStatus": "REFUNDED", "observationHead": "finalized",
+            "minerPaid": "0", "burned": "0"}
+REFUND_ERR = (1, "", json.dumps({"ok": False, "code": "SESSION_FAILED", "channel": CH,
+                                 "message": "channel refunded: verified work cannot settle within its calibrated lifetime"}))
+
+
+def test_refunded_channel_gives_its_escrow_back_to_the_daily_cap(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_DAY", "0.12")
+    st = {}
+    step(st, CLI(session=REFUND_ERR))
+    assert st[fd.KEY]["day"]["escrow"] == pytest.approx(0.05)
+    assert [p.get("max_flop") for p in st[fd.KEY]["pending"]] == ["0.05"]       # bản ghi lỗi giữ escrow
+    for v in st[fd.KEY]["miners"].values():
+        v["wait_until"] = 0
+    step(st, CLI(session=(0, json.dumps({"ok": True, "channel": CH2}), "")), explorer={CH: REFUNDED}, now=NOW + 300)
+    assert st[fd.KEY]["day"]["escrow"] == pytest.approx(0.05)                   # trả 0.05 của kênh hoàn, giữ 0.05 mới
+
+
+def test_twenty_refunds_no_longer_burn_the_day(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_DAY", "0.2")
+    st, opened, t = {}, 0, NOW
+    for i in range(20):
+        cid = "0x" + f"{i + 1:064x}"
+        err = (1, "", json.dumps({"ok": False, "channel": cid, "message": "channel refunded: verified work"}))
+        prev = "0x" + f"{i:064x}"
+        for v in (st.get(fd.KEY) or {}).get("miners", {}).values():
+            v["wait_until"] = 0
+        r = step(st, CLI(session=err), explorer={prev: REFUNDED}, now=t)
+        opened += 1 if r["outcome"] == "error" else 0
+        t += 300
+    assert opened == 20                                                          # trước: dừng sau 4 lần (0.2 / 0.05)
+
+
+def test_refund_of_a_channel_opened_yesterday_does_not_touch_today(monkeypatch):
+    st = {}
+    step(st, CLI(session=REFUND_ERR))
+    st[fd.KEY]["day"] = {"day": "x", "escrow": 0.05}
+    tomorrow = NOW + 86400
+    for v in st[fd.KEY]["miners"].values():
+        v["wait_until"] = 0
+    step(st, CLI(session=(0, json.dumps({"ok": True, "channel": CH2}), "")), explorer={CH: REFUNDED}, now=tomorrow)
+    assert st[fd.KEY]["day"]["escrow"] == pytest.approx(0.05)                   # chỉ phiên mới hôm nay
+
+
+def test_pending_escrow_survives_the_trimmed_kv_view():
+    g = {"pending": [{"channel": CH, "ts": NOW, "network": "testnet", "miner": MINER, "max_flop": "99.5",
+                      "model_hash": MH, "ptok": 10}]}
+    v = fd.durable_view(g, level=1)
+    assert v["pending"][0]["max_flop"] == "99.5" and "model_hash" not in v["pending"][0]
