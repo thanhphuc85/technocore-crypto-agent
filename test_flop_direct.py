@@ -861,3 +861,25 @@ def test_capacity_lookup_failure_uses_the_safe_default(monkeypatch):
     assert step({}, cli, prompt=LONG, miner_cap_fn=boom)["outcome"] == "opened"
     run = cli.sessions()[0]["cmd"]
     assert int(run[run.index("--max-tokens") + 1]) == int(10 * 300 / 28.0) - len(LONG) // 4
+
+
+# --- lỗi rõ ràng trước khi mở kênh không được "ăn" trần ngày -------------------------------------------------
+
+def test_a_clean_refusal_before_any_channel_releases_the_daily_reservation(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_DAY", "0.12")
+    err = json.dumps({"ok": False, "code": "INSUFFICIENT_FUNDS", "message": "insufficient balance"})
+    st = {}
+    r = step(st, CLI(session=(1, "", err)))
+    assert r["outcome"] == "error" and st[fd.KEY]["day"]["escrow"] == 0.0
+
+
+@pytest.mark.parametrize("session", [
+    (1, "", json.dumps({"ok": False, "message": "miner acknowledgement timed out", "channel": CH2})),  # có kênh
+    (1, "", json.dumps({"ok": False, "message": "session outcome unknown"})),                        # mơ hồ
+    (1, "", "Segmentation fault"),                                                                    # không JSON
+    (None, "", ""),                                                                                   # quá giờ
+])
+def test_ambiguous_or_channel_failures_keep_the_daily_reservation(session):
+    st = {}
+    step(st, CLI(session=session))
+    assert st[fd.KEY]["day"]["escrow"] == pytest.approx(0.05)
