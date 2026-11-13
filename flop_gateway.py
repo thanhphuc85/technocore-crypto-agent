@@ -828,8 +828,10 @@ _LAG_HINTS = {
 }
 
 
-# Lý do tụt lại nằm NGOÀI tầm agent: vẫn in dòng log, không gửi Telegram (không có gì để sửa).
-LAG_SILENT = frozenset({"overloaded"})
+# Lý do tụt lại KHÔNG cần tin này: vẫn in dòng log, không gửi Telegram. `overloaded` nằm ngoài tầm agent (không có
+# gì để sửa); `attribution_hold` đã có tin riêng ("⛔ Đã DỪNG mua compute", nhắc mỗi 24h) — gửi thêm "chi tụt lại"
+# là hai tin cho cùng một việc, và tụt lại khi cổng đứng tên đang dừng là ĐÚNG ý cổng.
+LAG_SILENT = frozenset({"overloaded", "attribution_hold"})
 
 
 def lag_status(g: dict, now: int, outcome: str, *, pct: float, alert_hours: float,

@@ -1405,3 +1405,18 @@ def test_replayed_answer_is_counted_once_in_the_day(monkeypatch):
     fake, state = _hung(monkeypatch)
     r = _step(state, fake, NOW + 1000, answer_fn=lambda p, t, c: None)
     assert r["outcome"] == "replayed" and _day(state) == pytest.approx(fake.cost)   # trước: max_cost + cost
+
+
+def test_lag_alert_is_silent_while_the_attribution_gate_holds():
+    """Cổng đứng tên đang dừng mua đã có tin riêng ("⛔ Đã DỪNG mua compute"): không gửi thêm "chi tụt lại"."""
+    g = {"window": {"total": 100.0, "spent": 0.0, "start": NOW, "horizon": NOW + 24 * 3600}}
+    kw = dict(pct=10, alert_hours=3, realert_hours=6)
+    for h in range(0, 8):
+        line, alert, _ = gw.lag_status(g, NOW + h * 3600, "attribution_hold", **kw)
+        assert alert is None
+    assert line and "attribution_hold" in line                    # dòng log vẫn in
+    line, alert, _ = gw.lag_status(g, NOW + 20 * 3600, "rate_limited", **kw)
+    assert alert is None                                           # lý do chính vẫn là attribution_hold
+    g2 = {"window": {"total": 100.0, "spent": 0.0, "start": NOW, "horizon": NOW + 24 * 3600}}
+    alerts = [gw.lag_status(g2, NOW + h * 3600, "rate_limited", **kw)[1] for h in range(0, 8)]
+    assert any(alerts)                                             # lý do khác vẫn báo như cũ
