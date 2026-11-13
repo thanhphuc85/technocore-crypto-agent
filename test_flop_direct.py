@@ -1727,3 +1727,31 @@ def test_unmark_alert_restores_the_previous_mark():
     assert st[wd.DIRECT_KEY] == {"misses": 9, "alerted_ts": 100}
     wd.unmark_alert(st, wd.DIRECT_KEY, None)
     assert "alerted_ts" not in st[wd.DIRECT_KEY]
+
+
+# --- cửa sổ tìm kênh mồ côi gia hạn theo lần ngắt GẦN NHẤT ------------------------------------------------------------
+
+def test_a_later_cli_cut_extends_the_orphan_search():
+    st = {}
+    step(st, CLI(session=(None, "", "")))                                      # ngắt lần 1 (t0)
+    for v in st[fd.KEY]["miners"].values():
+        v["unknown_until"] = 0
+    later = NOW + fd.ORPHAN_WINDOW_SEC - 3600
+    step(st, CLI(session=(None, "", "")), now=later, own_channels_fn=lambda a: [])   # ngắt lần 2, gần hết cửa sổ
+    assert len(st[fd.KEY]["unknown_escrow"]) == 2
+    t = NOW + fd.ORPHAN_WINDOW_SEC + 3600                                      # cửa sổ của lần 1 đã qua
+    rows = [{"channelId": CH, "agent": ADDR, "miner": MINER, "openedAt": later * 1000, "escrow": str(5 * 10 ** 16)}]
+    for v in st[fd.KEY]["miners"].values():
+        v["unknown_until"] = 0
+    step(st, CLI(session=(0, json.dumps({"ok": True, "channel": CH2}), "")), now=t, own_channels_fn=lambda a: rows)
+    g = st[fd.KEY]
+    assert any(p["channel"] == CH for p in g["pending"])                       # kênh của lần ngắt 2 vẫn được tìm ra
+    assert g.get("orphan_since") and len(g["unknown_escrow"]) == 0             # khoản giữ lần 1 hết hạn; lần 2 đã khớp
+
+
+def test_an_unfound_hold_expires_with_an_alert():
+    st, alerts = {}, []
+    step(st, CLI(session=(None, "", "")))
+    step(st, CLI(), now=NOW + fd.ORPHAN_WINDOW_SEC + 1, own_channels_fn=lambda a: [], alerts=alerts)
+    assert not st[fd.KEY].get("unknown_escrow") and "orphan_since" not in st[fd.KEY]
+    assert any("không tìm thấy kênh" in a for a in alerts)
