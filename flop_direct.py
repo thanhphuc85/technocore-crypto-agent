@@ -77,6 +77,12 @@ MAXDUR_MARGIN_SEC = 120            # CLI phải sống quá maxDuration của k�
 IMPORT_RESERVE_SEC = 60            # thời gian chừa cho `keys import` (kể cả kéo image) trước phiên đầu của lượt
 MISSING_DROP_SEC = 48 * 3600       # kênh explorer 404 quá chừng này (chain reset / indexer mất) -> bỏ theo dõi, báo
 ORPHAN_WINDOW_SEC = 24 * 3600      # sau một lần "không rõ kết quả": tìm kênh của ví mình chưa theo dõi trong chừng này
+# Settle CƯỠNG BỨC (miner không đóng hợp tác; CLI in cooperative:false): kênh nằm ở SettlementPosted tới hết cửa sổ
+# tranh chấp (computeChannel.disputeWindow = 604800 block, block 1 s) rồi phải có người gọi computeChannel.finalize
+# thì miner mới được trả và kênh mới PAID — không ai gọi thì chi tiêu không được tính và escrow nằm khoá.
+FINALIZE_AFTER_SEC = 7 * 86400 + 3600
+FINALIZE_RETRY_SEC = 86400
+FINALIZE_MAX_TRIES = 3
 DONE_KEEP = 50                     # id (rút gọn) các kênh đã xử lý xong — để tìm kênh mồ côi không thêm lại
 DEFAULT_MAX_PER_RUN = 4            # phiên tối đa mỗi lượt (còn bị ngân sách thời gian của lượt chặn)
 DEFAULT_MAX_PENDING = 20           # kênh CLI báo đã settle nhưng explorer chưa ghi nhận — quá chừng này thì dừng
@@ -468,7 +474,7 @@ def pace_limit(cfg: dict, now: int, salt: str = "") -> tuple[float, bool]:
 _DURABLE_TOP = ("day", "unknown_until", "wait_until", "wait_why", "prompt_idx", "miner_idx", "gnpt", "stats",
                 "last_attempt", "orphan_since", "done")
 _DURABLE_MINER = ("unknown_until", "wait_until", "wait_why", "cap", "sessions")
-_PENDING_CORE = ("channel", "ts", "network", "miner", "error", "alerted")
+_PENDING_CORE = ("channel", "ts", "network", "miner", "error", "alerted", "force", "fin_tries", "fin_at")
 _PENDING_LEARN = ("model", "model_hash", "ptok", "completion_tokens", "max_flop")
 
 
@@ -510,6 +516,41 @@ def restore(state: dict, remote) -> bool:
     g["pending"] = [dict(p) for p in (remote.get("pending") or []) if isinstance(p, dict) and p.get("channel")]
     state[KEY] = g
     return True
+
+
+def finalize_channels(channels, *, wkey, addr: str, network: str, runner, log=print, alert=None) -> dict:
+    """Gọi `flop channel finalize <id>` cho các kênh settle cưỡng bức đã qua cửa sổ tranh chấp. Keystore TẠM riêng
+    (nạp, dùng, xoá ngay) để không dính vào luồng mở phiên. -> {channel: (ok, tx_hash | lỗi)}."""
+    alert = alert or (lambda text: None)
+    res = {}
+    if not channels:
+        return res
+    work = tempfile.mkdtemp(prefix="flop-direct-fin-")
+    try:
+        password = secrets.token_hex(24)
+        base, ks = cli_command(work, [SECRET_ENV, PASSWORD_ENV], name=f"flop-direct-{secrets.token_hex(6)}")
+        rc, so, se = runner(base + ["--output", "agent", "keys", "import", "--secret-env", SECRET_ENV,
+                                    "--out", ks, "--password-env", PASSWORD_ENV, "--type", "ed25519"],
+                            {SECRET_ENV: "0x" + fg._raw_priv(wkey).hex(), PASSWORD_ENV: password}, 120)
+        imported = last_json(so) or {}
+        if rc != 0 or not fg.same_account(imported.get("address") or "", addr):
+            log(f"[direct] finalize: nạp keystore thất bại ({rc}) — thử lại lượt sau")
+            return {c: (False, "keys import") for c in channels}
+        for cid in channels:
+            base, ks = cli_command(work, [PASSWORD_ENV], name=f"flop-direct-{secrets.token_hex(6)}")
+            rc, so, se = runner(base + ["--network", network, "--keystore", ks, "--password-env", PASSWORD_ENV,
+                                        "--output", "agent", "channel", "finalize", cid], {PASSWORD_ENV: password}, 180)
+            if rc == 0:
+                tx = str((last_json(so) or {}).get("tx_hash") or "")[:80]
+                res[cid] = (True, tx)
+                log(f"[direct] đã finalize kênh settle cưỡng bức {cid[:12]}… (tx {tx[:12]}…)")
+            else:
+                msg = str((last_json(se) or {}).get("message") or (se or "").strip()[-160:] or f"exit {rc}")[:160]
+                res[cid] = (False, msg)
+                log(f"[direct] finalize kênh {cid[:12]}… lỗi: {msg}")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    return res
 
 
 def _short(cid: str) -> str:
@@ -560,32 +601,18 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
         state[KEY] = g
         return out
 
-    if not enabled():
+    # Đối soát kênh còn chờ chạy CẢ khi đã tắt / cấu hình lỗi / mọi miner bị chặn: tắt mua trực tiếp lúc còn kênh
+    # chưa settle mà bỏ luôn đối soát thì kênh PAID không bao giờ vào sổ.
+    has_pending = any(isinstance(p, dict) and p.get("channel") for p in (g.get("pending") or [])) \
+        or bool(g.get("orphan_since"))
+    if not enabled() and not has_pending:
         return done("off")
-    cfg, errs = config()
-    if errs:
-        return done("unconfigured", reason="; ".join(errs)[:300])
     wkey = fg.wallet_key(agent_key)
     if wkey is None:
         return done("unconfigured", reason="chưa có khoá ví (FLOP_WALLET_SEED_HEX hoặc FLOP_WALLET_USE_DID=on)")
     addr = fg.wallet_address(wkey)
-    deny_all = [d.strip() for d in list(deny or ()) + _env("FLOP_DIRECT_DENY_MINERS").split(",")
-                if d.strip() and fg.account_pubkey(d.strip()) is not None]
-    miners, refused = [], []
-    for m in cfg["miners"]:
-        if fg.same_account(m["miner"], addr):
-            refused.append("miner là chính ví agent — tự giao dịch không được tính")
-        elif any(fg.same_account(d, m["miner"]) for d in deny_all):
-            refused.append("miner nằm trong danh sách chặn (independent demand only)")
-        else:
-            miners.append(m)
-    if not miners:
-        return done("refused", reason="; ".join(dict.fromkeys(refused))[:300])
     ms = {k: dict(v) for k, v in (g.get("miners") or {}).items() if isinstance(v, dict)}
-
-    def mstate(m):
-        return ms.setdefault(_mkey(m["miner"]), {})
-
+    to_finalize = []
     # 0) Kênh MỒ CÔI: lượt trước CLI bị ngắt / kết quả mơ hồ nên không biết id kênh -> tìm kênh của ví mình mở từ
     # lúc đó mà chưa theo dõi, thêm vào danh sách chờ (đánh dấu lỗi: chặn miner đó tới khi kênh xong, rồi ghi sổ
     # nếu PAID). Tìm trong ORPHAN_WINDOW_SEC; thêm lại không trùng nhờ danh sách chờ + `done`.
@@ -619,6 +646,15 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
     # 1) Đối soát kênh đã mở ở các lượt trước.
     keep = []
     for p in pending:
+        if p.get("network") and p.get("network") != network:
+            # Kênh của mạng khác (chuyển devnet <-> testnet): explorer mạng này luôn 404, cũng không ghi sổ được ở
+            # chế độ này — giữ lại chỉ chặn miner / chiếm chỗ FLOP_DIRECT_MAX_PENDING suốt 48 giờ.
+            st = dict(g.get("stats") or {})
+            st["other_network"] = int(st.get("other_network") or 0) + 1
+            g["stats"] = st
+            _mark_done(g, p["channel"])
+            log(f"[direct] bỏ theo dõi kênh {p['channel'][:12]}… của mạng {p.get('network')} (đang chạy {network})")
+            continue
         try:
             info = fetch_channel(p["channel"])
         except Exception as e:
@@ -663,7 +699,15 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
             alert(f"⚠️ FLOP direct: kênh {p['channel'][:18]}… vẫn không có trên explorer sau "
                   f"{MISSING_DROP_SEC // 3600}h — bỏ theo dõi (không ghi sổ). Kiểm ví {addr[:8]}… trên RPC nếu nghi FLOP bị khoá.")
         else:
-            if now - int(p.get("ts") or now) >= PENDING_ALERT_SEC and not p.get("alerted"):
+            age = now - int(p.get("ts") or now)
+            if p.get("force"):
+                # Settle cưỡng bức: chờ cửa sổ tranh chấp 7 ngày là BÌNH THƯỜNG — không báo "kẹt" sau 6 giờ.
+                if age >= FINALIZE_AFTER_SEC and now - int(p.get("fin_at") or 0) >= FINALIZE_RETRY_SEC \
+                        and int(p.get("fin_tries") or 0) < FINALIZE_MAX_TRIES:
+                    to_finalize.append(p["channel"])
+                keep.append(p)
+                continue
+            if age >= PENDING_ALERT_SEC and not p.get("alerted"):
                 p = {**p, "alerted": now}
                 alert(f"⚠️ FLOP direct: kênh {p['channel'][:18]}… chưa xong sau "
                       f"{(now - int(p.get('ts') or now)) // 3600}h ({kind}). FLOP có thể đang bị khoá on-chain "
@@ -671,6 +715,45 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
             keep.append(p)
     g["pending"] = keep[-PENDING_KEEP:]
     out["booked_flop"] = round(out["booked_flop"], 9)
+    g["miners"] = ms                          # công suất vừa học không mất khi lượt dừng sớm ở các chốt dưới
+    if not enabled():
+        g["miners"] = ms
+        return done("off", reason="đã tắt — chỉ đối soát kênh còn chờ")
+    cfg, errs = config()
+    if errs:
+        g["miners"] = ms
+        return done("unconfigured", reason="; ".join(errs)[:300])
+    deny_all = [d.strip() for d in list(deny or ()) + _env("FLOP_DIRECT_DENY_MINERS").split(",")
+                if d.strip() and fg.account_pubkey(d.strip()) is not None]
+    miners, refused = [], []
+    for m in cfg["miners"]:
+        if fg.same_account(m["miner"], addr):
+            refused.append("miner là chính ví agent — tự giao dịch không được tính")
+        elif any(fg.same_account(d, m["miner"]) for d in deny_all):
+            refused.append("miner nằm trong danh sách chặn (independent demand only)")
+        else:
+            miners.append(m)
+    if not miners:
+        g["miners"] = ms
+        return done("refused", reason="; ".join(dict.fromkeys(refused))[:300])
+
+    def mstate(m):
+        return ms.setdefault(_mkey(m["miner"]), {})
+
+    # Settle cưỡng bức đã qua cửa sổ tranh chấp -> tự finalize (tối đa FINALIZE_MAX_TRIES lần, mỗi ngày một lần).
+    if to_finalize and (deadline is None or clock() + 120 + 180 * len(to_finalize) < deadline):
+        results = finalize_channels(to_finalize, wkey=wkey, addr=addr, network=network, runner=runner, log=log,
+                                    alert=alert)
+        for p in g["pending"]:
+            if p.get("channel") in results:
+                ok, info_s = results[p["channel"]]
+                p["fin_at"], p["fin_tries"] = now, int(p.get("fin_tries") or 0) + 1
+                if ok:
+                    p["fin_tx"] = info_s
+                elif p["fin_tries"] >= FINALIZE_MAX_TRIES:
+                    alert(f"⚠️ FLOP direct: finalize kênh settle cưỡng bức {p['channel'][:18]}… thất bại "
+                          f"{p['fin_tries']} lần ({info_s[:100]}) — FLOP còn khoá, chi tiêu chưa được tính; kiểm tay.")
+
 
     # 2) Chốt chung.
     if int(g.get("unknown_until") or 0) > now:                      # bản cũ: giữ chung
@@ -914,6 +997,8 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
                     continue
                 rec = {"channel": ch, "ts": now, "network": network, "miner": m["miner"], "model": m["model"],
                        "settle_tx": str(res.get("settle_tx") or "")[:80], "max_flop": max_flop}
+                if res.get("cooperative") is False:
+                    rec["force"] = True              # chờ cửa sổ tranh chấp rồi tự finalize
                 if plan:
                     rec.update(model_hash=plan["model_hash"], ptok=plan["ptok"], gn_est=plan["gn_est"])
                 try:

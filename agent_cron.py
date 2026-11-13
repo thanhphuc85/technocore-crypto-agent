@@ -5283,8 +5283,9 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
     """Mua compute TRỰC TIẾP từ một miner (flop_direct): kênh đứng tên ví agent. Testnet tắt -> chạy tập trên
     devnet, KHÔNG ghi sổ. Không ném lỗi; trả trạng thái cho dòng [run]."""
     import flop_direct
-    if not flop_direct.enabled():
-        return "off"
+    if not flop_direct.enabled() and not ((state.get(flop_direct.KEY) or {}).get("pending")
+                                          or (state.get(flop_direct.KEY) or {}).get("orphan_since")):
+        return "off"                                 # tắt mà còn kênh chờ: vẫn chạy để đối soát / ghi sổ
     import token_manager as _tm
     try:
         testnet = _tm.testnet_enabled()
