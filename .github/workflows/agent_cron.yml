@@ -444,6 +444,8 @@ jobs:
           FLOP_FAUCET_REFILL_BELOW: ${{ vars.FLOP_FAUCET_REFILL_BELOW }}
           FLOP_FAUCET_DEMAND_ONLY: ${{ vars.FLOP_FAUCET_DEMAND_ONLY }}
           FLOP_FAUCET_MAX_PER_DAY: ${{ vars.FLOP_FAUCET_MAX_PER_DAY }}
+          # Một lần claim lớn hơn số này (FLOP, mặc định 100000) = phi lý (đơn vị raw?) -> KHÔNG ghi sổ, báo Telegram.
+          FLOP_FAUCET_MAX_CREDIT: ${{ vars.FLOP_FAUCET_MAX_CREDIT }}
           # Lượt faucet kế tiếp mở trong <= N giây thì chờ ngay trong run để claim đúng giờ (mặc định 300).
           FLOP_FAUCET_WAIT_MAX_SEC: ${{ vars.FLOP_FAUCET_WAIT_MAX_SEC }}
           FLOP_FAUCET_JITTER_MIN: ${{ vars.FLOP_FAUCET_JITTER_MIN }}

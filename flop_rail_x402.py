@@ -103,12 +103,14 @@ def claimable(now_ms: int, refund_after_ms: int, margin_ms: int) -> bool:
         return False
 
 
-def verify_lock_state(state, statement, refund_after_ms, my_payee_addr) -> bool:
+def verify_lock_state(state, statement, refund_after_ms, my_payee_addr, min_amount=None) -> bool:
     """CỔNG PAYEE (thuần, nhận state đã đọc từ chain). True CHỈ KHI escrow:
       - tồn tại & đã fund, chưa rút/refund,
       - hashlock KHỚP statement của mình (sha256),
       - timelock KHỚP refundAfterMs của mình (chống payer đặt refund sớm hơn thoả thuận),
-      - payee cố định == địa chỉ MÌNH (chống front-run rút preimage công khai).
+      - payee cố định == địa chỉ MÌNH (chống front-run rút preimage công khai),
+      - (khi biết số tiền của deal, `min_amount`, đơn vị nhỏ nhất của asset) escrow khoá ĐỦ số đó — không thì payer
+        khoá 1 đơn vị cho deal 1000 vẫn qua cổng và agent làm việc + lộ preimage gần như không công.
     Fail-closed: thiếu field nào -> False."""
     s = normalize_statement(statement)
     me = _norm_addr(my_payee_addr)
@@ -123,7 +125,16 @@ def verify_lock_state(state, statement, refund_after_ms, my_payee_addr) -> bool:
             return False
     except (ValueError, TypeError):
         return False
-    return _norm_addr(state.get("payee")) == me
+    if _norm_addr(state.get("payee")) != me:
+        return False
+    if min_amount is not None:
+        try:
+            need, got = int(str(min_amount)), int(str(state.get("amount")))
+        except (TypeError, ValueError):
+            return False
+        if need <= 0 or got < need:
+            return False
+    return True
 
 
 # ── Rail object (nối vào run_tclk_complete qua value_rail=...) ────────────────
@@ -153,12 +164,12 @@ class X402HtlcRail:
             self.log(f"[x402] read state lỗi {str(contract)[:14]}: {str(e)[:80]}")
             return None
 
-    def verify_lock(self, contract, statement, refund_after_ms) -> bool:
-        """CỔNG: đọc state on-chain rồi verify_lock_state. Chưa cấu hình -> False (coi như chưa lock)."""
+    def verify_lock(self, contract, statement, refund_after_ms, amount=None) -> bool:
+        """CỔNG: đọc state on-chain rồi verify_lock_state (kể cả số tiền khi deal nêu `amount`). Chưa cấu hình -> False."""
         if not self.configured():
             return False
         return verify_lock_state(self._read_state(contract), statement,
-                                 refund_after_ms, self.cfg["payee_addr"])
+                                 refund_after_ms, self.cfg["payee_addr"], min_amount=amount)
 
     def claim(self, contract, preimage_hex, *, now_ms, refund_after_ms=None, dry_run=True) -> dict:
         """PAYEE nộp preimage -> withdraw USDC. Kết quả là dict KHÔNG throw (như token_manager):

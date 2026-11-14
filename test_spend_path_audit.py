@@ -1684,8 +1684,8 @@ def test_record_gateway_spend_reports_a_failed_save(monkeypatch):
 def test_direct_amounts_are_exact_decimals():
     import flop_direct
     kind, amt = flop_direct.classify_channel(
-        {"status": "settled", "paymentStatus": "PAID", "observationHead": "finalized",
-         "minerPaid": "98956627838640000001", "burned": "0"}, "")
+        {"agent": "5Me", "status": "settled", "paymentStatus": "PAID", "observationHead": "finalized",
+         "minerPaid": "98956627838640000001", "burned": "0"}, "5Me")
     assert kind == "paid" and amt == Decimal("98.956627838640000001")
 
 

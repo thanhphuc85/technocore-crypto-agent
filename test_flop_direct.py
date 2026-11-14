@@ -2161,3 +2161,91 @@ def test_cli_process_does_not_inherit_the_agents_secrets(monkeypatch):
     fd._run(["node", "cli.js"], {fd.PASSWORD_ENV: "pw"}, 5)
     assert seen.get("PATH") == "/usr/bin" and seen[fd.PASSWORD_ENV] == "pw"
     assert not [k for k, v in seen.items() if str(v).startswith("secret-")]
+
+
+# --- L1: đề xoay cả khi phiên không rõ kết quả ---------------------------------------------------------------------
+
+def test_prompt_rotates_after_an_unknown_outcome():
+    st, cli = {}, CLI(session=(None, "", ""))
+    step(st, cli, prompts=["Q-one", "Q-two"])
+    for v in st[fd.KEY]["miners"].values():
+        v["unknown_until"] = 0
+    cli2 = CLI()
+    step(st, cli2, prompts=["Q-one", "Q-two"], now=NOW + 300)
+    sent = [c["cmd"][c["cmd"].index("--prompt") + 1] for c in cli.sessions() + cli2.sessions()]
+    assert sent == ["Q-one", "Q-two"]                                       # trước: gửi lại "Q-one"
+
+
+# --- L2: finalize kênh settle cưỡng bức cả khi mua trực tiếp đã tắt -------------------------------------------------
+
+def test_force_settled_channel_is_finalized_even_when_direct_buying_is_off(monkeypatch):
+    st = {}
+    step(st, CLI(session=FORCED))
+    monkeypatch.setenv("FLOP_DIRECT_ENABLED", "off")
+    cli = FinCLI()
+    r = step(st, cli, explorer={CH: STILL_OPEN}, now=NOW + fd.FINALIZE_AFTER_SEC + 1)
+    assert r["outcome"] == "off" and len(cli.finalizes()) == 1 and cli.sessions() == []
+    assert [p for p in st[fd.KEY]["pending"] if p["channel"] == CH][0]["fin_tx"].startswith("0xaa")
+
+
+def test_force_settled_channel_is_finalized_even_with_a_config_error(monkeypatch):
+    st = {}
+    step(st, CLI(session=FORCED))
+    monkeypatch.setenv("FLOP_DIRECT_VIA", "nonsense")
+    cli = FinCLI()
+    r = step(st, cli, explorer={CH: STILL_OPEN}, now=NOW + fd.FINALIZE_AFTER_SEC + 1)
+    assert r["outcome"] == "unconfigured" and len(cli.finalizes()) == 1
+
+
+# --- L3: phản hồi explorer thiếu trường không được ghi sổ ------------------------------------------------------------
+
+@pytest.mark.parametrize("drop", ["agent", "observationHead"])
+def test_paid_channel_missing_a_field_is_not_booked(drop):
+    info = {k: v for k, v in paid().items() if k != drop}
+    assert fd.classify_channel(info, ADDR)[0] == "open"
+    assert fd.classify_channel(paid(), ADDR)[0] == "paid"
+
+
+# --- L4: did:key trong danh sách chặn được đổi sang ví SS58 của nó ---------------------------------------------------
+
+def test_did_entries_in_the_deny_list_block_that_dids_wallet(monkeypatch):
+    sibling = Ed25519PrivateKey.from_private_bytes(bytes([42]) * 32)
+    sibling_did = ac.did_of(sibling)
+    sibling_wallet = fg.wallet_address(sibling)
+    assert ac.did_key_ss58(sibling_did) == sibling_wallet
+    monkeypatch.setenv("FLOP_DIRECT_MINER", sibling_wallet)
+    cli = CLI()
+    r = step({}, cli, offers=[offer(miner=sibling_wallet)], deny=ac.direct_deny_list([sibling_did]))
+    assert r["outcome"] == "refused" and cli.calls == []
+    assert ac.direct_deny_list(["did:key:zNOTVALID", " ", sibling_wallet]) == [sibling_wallet]
+
+
+# --- L7: rail x402 kiểm số tiền đã khoá -------------------------------------------------------------------------------
+
+def test_value_rail_lock_must_cover_the_deal_amount():
+    import flop_rail_x402 as x
+    st = {"funded": True, "withdrawn": False, "refunded": False, "hashlock": "0x" + "ab" * 32,
+          "timelock_ms": 1788399477208, "payee": "0x" + "11" * 20, "amount": "1000"}
+    args = (st, "0x" + "ab" * 32, 1788399477208, "0x" + "11" * 20)
+    assert x.verify_lock_state(*args) and x.verify_lock_state(*args, min_amount="1000")
+    assert not x.verify_lock_state(*args, min_amount="1001")
+    assert not x.verify_lock_state(*args, min_amount="1.5")                      # không đọc được: đóng
+    assert not x.verify_lock_state({**st, "amount": None}, *args[1:], min_amount="1")
+
+
+# --- L8: preimage tclk mã hoá trong state.json -------------------------------------------------------------------------
+
+def test_tclk_preimages_are_sealed_and_legacy_ones_migrated():
+    import flop_tclk
+    seal, open_ = ac._tclk_vault(KEY)
+    stored = flop_tclk._store_preimage("0x" + "cd" * 32, seal)
+    assert "preimage" not in stored and "cd" * 8 not in json.dumps(stored)
+    assert flop_tclk._load_preimage(stored, open_) == "0x" + "cd" * 32
+    assert flop_tclk._load_preimage(stored, ac._tclk_vault(Ed25519PrivateKey.generate())[1]) is None   # khoá khác
+    st = {"tclk_secrets": {"c1": {"preimage": "0x" + "ef" * 32, "statement": "0x" + "00" * 32, "rails": ["paper"],
+                                  "claimByMs": 10 ** 15, "refundAfterMs": 10 ** 15 + 1, "offer_id": "o",
+                                  "payer_did": "did:key:zX"}}}
+    flop_tclk.run_tclk_complete(lambda room: {"messages": []}, lambda ns, k: None, lambda room, t: True, None, st,
+                                my_did="did:key:zMe", now_ms=10 ** 12, seal_fn=seal, open_fn=open_, log=lambda m: None)
+    meta = st["tclk_secrets"]["c1"]
+    assert "preimage" not in meta and open_(meta["preimage_enc"]) == "0x" + "ef" * 32

@@ -239,7 +239,8 @@ def is_media_job(spec: str) -> bool:
 # ── Worker (DRY-RUN mặc định) ────────────────────────────────────────────────
 def run_tclk_payee(fetch_fn, post_fn, state, *, my_did, allow_rails,
                    min_claim_window_ms, min_refund_gap_ms, max_per_run=2,
-                   dry_run=True, now_ms=None, job_spec_fn=None, deny_dids=None, log=print):
+                   dry_run=True, now_ms=None, job_spec_fn=None, deny_dids=None, log=print,
+                   seal_fn=None):
     """Quét tclk-offers, chọn offer đáng nhận, dựng `accept`.
       fetch_fn(since)   -> data JSON như /r/tclk-offers?format=json
       post_fn(text)     -> bool (chỉ gọi khi dry_run=False, và CHỈ để post `accept`)
@@ -299,7 +300,7 @@ def run_tclk_payee(fetch_fn, post_fn, state, *, my_did, allow_rails,
             accepted.append(oid)
             accepted_set.add(oid)
             state.setdefault("tclk_secrets", {})[frame["contract"]] = {
-                "offer_id": oid, "preimage": preimage, "statement": statement,
+                "offer_id": oid, **_store_preimage(preimage, seal_fn), "statement": statement,
                 "payer_did": offer.get("from"), "job": offer.get("job"),
                 "amount": offer.get("amount"), "asset": offer.get("asset"),
                 "rails": offer.get("rails"), "claimByMs": offer.get("claimByMs"),
@@ -418,9 +419,31 @@ def find_payer_lock(messages, contract: str, payer_did: str):
     return None
 
 
+def _store_preimage(preimage: str, seal_fn=None) -> dict:
+    """Trường cất preimage trong state.json: MÃ HOÁ khi có `seal_fn` (khoá agent). state.json đi qua Actions cache mà
+    workflow của PR (kể cả từ fork) trên repo công khai khôi phục được -> preimage dạng rõ ở đó là lộ trước khi
+    reveal. Không có seal_fn (công cụ/test) -> dạng rõ như cũ."""
+    if seal_fn is None:
+        return {"preimage": preimage}
+    return {"preimage_enc": seal_fn(preimage)}
+
+
+def _load_preimage(meta: dict, open_fn=None):
+    """Preimage của một deal: bản mã (preimage_enc) qua `open_fn`, hoặc bản rõ cũ; None nếu không mở được."""
+    if meta.get("preimage"):
+        return meta["preimage"]
+    if meta.get("preimage_enc") is not None and open_fn is not None:
+        try:
+            return open_fn(meta["preimage_enc"])
+        except Exception:
+            return None
+    return None
+
+
 def run_tclk_complete(read_room_fn, kv_get_fn, post_fn, do_work_fn, state, *, my_did,
                       offers_room="tclk-offers", stale_wait_ms=30 * 60 * 1000,
-                      now_ms=None, dry_run=True, max_per_run=2, value_rail=None, log=print):
+                      now_ms=None, dry_run=True, max_per_run=2, value_rail=None, log=print,
+                      seal_fn=None, open_fn=None):
     """Hoàn tất deal đã accept: chờ payer lock -> verify rail -> làm việc -> reveal.
       read_room_fn(room)   -> data JSON /r/<room> (đọc 1 lần: lock frame chỉ để LOG)
       kv_get_fn(ns, key)   -> str|None (đã strip banner) — CỔNG lock thật (paper KV record)
@@ -452,6 +475,10 @@ def run_tclk_complete(read_room_fn, kv_get_fn, post_fn, do_work_fn, state, *, my
     import time
     now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
     secrets = state.get("tclk_secrets", {})
+    if seal_fn is not None:                              # bản rõ cũ trong state.json -> mã hoá tại chỗ
+        for _meta in secrets.values():
+            if isinstance(_meta, dict) and _meta.get("preimage"):
+                _meta["preimage_enc"] = seal_fn(_meta.pop("preimage"))
     done = set(state.get("tclk_completed", []))
     revealed, waiting, expired, stale = [], 0, 0, 0
     # Đọc room offers MỘT LẦN (không phải mỗi contract): lock FRAME chỉ để LOG, KHÔNG phải cổng.
@@ -475,7 +502,7 @@ def run_tclk_complete(read_room_fn, kv_get_fn, post_fn, do_work_fn, state, *, my
                 # (2a) CỔNG GIÁ-TRỊ: escrow THẬT on-chain (đã fund, đúng hash/time/payee, chưa rút).
                 # KHÔNG dùng frame làm cổng cho rail thật — frame ≠ tiền đã khóa (lộ preimage rủi ro).
                 locked = value_rail.verify_lock(contract, meta.get("statement"),
-                                                meta.get("refundAfterMs"))
+                                                meta.get("refundAfterMs"), amount=meta.get("amount"))
                 lock_src = value_rail.name if locked else ""
             else:
                 # (2b) CỔNG LOCK LAI (paper): (a) paper KV record verify được, HOẶC (b) lock FRAME đã
@@ -508,7 +535,11 @@ def run_tclk_complete(read_room_fn, kv_get_fn, post_fn, do_work_fn, state, *, my
             if not deliverable:
                 log("[tclk] " + contract[:14] + " không làm được job -> bỏ (KHÔNG reveal)")
                 continue
-            reveal = make_reveal(contract, meta["preimage"], my_did)
+            preimage = _load_preimage(meta, open_fn)
+            if not preimage:
+                log("[tclk] " + contract[:14] + " không mở được secret (khoá khác / dữ liệu hỏng) -> bỏ, KHÔNG reveal")
+                continue
+            reveal = make_reveal(contract, preimage, my_did)
             amt = str(meta.get("amount")) + " " + str(meta.get("asset"))
             if dry_run:
                 extra = " + would CLAIM(" + value_rail.name + ")" if use_rail else ""
@@ -519,7 +550,7 @@ def run_tclk_complete(read_room_fn, kv_get_fn, post_fn, do_work_fn, state, *, my
             if use_rail:
                 # (4) RAIL GIÁ-TRỊ: CLAIM on-chain TRƯỚC (rút tiền về payee cố định), reveal SAU —
                 # preimage lộ công khai ở frame reveal, phải rút xong trước khi công bố (chống front-run).
-                cr = value_rail.claim(contract, meta["preimage"], now_ms=now_ms,
+                cr = value_rail.claim(contract, preimage, now_ms=now_ms,
                                       refund_after_ms=meta.get("refundAfterMs"), dry_run=False)
                 if cr.get("outcome") != "claimed":
                     log("[tclk] " + contract[:14] + " " + value_rail.name + " claim chưa xong ("

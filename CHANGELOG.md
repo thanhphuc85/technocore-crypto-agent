@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Direct purchase now moves to the next prompt after every session the CLI ran, including one with an
+  unknown outcome. Before, it rotated only on success, so the next session sent the same prompt again and
+  repeated its `prompt_hash` on chain.
+- Force-settled channels are finalized even when direct buying is turned off, misconfigured, or every
+  miner is refused. Before, those checks returned first, so the escrow stayed locked and the spend was never
+  counted.
+- A channel is booked only when the explorer reports both `agent` and `observationHead: finalized`. A
+  missing `agent` used to count as the agent's own wallet, and a missing `observationHead` as finalized.
+  The real explorer always sends both fields (checked on devnet).
+- `did:key` entries in `PROACTIVE_DENY_DIDS` now block that DID's SS58 wallet for direct buying. Before,
+  they were dropped, so a sibling fork running a miner from its DID wallet was not blocked.
+- A faucet claim above `FLOP_FAUCET_MAX_CREDIT` (default 100000 FLOP) is not credited and sends a Telegram
+  alert. Such an amount is usually raw units in the FLOP field.
+- The x402 value rail checks that the escrow locks at least the deal amount (fail-closed). Before, a lock
+  of any size passed the gate.
+- tclk HTLC preimages are encrypted in `state.json` (AES-GCM, key derived from the agent key), and
+  plaintext entries are migrated on the next run. The Actions cache can be restored by pull-request
+  workflows on a public repository.
+- Removed an unused import and redundant assignments.
 - The CLI that receives the wallet key is better isolated. A `FLOP_DIRECT_IMAGE` override must now be pinned
   by digest, or direct buying stops with a configuration error; an unpinned value is never passed to
   Docker. The container runs on the `bridge` network instead of `host` (`FLOP_DIRECT_DOCKER_NETWORK=host`

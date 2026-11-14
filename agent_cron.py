@@ -1556,6 +1556,18 @@ def kv_get_ns(ns: str, key: str):
         return None
 
 
+_TCLK_VAULT_INFO = b"tclk-preimage/v1"
+
+
+def _tclk_vault(private_key):
+    """(seal_fn, open_fn) mã hoá preimage tclk bằng khoá agent; (None, None) khi không có khoá Ed25519 thật."""
+    if not isinstance(private_key, Ed25519PrivateKey):
+        return None, None
+    import flop_gateway
+    return (lambda text: flop_gateway.seal_secret(private_key, text, _TCLK_VAULT_INFO),
+            lambda blob: flop_gateway.open_secret(private_key, blob, _TCLK_VAULT_INFO))
+
+
 def tclk_job_spec(ctx: str):
     """Đọc job-spec từ context. Hai dạng được chấp nhận:
       1) con trỏ KV '/kv/<ns>/<key>' -> fetch note (payer tốn công post trước).
@@ -3862,6 +3874,8 @@ def faucet_step(state: dict, private_key, did) -> str:
                                               private_key=private_key, did=did)
         status = fr.get("outcome", "?")
         print(f"[faucet] {status}" + (f" — {fr['reason']}" if fr.get("reason") else ""))
+        if status == "claimed_implausible":
+            _telegram_send(f"⚠️ Faucet: {fr.get('reason')}")
         if status == "claimed":
             # Khoản nạp vừa vào sổ: lưu sổ cái NGAY (mốc "đã xin" lưu ở state.json ngay dưới đây;
             # run chết trước persist cuối run thì sổ thiếu vĩnh viễn khoản nạp này).
@@ -4890,7 +4904,6 @@ def attribution_room(state: dict, now: int):
     xác nhận nhiều thì độ trễ cho phép càng lớn, nhưng một khoản nhỏ không mở cổng cho khoản lớn.
     Tính cả phần chưa vào sổ (biên nhận chờ, request treo), và về 0 khi đã thấy kênh đứng tên người
     khác mà chain chưa ghi đủ. Lý do dừng: R8.4, yellowpaper#172."""
-    import flop_gateway
     import token_manager as tm
     from decimal import Decimal
     if tm.ledger_mode() != "testnet":
@@ -5458,6 +5471,32 @@ DIRECT_KV_HASH = "flop_direct_kv_hash"
 DIRECT_KV_STALE_SEC = 6 * 3600   # khôi phục từ bản KV cũ hơn chừng này (khi mất state.json) -> báo      # dấu của bản đã đẩy lên KV gần nhất (cục bộ): không đổi thì không ghi lại
 
 
+def did_key_ss58(did: str):
+    """Địa chỉ ví FLOP (SS58) tương ứng một did:key Ed25519 — ví của agent dùng FLOP_WALLET_USE_DID=on. None nếu không
+    phải did:key Ed25519 hợp lệ."""
+    import flop_gateway
+    if not isinstance(did, str) or not did.startswith("did:key:z"):
+        return None
+    raw = b58decode(did[len("did:key:z"):])
+    if not raw or len(raw) != 34 or raw[:2] != b"\xed\x01":
+        return None
+    return flop_gateway.ss58_encode(raw[2:])
+
+
+def direct_deny_list(entries) -> list:
+    """Danh sách miner bị chặn cho mua trực tiếp: địa chỉ SS58 giữ nguyên, did:key đổi sang ví SS58 của nó. Trước đây
+    mục `did:` bị BỎ — fork cùng nhóm chạy miner bằng ví DID (FLOP_WALLET_USE_DID=on) không bị chặn, và agent có thể
+    mua của chính nhóm mình (self-deal, cờ sybil)."""
+    out = []
+    for d in entries or ():
+        d = str(d).strip()
+        if d.startswith("did:"):
+            d = did_key_ss58(d) or ""
+        if d:
+            out.append(d)
+    return out
+
+
 def direct_kv_hydrate(state: dict, private_key) -> bool:
     """Lấy bản đã ký trên KV khi state.json không có phần flop_direct (Actions cache mất / runner mới) HOẶC bản KV mới
     hơn (`rev`): lưu cache lỗi một lượt thì lượt sau khôi phục cache CŨ hơn một lượt. Thiếu bước này thì quên trần ngày
@@ -5679,7 +5718,7 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
             fetch_channel=fetch_channel, book_fn=book if testnet else None, offers_fn=offers,
             price_fn=price, miner_cap_fn=miner_cap, balance_fn=balance,
             indexer_url=explorer, own_channels_fn=own_channels,
-            deny=[d for d in PROACTIVE_DENY_DIDS if not d.startswith("did:")],
+            deny=direct_deny_list(PROACTIVE_DENY_DIDS),
             deadline=direct_deadline(), alert=_telegram_send, checkpoint=checkpoint,
             spend_room=lambda: combined_spend_room(state, now))
         direct_kv_persist(state, private_key)
@@ -6059,6 +6098,7 @@ def main():
     elif TCLK_ENABLED:
         try:
             import flop_tclk
+            _tclk_seal = _tclk_vault(private_key)
             ts = flop_tclk.run_tclk_payee(
                 fetch_fn=lambda since: fetch_messages(since, room=TCLK_ROOM),
                 post_fn=lambda text: post_message(private_key, did, text, room=TCLK_ROOM),
@@ -6072,6 +6112,7 @@ def main():
                 now_ms=now * 1000,
                 job_spec_fn=tclk_job_spec,       # bộ lọc chỉ-nhận-text: bỏ job media ngay ở accept
                 deny_dids=PROACTIVE_DENY_DIDS,   # KHÔNG nhận offer của DID bị chặn -> chống tự-mua-bán (sybil)
+                seal_fn=_tclk_seal[0],           # preimage MÃ HOÁ trong state.json (cache đọc được từ workflow PR)
             )
             save_state({"tclk_cursor": state.get("tclk_cursor"),
                         "tclk_accepted": state.get("tclk_accepted", []),
@@ -6107,6 +6148,7 @@ def main():
                 offers_room=TCLK_ROOM,          # lock/reveal ở lại room offers (deal room cap đầy)
                 value_rail=value_rail,
                 dry_run=TCLK_COMPLETE_DRY_RUN,
+                seal_fn=_tclk_vault(private_key)[0], open_fn=_tclk_vault(private_key)[1],
             )
             save_state({"tclk_secrets": state.get("tclk_secrets", {}),
                         "tclk_completed": state.get("tclk_completed", [])})
