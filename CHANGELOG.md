@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Security: `certifi` 2026.7.22 -> 2026.10.23 in `requirements.lock` and `requirements-dev.lock`
+  (GHSA-6q48-6c7w-9gw2 / PYSEC-2026-4320, rated critical). Versions before 2026.10.18 trust the
+  `emSign ECC Root CA - G3` root, and eight intermediate CAs under it have compromised private keys. An
+  on-path attacker holding one could intercept or alter the agent's HTTPS traffic. Every request goes
+  through `requests` with this bundle: technocore.chat, the FLOP gateway bearer, Telegram and LLM API
+  keys. The new release is 22 days old, which follows the lock's at-least-two-weeks rule.
 - The 6-hourly KV check while direct buying is off no longer sends a "restored from an old KV copy" alert
   when the copy has nothing left to reconcile. Before, an old finished copy would have been restored, then
   dropped, and the stale alert repeated every 6 hours. The copy is now restored, and the alert sent, only
