@@ -321,6 +321,8 @@ jobs:
           FLOP_RUN_BUDGET_SEC: ${{ vars.FLOP_RUN_BUDGET_SEC }}
           # Giá CỐ ĐỊNH mỗi lần gọi (FLOP) nếu FLOP công bố ngoài catalog; rỗng = đọc catalog.
           FLOP_GATEWAY_FIXED_PRICE: ${{ vars.FLOP_GATEWAY_FIXED_PRICE }}
+          # Gateway trừ lệch token × giá catalog quá N lần (mặc định 10; quota tụt: 100) -> DỪNG mua tới khi xử lý.
+          FLOP_GATEWAY_PRICE_RATIO_MAX: ${{ vars.FLOP_GATEWAY_PRICE_RATIO_MAX }}
           FLOP_GATEWAY_LAG_ALERT_HOURS: ${{ vars.FLOP_GATEWAY_LAG_ALERT_HOURS }}
           FLOP_GATEWAY_LAG_REALERT_HOURS: ${{ vars.FLOP_GATEWAY_LAG_REALERT_HOURS }}
           FLOP_GATEWAY_MIN_TOKENS: ${{ vars.FLOP_GATEWAY_MIN_TOKENS }}
