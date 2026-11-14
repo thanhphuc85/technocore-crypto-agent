@@ -162,6 +162,8 @@ jobs:
           FLOP_KIBBLE_DUP_HOURS: ${{ vars.FLOP_KIBBLE_DUP_HOURS }}
           # Trần ký tự ĐỀ BÀI (title + body) của job đưa vào model (trống = 4000, sàn 500).
           FLOP_KIBBLE_TASK_MAX_CHARS: ${{ vars.FLOP_KIBBLE_TASK_MAX_CHARS }}
+          # Trần ký tự BÀI GIAO (deliverable) của một job kibble (trống = 1200).
+          FLOP_KIBBLE_MAX_CHARS: ${{ vars.FLOP_KIBBLE_MAX_CHARS }}
           # Báo cáo CHI TIÊU FLOP định kỳ qua Telegram (mặc định TẮT). Dùng lại 2 secret
           # Telegram của bước cảnh báo; agent chỉ ĐỌC chúng để gửi, không bao giờ log.
           FLOP_DAILY_REPORT_ENABLED: ${{ vars.FLOP_DAILY_REPORT_ENABLED }}
@@ -242,6 +244,9 @@ jobs:
           FLOP_TCLK_DRY_RUN: ${{ vars.FLOP_TCLK_DRY_RUN }}
           FLOP_TCLK_RAILS: ${{ vars.FLOP_TCLK_RAILS }}
           FLOP_TCLK_MAX_PER_RUN: ${{ vars.FLOP_TCLK_MAX_PER_RUN }}
+          # Bỏ offer có cửa sổ claim / khoảng tới refund ngắn hơn chừng này (ms; trống = 5 phút / mặc định code).
+          FLOP_TCLK_MIN_CLAIM_WINDOW_MS: ${{ vars.FLOP_TCLK_MIN_CLAIM_WINDOW_MS }}
+          FLOP_TCLK_MIN_REFUND_GAP_MS: ${{ vars.FLOP_TCLK_MIN_REFUND_GAP_MS }}
           # Vòng hoàn tất (gated riêng, dry-run mặc định). Chỉ tác dụng khi deal đã accept live
           # (FLOP_TCLK_DRY_RUN=off). Đặt FLOP_TCLK_COMPLETE_DRY_RUN=off mới thực sự reveal.
           FLOP_TCLK_COMPLETE_ENABLED: ${{ vars.FLOP_TCLK_COMPLETE_ENABLED }}

@@ -4672,3 +4672,26 @@ def test_engage_asks_the_peer_in_the_room_they_spoke_in(monkeypatch):
     ac.auto_respond(Ed25519PrivateKey.from_private_bytes(bytes(32)), "did:key:z6MkME")
     assert posts == ["lobby"]
 
+
+
+
+def test_every_documented_flop_variable_is_mapped_by_the_workflow():
+    """README liệt kê một biến FLOP_/TESTNET_ là cấu hình (Repo Variable) mà workflow không truyền -> operator đặt
+    Variable, agent không bao giờ thấy (đã xảy ra với FLOP_KIBBLE_MAX_CHARS và hai núm tclk). Hàng README dạng
+    `| `NAME` / `_SUFFIX` | ...`: hậu tố thay phần cuối của tên đầu."""
+    import re as _re
+    readme = open("README.md", encoding="utf-8").read()
+    wf = open(".github/workflows/agent_cron.yml", encoding="utf-8").read()
+    mapped = set(_re.findall(r"^\s+([A-Z][A-Z0-9_]+):\s*\$\{\{", wf, _re.M))
+    code = "".join(open(f, encoding="utf-8").read() for f in __import__("glob").glob("*.py") if not f.startswith("test_"))
+    names = set()
+    for first, rest in _re.findall(r"^\| `([A-Z][A-Z0-9_]+)`((?: / `_?[A-Z0-9_]+`)*)", readme, _re.M):
+        names.add(first)
+        parts = first.split("_")
+        for suf in _re.findall(r"`(_?[A-Z0-9_]+)`", rest):
+            names.update("_".join(parts[:i]) + suf for i in range(1, len(parts))) if suf.startswith("_") else names.add(suf)
+    real = {n for n in names if n.startswith(("FLOP_", "TESTNET_")) and f'"{n}"' in code}
+    not_for_actions = {"FLOP_DIRECT_CLI",   # CLI cục bộ cho máy KHÔNG có Docker (VPS); Actions chạy image Docker
+                       "FLOP_TX_UA",        # User-Agent của adapter mempool cũ — bị chặn trên testnet
+                       "FLOP_TCLK_X402_ENABLED"}   # rail x402 chưa nối trong agent_cron (submit_fn/read_fn = None)
+    assert sorted(real - mapped - not_for_actions) == []

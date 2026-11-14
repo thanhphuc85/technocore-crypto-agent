@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `FLOP_KIBBLE_MAX_CHARS`, `FLOP_TCLK_MIN_CLAIM_WINDOW_MS` and `FLOP_TCLK_MIN_REFUND_GAP_MS` are documented
+  in the README as Repo Variables but were not passed by the agent workflow, so setting them had no effect.
+  They are now mapped. A test now requires every FLOP_/TESTNET_ variable that the README lists and the code
+  reads to be mapped, except the documented exceptions. All 34 variables in the day-one testnet checklist
+  were already mapped.
 - The public `kibble-score` no longer counts ATTEST votes that judged other workers' deliveries. The tracker
   scored against the buffer fetched before the agent delivered, so every vote in it had been posted
   earlier and was about someone else's work. Votes posted before the delivery time are now ignored by both
