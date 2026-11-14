@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- The 6-hourly KV check while direct buying is off no longer sends a "restored from an old KV copy" alert
+  when the copy has nothing left to reconcile. Before, an old finished copy would have been restored, then
+  dropped, and the stale alert repeated every 6 hours. The copy is now restored, and the alert sent, only
+  when it still has pending channels, an orphan search or an unfinished session.
 - With direct buying off, pending channels and an unfinished-session mark are still reconciled. If
   `state.json` has no direct state (for example, the Actions cache was just lost), the signed KV copy is
   read, at most once every 6 hours, and is reconciled when it still has pending channels, an orphan
