@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Token ledger persistence: if the ledger was still over the 8192-character KV limit after dropping every
+  entry, `persist_ledger_to_kv` returned before it saved the `state.json` snapshot. Both durable copies then
+  stopped updating, so the ledger rolled back every run, including its receipt dedupe hashes. A full testnet
+  ledger (100 gateway + 100 direct hashes) is about 94% of the limit, so little growth would trigger this. Now:
+  - the snapshot is always saved first, in full;
+  - the KV copy trims `gateway_refs` to 40, then 20, before giving up (`/keys/me/receipts` returns the last 20);
+  - hydrate unions both hash lists from every valid copy, so a trimmed KV copy never loses a hash.
 - Gateway operator budget (`FLOP_GATEWAY_BUDGET_FLOP`): a call with an unknown outcome reserves `max_cost`
   against the budget. When a later replay (`FLOP_GATEWAY_REPLAY_MAX`) recovered the answer, the real cost was
   added on top of that reserve instead of replacing it, so the budget over-counted and buying stopped early.
