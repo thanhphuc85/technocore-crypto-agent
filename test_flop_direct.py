@@ -2324,3 +2324,43 @@ def test_direct_off_alerts_once_when_a_stale_kv_copy_has_unfinished_work(monkeyp
     st = {}
     ac.direct_session_step(st, KEY, t)
     assert ran and sum("niêm phong" in m for m in sent) == 1
+
+
+# --- các chốt chặn tiền ở đường escrow CỐ ĐỊNH (FLOP_DIRECT_MAX_FLOP) — trước đây chưa có test chạy qua ----------------
+
+def _two_ok():
+    return SeqCLI([(0, json.dumps({"ok": True, "channel": "0x" + f"{i:064x}"}), "") for i in (1, 2, 3)])
+
+
+def test_fixed_escrow_respects_the_daily_cap(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_FLOP", "0.05")
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_DAY", "0.08")
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_RUN", "3")
+    st, cli = {}, _two_ok()
+    r = step(st, cli)
+    assert len(cli.sessions()) == 1 and st[fd.KEY]["day"]["escrow"] == pytest.approx(0.05)
+    assert "trần" in (r.get("reason") or "")
+
+
+def test_fixed_escrow_respects_the_combined_cap(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_FLOP", "0.05")
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_DAY", "2000")
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_RUN", "3")
+    st, cli = {}, _two_ok()
+    r = step(st, cli, spend_room=lambda: 0.07)
+    assert len(cli.sessions()) == 1 and "FLOP_MAX_SPEND_PER_DAY" in (r.get("reason") or "")
+
+
+def test_clean_refusal_gives_the_escrow_back_to_this_runs_balance(monkeypatch):
+    m2 = fg.ss58_encode(bytes([8]) * 32)
+    monkeypatch.delenv("FLOP_DIRECT_MINER")
+    monkeypatch.delenv("FLOP_DIRECT_ENDPOINT")
+    monkeypatch.setenv("FLOP_DIRECT_MINERS", f"{MINER} https://a.example;{m2} https://b.example")
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_RUN", "2")
+    monkeypatch.setenv("FLOP_DIRECT_FEE_RESERVE", "0")
+    refused = (1, "", json.dumps({"ok": False, "code": "MINER_BUSY", "message": "miner busy"}))
+    ok = (0, json.dumps({"ok": True, "channel": CH}), "")
+    cli = SeqCLI([refused, ok])
+    offers = {MINER: [offer(miner=MINER)], m2: [offer(miner=m2)]}
+    r = step({}, cli, balance_fn=lambda a: Decimal("0.06"), offers_fn=lambda mi, mh: offers[mi])
+    assert len(cli.sessions()) == 2 and r["opened"] == 1          # không trả lại: còn 0.01 -> low_balance, 1 phiên
