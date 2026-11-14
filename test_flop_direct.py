@@ -1962,7 +1962,8 @@ def test_newer_kv_copy_beats_a_stale_state_json(monkeypatch):
 
 def test_newer_gateway_inflight_blob_beats_the_local_one(monkeypatch):
     kv = _kv(monkeypatch)
-    kv[ac.STATE_KV_KEY] = ac._kv_seal(KEY, {"gateway_inflight": {"at": NOW, "inflight": {"key": "new"}}})
+    kv[ac.STATE_KV_KEY] = ac._kv_seal(KEY, {"gateway_inflight": {"at": NOW, "inflight": {"key": "new"}}},
+                                         ac.STATE_KV_KEY)
     monkeypatch.setattr(ac.time, "time", lambda: NOW + 60)
     st = {"gateway_inflight": {"at": NOW - 300, "inflight": {"key": "old"}}}
     ac.hydrate_durable_from_kv(st, KEY)
@@ -2058,3 +2059,34 @@ def test_combined_spend_room_sums_both_paths(monkeypatch):
 def test_nan_direct_daily_cap_falls_back_to_the_default(monkeypatch):
     monkeypatch.setenv("FLOP_DIRECT_MAX_PER_DAY", "nan")
     assert fd.config()[0]["per_day"] == fd.DEFAULT_MAX_PER_DAY
+
+
+# --- M5: bản niêm phong KV gắn đích (ns/khoá) + giờ --------------------------------------------------------------------
+
+def test_sealed_record_cannot_be_moved_to_another_key():
+    raw = ac._kv_seal(KEY, {"rev": 1, "day": {"day": "d", "escrow": 0.0}}, ac.STATE_KV_KEY)
+    assert ac._kv_open(raw, KEY, ac.STATE_KV_KEY)["rev"] == 1
+    assert ac._kv_open(raw, KEY, ac.DIRECT_KV_KEY) is None                     # chép sang khoá khác: bỏ
+    forged = json.loads(raw)
+    forged["k"] = ac._kv_target(ac.DIRECT_KV_KEY)                               # sửa đích: chữ ký hỏng
+    assert ac._kv_open(json.dumps(forged), KEY, ac.DIRECT_KV_KEY) is None
+    assert ac._kv_seal_time(raw) is not None
+
+
+def test_legacy_seals_are_accepted_only_until_the_cutoff(monkeypatch):
+    raw = ac._kv_seal(KEY, {"x": 1})                                            # bản cũ: chỉ ký thân
+    monkeypatch.setattr(ac.time, "time", lambda: ac.KV_LEGACY_SEAL_UNTIL - 60)
+    assert ac._kv_open(raw, KEY, ac.STATE_KV_KEY) == {"x": 1}
+    monkeypatch.setattr(ac.time, "time", lambda: ac.KV_LEGACY_SEAL_UNTIL + 60)
+    assert ac._kv_open(raw, KEY, ac.STATE_KV_KEY) is None
+
+
+def test_restoring_direct_state_from_an_old_kv_copy_alerts(monkeypatch):
+    kv = _kv(monkeypatch)
+    sent = []
+    monkeypatch.setattr(ac, "_telegram_send", lambda m: sent.append(m) or True)
+    monkeypatch.setattr(ac.time, "time", lambda: NOW)
+    kv[ac.DIRECT_KV_KEY] = ac._kv_seal(KEY, {"rev": 3, "pending": []}, ac.DIRECT_KV_KEY)
+    monkeypatch.setattr(ac.time, "time", lambda: NOW + ac.DIRECT_KV_STALE_SEC + 60)
+    st = {}
+    assert ac.direct_kv_hydrate(st, KEY) and st[fd.KEY]["rev"] == 3 and any("niêm phong" in m for m in sent)

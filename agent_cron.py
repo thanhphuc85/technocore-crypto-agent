@@ -1661,7 +1661,7 @@ def tclk_do_work(meta: dict):
 def write_heartbeat(private_key, did, now: int) -> None:
     """Runner CHÍNH đóng dấu 'còn sống' lên KV để runner PHỤ biết đang được phủ sóng."""
     kv_set(private_key, did, HEARTBEAT_KEY,
-           _kv_seal(private_key, {"ts": int(now)}) if isinstance(private_key, Ed25519PrivateKey)
+           _kv_seal(private_key, {"ts": int(now)}, HEARTBEAT_KEY) if isinstance(private_key, Ed25519PrivateKey)
            else str(now))
 
 
@@ -1673,7 +1673,7 @@ def primary_alive(now: int, within_min: float, private_key=None) -> bool:
     raw = kv_get(HEARTBEAT_KEY)
     try:
         if isinstance(private_key, Ed25519PrivateKey):
-            body = _kv_open(raw, private_key)
+            body = _kv_open(raw, private_key, HEARTBEAT_KEY)
             last = int((body or {}).get("ts"))
         else:
             last = int(raw)
@@ -1719,13 +1719,32 @@ def _kv_canon(obj) -> str:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
-def _kv_seal(private_key, obj) -> str:
-    """{"body": obj, "sig": Ed25519(canon(obj)), "did": ...} — ai cũng kiểm được bằng DID.
-    Không có khoá Ed25519 thật (công cụ/test) -> JSON thường."""
+# Bản niêm phong v2 gắn chữ ký với ĐÍCH ("<ns>/<khoá>") và giờ niêm phong: một bản đã ký hợp lệ của khoá này (vd
+# `state`, `heartbeat`) không còn dán được sang khoá khác (`token_ledger`, `flop_direct`) mà vẫn qua kiểm chữ ký. Bản
+# cũ (chỉ ký thân) còn được nhận tới KV_LEGACY_SEAL_UNTIL để lượt đầu sau khi nâng cấp vẫn đọc được KV; sau mốc đó
+# mọi bản cũ — kể cả bản ai đó chép lại từ trước — bị bỏ.
+KV_LEGACY_SEAL_UNTIL = 1_795_219_200      # 2026-11-21 00:00 UTC
+
+
+def _kv_target(key) -> str:
+    return f"{KV_NS}/{key}"
+
+
+def _kv_seal_canon(body, target: str, t: int) -> str:
+    return _kv_canon({"b": body, "k": target, "t": int(t)})
+
+
+def _kv_seal(private_key, obj, key: str = None) -> str:
+    """Niêm phong `obj` bằng khoá agent. Có `key` -> bản v2 {"body", "k": "<ns>/<key>", "t", "sig", "did"}, chữ ký phủ
+    cả đích và giờ. Không có `key` -> bản cũ (chỉ ký thân). Không có khoá Ed25519 thật (công cụ/test) -> JSON thường."""
     if not isinstance(private_key, Ed25519PrivateKey):
         return json.dumps(obj, ensure_ascii=False)
-    return _kv_wire({"body": obj, "sig": sign_message(private_key, _kv_canon(obj)),
-                     "did": did_of(private_key)})
+    if key is None:
+        return _kv_wire({"body": obj, "sig": sign_message(private_key, _kv_canon(obj)),
+                         "did": did_of(private_key)})
+    target, t = _kv_target(key), int(time.time())
+    return _kv_wire({"body": obj, "k": target, "t": t, "did": did_of(private_key),
+                     "sig": sign_message(private_key, _kv_seal_canon(obj, target, t))})
 
 
 def _kv_wire(envelope) -> str:
@@ -1742,9 +1761,10 @@ def _kv_wire(envelope) -> str:
     return re.sub(r"(?<= ) ", r"\\u0020", s)
 
 
-def _kv_open(raw, private_key):
-    """Thân bản ghi nếu chữ ký khớp KHOÁ CỦA CHÍNH AGENT; ngược lại None. Không truyền khoá
-    Ed25519 thật (công cụ/test, KHÔNG phải main()) -> nhận JSON như trước, không kiểm."""
+def _kv_open(raw, private_key, key: str = None):
+    """Thân bản ghi nếu chữ ký khớp KHOÁ CỦA CHÍNH AGENT; ngược lại None. `key` = khoá KV vừa đọc: bản v2 phải mang
+    ĐÚNG đích "<ns>/<key>" (chép sang khoá khác -> None); bản cũ chỉ được nhận tới KV_LEGACY_SEAL_UNTIL. Không truyền
+    khoá Ed25519 thật (công cụ/test, KHÔNG phải main()) -> nhận JSON như trước, không kiểm."""
     if not raw:
         return None
     if not isinstance(private_key, Ed25519PrivateKey):
@@ -1760,9 +1780,26 @@ def _kv_open(raw, private_key):
         if not (isinstance(d, dict) and "body" in d and isinstance(d.get("sig"), str)):
             return None
         sig = base64.urlsafe_b64decode(d["sig"] + "=" * (-len(d["sig"]) % 4))
+        if "k" in d:
+            private_key.public_key().verify(sig, _kv_seal_canon(d["body"], str(d["k"]), int(d["t"])).encode("utf-8"))
+            if key is not None and d["k"] != _kv_target(key):
+                print(f"[kv] bỏ bản ký cho {str(d['k'])[:60]} nằm ở khoá {_kv_target(key)} — bị chép sang khoá khác")
+                return None
+            return d["body"]
+        if key is not None and time.time() >= KV_LEGACY_SEAL_UNTIL:
+            return None                      # bản cũ (không gắn đích) hết hạn nhận
         private_key.public_key().verify(sig, _kv_canon(d["body"]).encode("utf-8"))
         return d["body"]
     except Exception:
+        return None
+
+
+def _kv_seal_time(raw):
+    """Giờ niêm phong (giây) của bản v2, hoặc None. Chỉ dùng SAU khi _kv_open đã kiểm chữ ký."""
+    try:
+        d = json.loads(raw)
+        return int(d["t"]) if isinstance(d, dict) and "k" in d else None
+    except (ValueError, TypeError, KeyError):
         return None
 
 
@@ -1783,7 +1820,7 @@ def hydrate_durable_from_kv(state: dict, private_key=None) -> None:
     raw = kv_get(STATE_KV_KEY)
     if not raw:
         return
-    remote = _kv_open(raw, private_key)
+    remote = _kv_open(raw, private_key, STATE_KV_KEY)
     if not isinstance(remote, dict):
         print("[kv] bỏ qua trạng thái KV không có chữ ký hợp lệ của agent (có thể bị ghi đè)")
         return
@@ -1851,7 +1888,7 @@ def persist_durable_to_kv(private_key, did) -> None:
     snap = load_state()
     payload = {k: snap[k] for k in DURABLE_STATE_KEYS if k in snap}
     if payload:
-        kv_set(private_key, did, STATE_KV_KEY, _kv_seal(private_key, payload))
+        kv_set(private_key, did, STATE_KV_KEY, _kv_seal(private_key, payload, STATE_KV_KEY))
 
 
 # --- Sổ cái token FLOP: BỀN qua KV (không thì runner Actions xoá file mỗi run -> mất tích luỹ) --
@@ -1933,7 +1970,7 @@ def hydrate_ledger_from_kv(state: dict = None, private_key=None) -> None:
         cands = []
         raw = kv_get(_ledger_kv_key())
         if raw:
-            body = _kv_open(raw, private_key)      # chỉ nhận bản agent tự ký
+            body = _kv_open(raw, private_key, _ledger_kv_key())      # chỉ nhận bản agent tự ký, đúng khoá
             if body is not None:
                 cands.append(("KV", body))
             else:
@@ -2049,7 +2086,7 @@ def persist_miner_stats(private_key, did) -> None:
         return
     top = sorted(st["counts"].items(), key=lambda kv: -kv[1])
     for cap in (len(top), 100, 50, 20):
-        sealed = _kv_seal(private_key, {"counts": dict(top[:cap]), "denied": st["denied"]})
+        sealed = _kv_seal(private_key, {"counts": dict(top[:cap]), "denied": st["denied"]}, _miner_stats_key())
         if len(sealed) <= KV_VALUE_MAX:
             kv_set(private_key, did, _miner_stats_key(), sealed)
             return
@@ -2060,7 +2097,7 @@ def hydrate_miner_stats(state: dict, private_key=None) -> dict:
     local = state.get(_miner_stats_key())
     if local:
         return local
-    body = _kv_open(kv_get(_miner_stats_key()), private_key)
+    body = _kv_open(kv_get(_miner_stats_key()), private_key, _miner_stats_key())
     return body if isinstance(body, dict) else {}
 
 
@@ -2119,7 +2156,7 @@ def persist_ledger_to_kv(private_key, did) -> None:
         sealed = None
         for cap in (LEDGER_KV_ENTRY_CAP, 10, 5, 0):
             obj = {**base, "entries": entries[-cap:] if cap else []}
-            cand = _kv_seal(private_key, obj)           # đo CẢ phần niêm phong
+            cand = _kv_seal(private_key, obj, _ledger_kv_key())           # đo CẢ phần niêm phong
             if len(cand) <= KV_VALUE_MAX:
                 body, sealed = json.dumps(obj, ensure_ascii=False), cand
                 break
@@ -4358,7 +4395,7 @@ def _load_room_cursors(state, multi, private_key=None):
         raw = kv_get("cursors")
         if raw:
             try:
-                body = _kv_open(raw, private_key)       # chỉ nhận bản agent tự ký
+                body = _kv_open(raw, private_key, "cursors")       # chỉ nhận bản agent tự ký
                 for k, v in (body if isinstance(body, dict) else {}).items():
                     if str(v).lstrip("-").isdigit():
                         cursors[k] = int(v)
@@ -4390,7 +4427,7 @@ def auto_respond(private_key, did):
         if rc is None and is_primary:            # dự phòng cursor 1-room legacy trên KV
             kc = kv_get("cursor")
             if isinstance(private_key, Ed25519PrivateKey):
-                kc = str((_kv_open(kc, private_key) or {}).get("seq", "")) if kc else None
+                kc = str((_kv_open(kc, private_key, "cursor") or {}).get("seq", "")) if kc else None
             if kc and kc.isdigit():
                 rc = int(kc)
                 print(f"[respond:{room}] khôi phục cursor từ KV -> {rc}")
@@ -4463,10 +4500,10 @@ def auto_respond(private_key, did):
                 "recent_out": state.get("recent_out", []), "engaged": state.get("engaged", {})})
     if primary_cursor is not None:
         kv_set(private_key, did, "cursor",                          # tương thích 1-room cũ
-               _kv_seal(private_key, {"seq": primary_cursor})
+               _kv_seal(private_key, {"seq": primary_cursor}, "cursor")
                if isinstance(private_key, Ed25519PrivateKey) else str(primary_cursor))
     if multi:
-        kv_set(private_key, did, "cursors", _kv_seal(private_key, cursors))  # durable đa room
+        kv_set(private_key, did, "cursors", _kv_seal(private_key, cursors, "cursors"))  # durable đa room
     print(f"[respond] reply {caps['replies']} · proactive {caps['proactive']} | "
           f"rooms={len(rooms)} cursors={cursors}")
     return caps["replies"], caps["proactive"]
@@ -5388,7 +5425,8 @@ def gateway_session_step(state: dict, private_key, now: int):
 
 
 DIRECT_KV_KEY = "flop_direct"
-DIRECT_KV_HASH = "flop_direct_kv_hash"      # dấu của bản đã đẩy lên KV gần nhất (cục bộ): không đổi thì không ghi lại
+DIRECT_KV_HASH = "flop_direct_kv_hash"
+DIRECT_KV_STALE_SEC = 6 * 3600   # khôi phục từ bản KV cũ hơn chừng này (khi mất state.json) -> báo      # dấu của bản đã đẩy lên KV gần nhất (cục bộ): không đổi thì không ghi lại
 
 
 def direct_kv_hydrate(state: dict, private_key) -> bool:
@@ -5398,7 +5436,8 @@ def direct_kv_hydrate(state: dict, private_key) -> bool:
     import flop_direct
     local = state.get(flop_direct.KEY)
     try:
-        body = _kv_open(kv_get(DIRECT_KV_KEY), private_key)
+        raw = kv_get(DIRECT_KV_KEY)
+        body = _kv_open(raw, private_key, DIRECT_KV_KEY)
     except Exception:
         return False
     if flop_direct.restore(state, body):
@@ -5408,6 +5447,13 @@ def direct_kv_hydrate(state: dict, private_key) -> bool:
                   f"— dùng bản KV ({n} kênh chờ). Lần lưu cache trước có thể đã lỗi.")
         else:
             print(f"[direct] khôi phục trạng thái từ KV ({n} kênh chờ)")
+            sealed_at = _kv_seal_time(raw)
+            if sealed_at is not None and time.time() - sealed_at > DIRECT_KV_STALE_SEC:
+                # KV ai cũng ghi được: một bản CŨ có chữ ký hợp lệ có thể bị chép lại để tua lùi trần ngày / kênh chờ.
+                _m = (f"⚠️ FLOP direct: mất state.json, khôi phục từ bản KV niêm phong "
+                      f"{int((time.time() - sealed_at) // 3600)} giờ trước — kiểm trần ngày và kênh chờ trên explorer.")
+                print(f"[direct] {_m}")
+                _telegram_send(_m)
         return True
     return False
 
@@ -5429,7 +5475,7 @@ def direct_kv_persist(state: dict, private_key) -> bool:
     full = len(g.get("pending") or [])
     for level in range(0, 2 + (full + 4) // 5 + 1):
         view = flop_direct.durable_view(g, level)
-        sealed = _kv_seal(private_key, view)
+        sealed = _kv_seal(private_key, view, DIRECT_KV_KEY)
         if len(sealed) <= KV_VALUE_MAX:
             break
     else:
