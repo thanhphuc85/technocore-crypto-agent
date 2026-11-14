@@ -1457,3 +1457,47 @@ def test_nan_daily_cap_falls_back_to_the_default(monkeypatch):
     r = _run({gw.KEY: {"profile": gw.profile_of("devnet"),
                        "day_spent": {"day": day, "spent": gw.DEFAULT_MAX_PER_DAY + 1}}}, fake)
     assert r["outcome"] == "daily_cap" and _chats(fake) == []      # trước: nan tắt trần, vẫn mua
+
+
+# --- M8: trần gửi kèm không vượt phần chia cho lần gọi --------------------------------------------------------------
+
+def test_max_cost_never_exceeds_the_share_of_the_due_amount():
+    fake = FakeGateway(expires_ms=SOON)
+    _run({}, fake, spend_room=lambda: 0.6)                         # phần đến hạn 0.6 -> một lần gọi tối đa 0.6
+    bodies = [c[3] for c in fake.calls if c[1] == "/v1/chat/completions"]
+    assert bodies and all(b["max_cost_flop"] <= 0.6 + 1e-9 for b in bodies)
+
+
+# --- M9: gateway trừ lệch xa token × giá -> dừng mua, giữ tới khi operator xử lý --------------------------------------
+
+def test_price_unit_mismatch_stops_buying_until_the_operator_acts(monkeypatch):
+    fake = FakeGateway(expires_ms=SOON, quota=1000.0, cost=50.0)    # cost_flop 50, token × giá 0.72 -> ~69 lần
+    st = {}
+    r = _run(st, fake)
+    assert r["outcome"] == "price_mismatch" and r["calls"] == 1 and "FLOP_GATEWAY_PRICE_RATIO_MAX" in r["reason"]
+    n = len(_chats(fake))
+    r = _run(st, fake)
+    assert r["outcome"] == "price_mismatch" and len(_chats(fake)) == n           # giữ chốt: không gọi nữa
+    monkeypatch.setenv("FLOP_GATEWAY_PRICE_RATIO_MAX", "100")
+    r = _run(st, fake)
+    assert r["outcome"] == "spent" and "price_mismatch" not in st[gw.KEY]
+
+
+def test_quota_derived_cost_uses_the_wider_band():
+    assert gw.price_ratio_ok(14, "quota") and not gw.price_ratio_ok(14, "usage")
+    assert not gw.price_ratio_ok(1000, "quota") and not gw.price_ratio_ok(0.001, "usage")
+
+
+# --- M2: trả phí mà không có câu trả lời ----------------------------------------------------------------------------
+
+def test_repeated_empty_answers_stop_buying(monkeypatch):
+    fake = FakeGateway(expires_ms=SOON)
+    fake.override[("POST", "/v1/chat/completions")] = Resp(data={
+        "id": "x", "choices": [{"index": 0, "message": {"role": "assistant", "content": ""}}],
+        "usage": {"prompt_tokens": 20, "completion_tokens": 0, "cost_flop": 0.9}})
+    st = {}
+    r = _run(st, fake)
+    assert r["outcome"] == "spent" and r["empty_answers"] == 2 and st[gw.KEY]["empty_streak"] == 2
+    r = gw.run_step(st, agent_key=_key("22"), http=fake, now=NOW + 300, prompts=["q1", "q2", "q3"],
+                    expect_network="devnet", sleep=lambda s: None, log=lambda *a: None)
+    assert r["outcome"] == "empty_answer" and st[gw.KEY]["wait_why"] == "empty_answers"

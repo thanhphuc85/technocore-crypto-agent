@@ -1026,7 +1026,15 @@ def test_probe_also_covers_room_smaller_than_one_call(monkeypatch, telegram):
     assert _run_at(monkeypatch, st, NOW + 6 * 3600) == "spent" and len(srv.chats) == 1
 
 
+def _own_channels(monkeypatch, own=True):
+    """Explorer: kênh của biên nhận gateway đứng tên ví mình (own) hoặc broker."""
+    me = fg.wallet_address(fg.wallet_key(KEY))
+    broker = fg.ss58_encode(bytes([5]) * 32)
+    monkeypatch.setattr(ac, "channel_info", lambda net, cid: {"agent": me if own else broker, "miner": "5M"})
+
+
 def test_probe_seen_on_chain_writes_off_foreign_spend_and_reopens_the_gate(monkeypatch, telegram):
+    _own_channels(monkeypatch)                                              # kênh thăm dò đứng tên ví mình
     st, srv = _held(monkeypatch)
     st[ac.FOREIGN_SEEN_KEY] = NOW - 100
     _run_at(monkeypatch, st, NOW)
@@ -1626,7 +1634,7 @@ def test_probe_result_ignores_direct_growth(monkeypatch, telegram):
     tm.credit("5000")
     tm.record_gateway_spend("500", "inference-session gateway m", "b-1")
     st = {ac.ATTRIB_PROBE_KEY: {"at": NOW, "pend": "500", "chain": 1000.0, "direct": 1000.0},
-          ac.FOREIGN_SEEN_KEY: 3}
+          ac.FOREIGN_SEEN_KEY: 3, ac.OWN_SEEN_KEY: NOW + 1}
     tm.record_direct_spend("1000", "inference-session direct m", "0x" + f"{10:064x}")
     tm.record_direct_spend("80", "inference-session direct m", "0x" + f"{11:064x}")   # phiên trực tiếp sau mốc
     ac._attrib_probe_result(st, NOW + 600, 1080.0)
@@ -1749,3 +1757,30 @@ def test_genesis_change_reset_also_carries_direct_booked_since_the_last_good_rea
     tm.record_direct_spend("40", "inference-session direct m", "0x" + f"{601:064x}")    # phiên đầu trên chain mới
     tm.confirm_gateway_attribution("40", chain_id="0xbb", read_at=NOW + 1)            # genesis đổi: reset ngay
     assert tm.direct_epoch_done() == Decimal("40") and tm.gateway_attribution()["unattributed"] == Decimal("30")
+
+
+# --- M6: mở lại cổng / xác nhận chỉ khi có bằng chứng THEO KÊNH -------------------------------------------------------
+
+def test_probe_without_own_channel_evidence_keeps_the_gate_closed(monkeypatch, telegram):
+    _own_channels(monkeypatch, own=False)                                   # kênh thăm dò vẫn đứng tên broker
+    st, srv = _held(monkeypatch)
+    st[ac.FOREIGN_SEEN_KEY] = NOW - 100
+    _run_at(monkeypatch, st, NOW)
+    t = NOW + 6 * 3600
+    assert _run_at(monkeypatch, st, t) == "spent"
+    srv.receipts = [rc("probe", spend=0.05, created_at=t * 1000)]
+    _run_at(monkeypatch, st, t + 300)
+    st[flop_radar.KEY] = _chain_read(5 * 10 ** 16, at=t + 600)             # chain +0.05 cho ví — từ nguồn khác
+    ac.gateway_attribution_step(st, t + 600)
+    led = tm.load_ledger()
+    assert "gateway_written_off" not in led and ac.ATTRIB_PROBE_KEY in st
+    assert tm.gateway_attribution()["attributed"] == 0                      # không xác nhận theo tổng
+    assert ac.attribution_hold(st, t + 600) is not None
+
+
+def test_own_channel_evidence_is_recorded_from_receipt_lookups(monkeypatch, telegram):
+    _own_channels(monkeypatch)
+    st, srv = _held(monkeypatch)
+    srv.receipts = [rc("mine", created_at=NOW * 1000)]
+    _run_at(monkeypatch, st, NOW)
+    assert st[ac.OWN_SEEN_KEY] == NOW

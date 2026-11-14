@@ -2090,3 +2090,26 @@ def test_restoring_direct_state_from_an_old_kv_copy_alerts(monkeypatch):
     monkeypatch.setattr(ac.time, "time", lambda: NOW + ac.DIRECT_KV_STALE_SEC + 60)
     st = {}
     assert ac.direct_kv_hydrate(st, KEY) and st[fd.KEY]["rev"] == 3 and any("niêm phong" in m for m in sent)
+
+
+# --- M2: phiên trả escrow mà không có câu trả lời ---------------------------------------------------------------------
+
+def test_three_empty_sessions_in_a_row_hold_the_miner(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_RUN", "4")
+    empty = [(0, json.dumps({"ok": True, "channel": "0x" + f"{i:064x}", "reply": "", "completion_tokens": "0"}), "")
+             for i in range(1, 5)]
+    st, alerts, cli = {}, [], SeqCLI(empty)
+    r = step(st, cli, alerts=alerts)
+    assert len(cli.sessions()) == 3 and r["empty_sessions"] == 3                # dừng sau phiên rỗng thứ 3
+    assert mst(st)["wait_why"] == "empty answers" and mst(st)["wait_until"] == NOW + fd.EMPTY_HOLD_SEC
+    assert any("không trả lời" in a for a in alerts)
+    assert all(p.get("empty") for p in st[fd.KEY]["pending"])
+
+
+def test_a_real_answer_resets_the_empty_streak(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_RUN", "3")
+    seq = [(0, json.dumps({"ok": True, "channel": "0x" + f"{i:064x}", "reply": r, "completion_tokens": t}), "")
+           for i, (r, t) in enumerate([("", "0"), ("", "0"), ("OK", "12")], 1)]
+    st = {}
+    step(st, SeqCLI(seq))
+    assert "empty_streak" not in mst(st) and not mst(st).get("wait_until")

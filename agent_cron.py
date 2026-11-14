@@ -1692,7 +1692,7 @@ def primary_alive(now: int, within_min: float, private_key=None) -> bool:
 _TS_DURABLE_KEYS = ("last_seq", "last_telemetry", "last_manifest", "last_digest",
                     "last_status_feed", "last_recap", "last_weekly_sample",
                     "last_daily_report", "last_radar", "last_state_loss_alert",
-                    "gateway_foreign_seen", "last_attrib_read")
+                    "gateway_foreign_seen", "last_attrib_read", "gateway_own_seen")
 # gateway_inflight: request gateway đang treo (timeout/5xx mơ hồ) + trần ngày + cờ cấm phát lại — mất
 # Actions cache vẫn đối soát được và không tự đặt lại phanh an toàn.
 _BLOB_DURABLE_KEYS = ("weekly_samples", "last_alert_price", "testnet_radar", "gateway_inflight", "llm_paid",
@@ -4753,6 +4753,8 @@ def channel_info(net: str, channel_id: str) -> dict:
 ATTRIB_ALERT_MIN = _env_float("FLOP_ATTRIB_ALERT_MIN", 20)
 ATTRIB_FRESH_SEC = 6 * 3600          # số explorer cũ hơn chừng này không còn là bằng chứng
 FOREIGN_SEEN_KEY = "gateway_foreign_seen"
+# Lần gần nhất explorer cho thấy một kênh gateway vừa settle ĐỨNG TÊN ví mình (bằng chứng THEO KÊNH, không suy từ tổng).
+OWN_SEEN_KEY = "gateway_own_seen"
 
 
 def onchain_spent(state: dict, now: int):
@@ -4991,6 +4993,13 @@ def _attrib_probe_result(state: dict, now: int, chain: float) -> None:
     # "direct" -> coi 0 (an toàn: trừ toàn bộ phần trực tiếp hiện có khỏi phần tăng).
     if chain - direct_on_chain(state) <= base - base_direct + 1e-9:
         return
+    # Tổng chain tăng chưa đủ: phần tăng có thể là chi KHÔNG theo dõi được (kênh mất dấu, dùng ví ở nơi khác). Chỉ
+    # mở cổng và chuyển khoản chờ sang không-tính khi explorer cho thấy kênh của chính lượt thăm dò (hoặc sau đó) ĐỨNG
+    # TÊN ví mình — trước đây chỉ dựa vào tổng.
+    if int(state.get(OWN_SEEN_KEY) or 0) < int(p.get("at") or 0):
+        print("[attrib] chain ghi thêm cho ví nhưng chưa thấy kênh gateway nào (từ lượt thăm dò) đứng tên ví mình trên "
+              "explorer — chưa mở lại cổng")
+        return
     off = tm.write_off_gateway_pending(before)
     state.pop(ATTRIB_PROBE_KEY, None)
     state.pop(ATTRIB_HOLD_SINCE_KEY, None)
@@ -5051,8 +5060,15 @@ def gateway_attribution_step(state: dict, now: int) -> str:
         # Genesis do gateway báo (lượt mua vừa rồi) = dấu nhận diện chain: phân biệt mạng reset thật
         # với explorer đọc thiếu (xem confirm_gateway_attribution).
         _gen = (state.get(flop_gateway.KEY) or {}).get("genesis")
-        tm.confirm_gateway_attribution(onchain, read_at=onchain_read_at(state), chain_id=_gen,
-                                       exclude=str(round(direct_unbooked(state), 9)))
+        _foreign, _own = int(state.get(FOREIGN_SEEN_KEY) or 0), int(state.get(OWN_SEEN_KEY) or 0)
+        if _foreign and _own < _foreign:
+            # Kênh gateway gần nhất explorer thấy đứng tên NGƯỜI KHÁC: phần chain ghi thêm cho ví không phải từ gateway
+            # (chi không theo dõi được) — không xác nhận theo tổng cho tới khi thấy một kênh gateway của chính ví mình.
+            print("[attrib] kênh gateway đứng tên người khác, chưa thấy kênh nào của ví mình sau đó — không xác nhận "
+                  "chi gateway theo tổng chain")
+        else:
+            tm.confirm_gateway_attribution(onchain, read_at=onchain_read_at(state), chain_id=_gen,
+                                           exclude=str(round(direct_unbooked(state), 9)))
         _attrib_probe_result(state, now, float(onchain))
         pend = tm.gateway_attribution()["unattributed"]
         _gw = Decimal(str(gateway_chain(onchain, state)))
@@ -5266,7 +5282,7 @@ def gateway_session_step(state: dict, private_key, now: int):
         _restore["inflight"] = None
     # first_enrolled_at: mốc lọc biên nhận "trước lần enroll đầu". Mất theo cache thì lần enroll lại
     # đặt mốc = bây giờ và biên nhận của CHÍNH MÌNH settle trước đó (chưa kịp đọc) bị bỏ, không ghi sổ.
-    for _k in ("replay_unsafe", "first_enrolled_at"):            # không được mất theo cache
+    for _k in ("replay_unsafe", "first_enrolled_at", "price_mismatch"):   # không được mất theo cache
         if isinstance(_gi, dict) and _gi.get(_k) and not _g.get(_k):
             _restore[_k] = _gi[_k]
     # Trần ngày: luôn lấy số LỚN hơn của cùng ngày UTC (bản cũ không bao giờ được hạ số đã chi).
@@ -5324,6 +5340,9 @@ def gateway_session_step(state: dict, private_key, now: int):
     if testnet and r.get("foreign_channels"):
         state[FOREIGN_SEEN_KEY] = now
         save_state({FOREIGN_SEEN_KEY: now})
+    if testnet and r.get("own_channels"):
+        state[OWN_SEEN_KEY] = now
+        save_state({OWN_SEEN_KEY: now})
     if testnet and r.get("outcome") == "enroll_unavailable" and _due(state, "last_enroll_alert", 24, now):
         _m = ("⛔ Gateway của mạng này không có /enroll/wallet nên agent KHÔNG mua được compute. Cần adapter "
               "đăng ký theo API testnet FLOP công bố (xem STRATEGY.md, checklist ngày 1).")
@@ -5336,6 +5355,15 @@ def gateway_session_step(state: dict, private_key, now: int):
         if _telegram_send(_m):
             state["last_replay_alert"] = now
             save_state({"last_replay_alert": now})
+    if oc_alert := {"price_mismatch": "last_price_alert", "empty_answer": "last_empty_alert"}.get(r.get("outcome")):
+        # Hai lý do dừng mua có tin RIÊNG (lý do + cách xử lý); bộ canh chi thật và cảnh báo tụt lại coi chúng là
+        # trung tính để không báo trùng.
+        if _due(state, oc_alert, 24, now):
+            _m = f"⛔ FLOP gateway: {r.get('reason')}"
+            print(f"[gateway] {_m}")
+            if _telegram_send(_m):
+                state[oc_alert] = now
+                save_state({oc_alert: now})
     if testnet and r.get("implausible_new"):
         # Mỗi biên nhận chỉ báo một lần (flop_gateway nhớ khoá đã báo) — không cần cổng thời gian.
         _m = (f"⚠️ {r['implausible_new']} biên nhận gateway có số tiền phi lý (vd đơn vị raw 1e-18 trong "
@@ -5359,6 +5387,7 @@ def gateway_session_step(state: dict, private_key, now: int):
                                                        if _inf.get(k) is not None},
                                  "profile": _g.get("profile"), "at": now, "day_spent": _g.get("day_spent"),
                                  "replay_unsafe": _g.get("replay_unsafe"),
+                                 "price_mismatch": _g.get("price_mismatch"),
                                  "first_enrolled_at": _g.get("first_enrolled_at")}
     save_state({"gateway_inflight": state["gateway_inflight"]})
     if GATEWAY_BRIEF and r.get("calls"):

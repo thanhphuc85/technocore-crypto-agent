@@ -74,6 +74,8 @@ UNKNOWN_HOLD_SEC = 6 * 3600        # không rõ kết quả (CLI bị ngắt): k
 UNSUPPORTED_BACKOFF_SEC = 24 * 3600
 PENDING_ALERT_SEC = 6 * 3600       # kênh chưa xong quá chừng này -> báo (có thể đang bị khoá)
 PENDING_KEEP = 50
+EMPTY_STREAK_MAX = 3               # phiên LIỀN trả escrow mà không có câu trả lời -> ngừng miner đó
+EMPTY_HOLD_SEC = 6 * 3600
 MAXDUR_MARGIN_SEC = 120            # CLI phải sống quá maxDuration của kênh chừng này: SDK chỉ gọi timeout (lấy lại
                                    # escrow của kênh Open hỏng) SAU openedAt + maxDuration — giết sớm hơn là khoá tiền. Biên = mở kênh (~10-20 s
                                    # tới finalized) + gửi timeout và chờ finalized (~20 s), dư gấp đôi.
@@ -1259,6 +1261,21 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
                     rec["completion_tokens"] = int(str(res.get("completion_tokens")))
                 except (TypeError, ValueError):
                     pass
+                # Escrow đã trả (settle hợp tác trả CẢ escrow) mà không có câu trả lời: 0 token, hoặc CLI có trường
+                # `reply` mà rỗng. Đếm liên tiếp theo miner; tới EMPTY_STREAK_MAX thì ngừng miner đó EMPTY_HOLD_SEC.
+                if rec.get("completion_tokens") == 0 or ("reply" in res and not str(res.get("reply") or "").strip()):
+                    rec["empty"] = True
+                    st["empty_streak"] = int(st.get("empty_streak") or 0) + 1
+                    out["empty_sessions"] = int(out.get("empty_sessions") or 0) + 1
+                    log(f"[direct] ⚠️ phiên với miner {m['miner'][:8]}… trả escrow {max_flop} FLOP mà KHÔNG có câu trả lời "
+                        f"({st['empty_streak']} lần liền)")
+                    if st["empty_streak"] >= EMPTY_STREAK_MAX:
+                        st.update(wait_until=now + EMPTY_HOLD_SEC, wait_why="empty answers")
+                        alert(f"⚠️ FLOP direct: miner {m['miner'][:8]}… nhận escrow {st['empty_streak']} phiên liền mà không trả "
+                              f"lời — ngừng mua của miner này {EMPTY_HOLD_SEC // 3600}h.")
+                        st["empty_streak"] = 0
+                else:
+                    st.pop("empty_streak", None)
                 g["pending"] = g["pending"] + [rec]
                 g["prompt_idx"] = int(g.get("prompt_idx") or 0) + 1
                 out["opened"] += 1
