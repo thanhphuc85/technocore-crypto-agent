@@ -5520,15 +5520,20 @@ def direct_kv_hydrate(state: dict, private_key) -> bool:
                   f"— dùng bản KV ({n} kênh chờ). Lần lưu cache trước có thể đã lỗi.")
         else:
             print(f"[direct] khôi phục trạng thái từ KV ({n} kênh chờ)")
-            sealed_at = _kv_seal_time(raw)
-            if sealed_at is not None and time.time() - sealed_at > DIRECT_KV_STALE_SEC:
-                # KV ai cũng ghi được: một bản CŨ có chữ ký hợp lệ có thể bị chép lại để tua lùi trần ngày / kênh chờ.
-                _m = (f"⚠️ FLOP direct: mất state.json, khôi phục từ bản KV niêm phong "
-                      f"{int((time.time() - sealed_at) // 3600)} giờ trước — kiểm trần ngày và kênh chờ trên explorer.")
-                print(f"[direct] {_m}")
-                _telegram_send(_m)
+            _direct_kv_stale_alert(raw)
         return True
     return False
+
+
+def _direct_kv_stale_alert(raw) -> None:
+    """Báo khi trạng thái mua trực tiếp vừa khôi phục (mất state.json) đến từ bản KV niêm phong quá DIRECT_KV_STALE_SEC:
+    KV ai cũng ghi được, một bản CŨ có chữ ký hợp lệ có thể bị chép lại để tua lùi trần ngày / kênh chờ."""
+    sealed_at = _kv_seal_time(raw)
+    if sealed_at is not None and time.time() - sealed_at > DIRECT_KV_STALE_SEC:
+        _m = (f"⚠️ FLOP direct: mất state.json, khôi phục từ bản KV niêm phong "
+              f"{int((time.time() - sealed_at) // 3600)} giờ trước — kiểm trần ngày và kênh chờ trên explorer.")
+        print(f"[direct] {_m}")
+        _telegram_send(_m)
 
 
 def direct_kv_persist(state: dict, private_key) -> bool:
@@ -5613,14 +5618,18 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
         state[DIRECT_KV_OFF_CHECK_KEY] = now
         save_state({DIRECT_KV_OFF_CHECK_KEY: now})
         try:
-            direct_kv_hydrate(state, private_key)
+            raw = kv_get(DIRECT_KV_KEY)
+            body = _kv_open(raw, private_key, DIRECT_KV_KEY)
         except Exception as e:
             print(f"[direct] đọc trạng thái KV lỗi ({type(e).__name__}) — thử lại sau")
             return "off"
-        if not _unfinished(state.get(flop_direct.KEY)):
-            state.pop(flop_direct.KEY, None)         # KV không có việc dở: giữ nguyên hành vi "tắt"
+        # Chỉ nhận (và chỉ cảnh báo bản cũ) khi bản KV còn VIỆC DỞ. Bản KV của một lần mua đã xong từ lâu là bình
+        # thường khi đang tắt: khôi phục + cảnh báo "bản cũ" ở mỗi lần kiểm 6 giờ chỉ là báo động giả lặp lại.
+        if not _unfinished(body):
             return "off"
+        flop_direct.restore(state, body)
         print("[direct] mua trực tiếp đang tắt nhưng bản KV còn kênh chờ / phiên dở — chạy đối soát")
+        _direct_kv_stale_alert(raw)
         save_state({flop_direct.KEY: state.get(flop_direct.KEY)})
     import token_manager as _tm
     try:

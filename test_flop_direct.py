@@ -2295,3 +2295,32 @@ def test_direct_off_with_intact_cache_makes_no_kv_read(monkeypatch):
     kv, gets, ran = _direct_off_env(monkeypatch)
     st = {fd.KEY: {"pending": [], "day": {"day": "d", "escrow": 0.0}}}
     assert ac.direct_session_step(st, KEY, NOW) == "off" and gets == [] and not ran
+
+
+
+def test_direct_off_does_not_repeat_a_stale_alert_for_finished_kv_state(monkeypatch):
+    kv, gets, ran = _direct_off_env(monkeypatch)
+    sent = []
+    monkeypatch.setattr(ac, "_telegram_send", lambda m: sent.append(m) or True)
+    monkeypatch.setattr(ac.time, "time", lambda: NOW)
+    kv[ac.DIRECT_KV_KEY] = ac._kv_seal(KEY, {"rev": 9, "pending": [], "done": [fd._short(CH)]}, ac.DIRECT_KV_KEY)
+    st = {}
+    for i in range(4):                                                          # bản KV đã cũ, không còn việc dở
+        t = NOW + 7 * 3600 + i * (ac.DIRECT_KV_OFF_CHECK_SEC + 1)
+        monkeypatch.setattr(ac.time, "time", lambda t=t: t)
+        assert ac.direct_session_step(st, KEY, t) == "off"
+    assert len(gets) == 4 and sent == [] and not ran and fd.KEY not in st
+
+
+def test_direct_off_alerts_once_when_a_stale_kv_copy_has_unfinished_work(monkeypatch):
+    kv, gets, ran = _direct_off_env(monkeypatch)
+    sent = []
+    monkeypatch.setattr(ac, "_telegram_send", lambda m: sent.append(m) or True)
+    monkeypatch.setattr(ac.time, "time", lambda: NOW)
+    kv[ac.DIRECT_KV_KEY] = ac._kv_seal(KEY, {"rev": 2, "pending": [{"channel": CH, "ts": NOW, "network": "testnet"}]},
+                                       ac.DIRECT_KV_KEY)
+    t = NOW + 7 * 3600
+    monkeypatch.setattr(ac.time, "time", lambda: t)
+    st = {}
+    ac.direct_session_step(st, KEY, t)
+    assert ran and sum("niêm phong" in m for m in sent) == 1
