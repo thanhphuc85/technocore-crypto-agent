@@ -78,6 +78,11 @@ IMPORT_RESERVE_SEC = 60            # thời gian chừa cho `keys import` (kể 
 MISSING_DROP_SEC = 48 * 3600       # kênh explorer 404 quá chừng này (chain reset / indexer mất) -> bỏ theo dõi, báo
 ORPHAN_WINDOW_SEC = 72 * 3600      # sau lần "không rõ kết quả" GẦN NHẤT: còn tìm kênh mồ côi chừng này; mỗi khoản giữ
                                    # escrow cũng sống chừng này kể từ lần ngắt của CHÍNH nó
+# Kênh mồ côi chỉ được nhận cho ĐÚNG phiên bị ngắt: mở trong [giờ bắt đầu phiên - lệch, giờ bắt đầu + thời hạn phiên],
+# cùng miner. Trước đây mọi kênh của ví mở sau lần ngắt đầu tiên đều là ứng viên; kênh đã ghi sổ rời danh sách `done`
+# (50 mục) thì bị nhặt lại và GHI SỔ LẦN HAI (kiểm thử: 60 phiên sau một lần ngắt -> 10 kênh, 50 FLOP ghi trùng).
+ORPHAN_MATCH_SKEW_SEC = 60         # lệch đồng hồ runner <-> giờ mở kênh trên chain
+ORPHAN_LEGACY_SPAN_SEC = 1800      # khoản giữ dạng cũ [ts, mạng, escrow] (không có khoảng giờ): kênh mở trong chừng này
 # Settle CƯỠNG BỨC (miner không đóng hợp tác; CLI in cooperative:false): kênh nằm ở SettlementPosted tới hết cửa sổ
 # tranh chấp (computeChannel.disputeWindow = 604800 block, block 1 s) rồi phải có người gọi computeChannel.finalize
 # thì miner mới được trả và kênh mới PAID — không ai gọi thì chi tiêu không được tính và escrow nằm khoá.
@@ -480,7 +485,7 @@ def pace_limit(cfg: dict, now: int, salt: str = "") -> tuple[float, bool]:
 
 
 _DURABLE_TOP = ("day", "unknown_until", "wait_until", "wait_why", "prompt_idx", "miner_idx", "gnpt", "stats",
-                "last_attempt", "orphan_since", "orphan_last", "done", "unknown_escrow")
+                "last_attempt", "orphan_since", "orphan_last", "done", "unknown_escrow", "attempt")
 _DURABLE_MINER = ("unknown_until", "wait_until", "wait_why", "cap", "sessions")
 _PENDING_CORE = ("channel", "ts", "network", "miner", "error", "alerted", "force", "fin_tries", "fin_at", "fin_tx",
                  "fin_alerted", "max_flop")
@@ -562,19 +567,47 @@ def finalize_channels(channels, *, wkey, addr: str, network: str, runner, log=pr
     return res
 
 
-def _mark_orphan(g: dict, now: int, network: str, max_flop) -> None:
-    """Phiên kết thúc KHÔNG RÕ có mở kênh hay không (CLI bị ngắt, thành công mà thiếu id, "outcome unknown"): bật tìm
-    kênh mồ côi và GIỮ escrow của phiên đó trong `unknown_escrow` = [[ts, mạng, escrow]]. Kênh có thể đã settle trên
-    chain mà chưa có trong danh sách chờ; không giữ thì cổng đứng tên của gateway đọc phần chain tăng đó thành
-    "gateway đã đứng tên ví mình" và xác nhận nhầm (rồi sổ vượt chain -> đọc thấp -> có thể mở kỳ chain mới nhầm)."""
+def _hold_ok(h) -> bool:
+    """Một khoản giữ hợp lệ: [ts, mạng, escrow] (dạng cũ) hoặc [ts, mạng, escrow, miner, mở_từ, mở_tới]."""
+    return isinstance(h, list) and len(h) >= 3
+
+
+def _hold_window(h) -> tuple:
+    """(từ, tới) — giờ mở kênh (giây) mà khoản giữ `h` có thể ứng với."""
+    if len(h) >= 6:
+        try:
+            return int(h[4]), int(h[5])
+        except (TypeError, ValueError):
+            pass
+    ts = int(h[0] or 0)
+    return ts - 300, ts + ORPHAN_LEGACY_SPAN_SEC
+
+
+def _mark_orphan(g: dict, now: int, network: str, max_flop, miner: str = None, start: int = None,
+                 span: int = None) -> None:
+    """Phiên kết thúc KHÔNG RÕ có mở kênh hay không (CLI bị ngắt, thành công mà thiếu id, "outcome unknown", thoát lỗi
+    không rõ, lượt bị giết giữa phiên): bật tìm kênh mồ côi và GIỮ escrow của phiên đó trong `unknown_escrow` =
+    [[ts, mạng, escrow, miner, mở_từ, mở_tới]]. Kênh có thể đã settle trên chain mà chưa có trong danh sách chờ; không
+    giữ thì cổng đứng tên của gateway đọc phần chain tăng đó thành "gateway đã đứng tên ví mình" và xác nhận nhầm (rồi
+    sổ vượt chain -> đọc thấp -> có thể mở kỳ chain mới nhầm). `start` = giờ bắt đầu phiên, `span` = thời hạn phiên:
+    chỉ kênh của miner đó mở trong khoảng này mới được nhận là kênh của phiên (xem ORPHAN_MATCH_SKEW_SEC)."""
     g["orphan_since"] = min(int(g.get("orphan_since") or now), now)
     g["orphan_last"] = max(int(g.get("orphan_last") or 0), int(now))     # cửa sổ tìm gia hạn theo lần ngắt mới nhất
-    held = [h for h in (g.get("unknown_escrow") or []) if isinstance(h, list) and len(h) == 3]
+    held = [h for h in (g.get("unknown_escrow") or []) if _hold_ok(h)]
     try:
         esc = _flop_str(Decimal(str(max_flop))) if max_flop is not None else _flop_str(DEFAULT_ESCROW_CAP)
     except (InvalidOperation, ValueError):
         esc = _flop_str(DEFAULT_ESCROW_CAP)
-    g["unknown_escrow"] = (held + [[int(now), network, esc]])[-20:]
+    start = int(start if start is not None else now)
+    span = int(span or ORPHAN_LEGACY_SPAN_SEC)
+    hold = [int(now), network, esc, str(miner or ""), start - ORPHAN_MATCH_SKEW_SEC, start + span]
+    g["unknown_escrow"] = (held + [hold])[-20:]
+
+
+def _never_started(cmd, rc) -> bool:
+    """`docker run` không khởi động được container (125 lỗi daemon, 126/127 lệnh không chạy được): CLI CHƯA chạy, chắc
+    chắn chưa mở kênh nào."""
+    return bool(cmd) and os.path.basename(str(cmd[0])).startswith("docker") and rc in (125, 126, 127)
 
 
 def _short(cid: str) -> str:
@@ -595,7 +628,7 @@ def _mkey(miner: str) -> str:
 def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, prompt: str = None,
              prompts=None, book_fn=None, deny=(), deadline=None, runner=None, alert=None, log=print,
              clock=time.time, offers_fn=None, price_fn=None, miner_cap_fn=None, balance_fn=None,
-             indexer_url=None, own_channels_fn=None) -> dict:
+             indexer_url=None, own_channels_fn=None, checkpoint=None) -> dict:
     """Một nhịp mua trực tiếp: tối đa FLOP_DIRECT_MAX_PER_RUN phiên, xoay vòng các miner. Trả {"outcome", ...};
     KHÔNG ném lỗi. `book_fn(amount, channel_id, model, escrow=)` ghi sổ (None = chạy tập devnet, không ghi).
     `fetch_channel(channel_id)` -> dict explorer | None. `offers_fn(miner, model_hash)` -> các dòng
@@ -609,12 +642,18 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
     ví (explorer ?agent=): sau một lần "không rõ kết quả" để tìm kênh mồ côi (CLI bị ngắt nên không biết id).
     `alert(text)` gửi cảnh báo (Telegram). Trạng thái bền trong state[KEY].
 
+    `checkpoint()` (caller lưu state[KEY] xuống đĩa/KV) được gọi NGAY TRƯỚC mỗi lần chạy CLI mở phiên, với mốc
+    `attempt` = phiên đang chạy, trần ngày đã giữ và các kênh đã mở trước đó trong lượt; và sau mỗi phiên. Lượt bị giết
+    giữa phiên (timeout job, runner mất) thì lượt sau thấy `attempt` còn đó và xử lý như "không rõ kết quả" (giữ escrow,
+    tìm kênh mồ côi, chặn miner 6 giờ) thay vì quên hẳn kênh và trần ngày.
+
     Chốt chặn theo TỪNG MINER (một miner hỏng không làm dừng miner khác): nghỉ sau lỗi / không có offer, giữ
     6 giờ khi không rõ kết quả, và không mở kênh mới với miner còn kênh LỖI chưa xong (có thể đang khoá FLOP).
     Chốt chung: trần ngày, ngân sách thời gian của lượt, số kênh chờ explorer ghi nhận (FLOP_DIRECT_MAX_PENDING),
     tuỳ chọn CLI không được hỗ trợ (dừng 24 giờ), keystore không ra đúng địa chỉ ví."""
     runner = runner or _run
     alert = alert or (lambda text: None)
+    t0 = clock()                                  # giờ bắt đầu một phiên = now + (clock() - t0)
     plist = [p for p in (prompts if prompts is not None else [prompt]) if p]
     g = dict(state.get(KEY) or {})
     out = {"outcome": "?", "opened": 0, "booked": 0, "booked_flop": 0.0, "settled": 0, "sessions": []}
@@ -628,7 +667,7 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
     # Đối soát kênh còn chờ chạy CẢ khi đã tắt / cấu hình lỗi / mọi miner bị chặn: tắt mua trực tiếp lúc còn kênh
     # chưa settle mà bỏ luôn đối soát thì kênh PAID không bao giờ vào sổ.
     has_pending = any(isinstance(p, dict) and p.get("channel") for p in (g.get("pending") or [])) \
-        or bool(g.get("orphan_since"))
+        or bool(g.get("orphan_since")) or bool(g.get("attempt"))
     if not enabled() and not has_pending:
         return done("off")
     wkey = fg.wallet_key(agent_key)
@@ -637,6 +676,23 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
     addr = fg.wallet_address(wkey)
     ms = {k: dict(v) for k, v in (g.get("miners") or {}).items() if isinstance(v, dict)}
     to_finalize = []
+    # Lượt TRƯỚC bị giết giữa một phiên (mốc `attempt` lưu trước khi gọi CLI vẫn còn): không biết kênh đã mở chưa.
+    att = g.pop("attempt", None)
+    if isinstance(att, dict) and att.get("ts"):
+        try:
+            a_ts = int(att["ts"])
+        except (TypeError, ValueError):
+            a_ts = now
+        a_miner = str(att.get("miner") or "")
+        if a_miner:
+            mk = _mkey(a_miner)
+            ms.setdefault(mk, {})["unknown_until"] = max(int(ms[mk].get("unknown_until") or 0),
+                                                         a_ts + UNKNOWN_HOLD_SEC)
+        _mark_orphan(g, a_ts, str(att.get("network") or network), att.get("escrow"), miner=a_miner, start=a_ts,
+                     span=att.get("span"))
+        alert(f"⚠️ FLOP direct: lượt trước bị NGẮT giữa phiên với miner {a_miner[:8]}… (escrow {att.get('escrow')} "
+              f"FLOP) — không biết kênh đã mở chưa. Ngừng miner này {UNKNOWN_HOLD_SEC // 3600}h, tìm kênh của ví "
+              f"{addr[:8]}… trên explorer trong {ORPHAN_WINDOW_SEC // 3600}h.")
     # 0) Kênh MỒ CÔI: lượt trước CLI bị ngắt / kết quả mơ hồ nên không biết id kênh -> tìm kênh của ví mình mở từ
     # lúc đó mà chưa theo dõi, thêm vào danh sách chờ (đánh dấu lỗi: chặn miner đó tới khi kênh xong, rồi ghi sổ
     # nếu PAID). Tìm trong ORPHAN_WINDOW_SEC; thêm lại không trùng nhờ danh sách chờ + `done`.
@@ -645,7 +701,7 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
     # Mỗi khoản giữ hết hạn theo tuổi CỦA NÓ; cửa sổ tìm tính từ lần ngắt GẦN NHẤT. Trước đây cửa sổ neo ở lần ngắt
     # ĐẦU: lần ngắt sau đó vài giờ bị xoá cả khoản giữ lẫn việc tìm khi cửa sổ cũ hết -> kênh mồ côi mất hẳn và chi
     # on-chain của nó bị cổng gateway đọc thành "gateway đứng tên ví mình" (kiểm thử ngẫu nhiên: 84.5 FLOP).
-    held_all = [h for h in (g.get("unknown_escrow") or []) if isinstance(h, list) and len(h) == 3]
+    held_all = [h for h in (g.get("unknown_escrow") or []) if _hold_ok(h)]
     held_live = [h for h in held_all if now - int(h[0] or 0) <= ORPHAN_WINDOW_SEC]
     if len(held_live) != len(held_all):
         alert(f"⚠️ FLOP direct: {len(held_all) - len(held_live)} phiên bị ngắt không tìm thấy kênh trên explorer sau "
@@ -657,39 +713,47 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
         g.pop("orphan_since", None)
         g.pop("orphan_last", None)
         g.pop("unknown_escrow", None)
-    elif since and own_channels_fn is not None:
+    elif held_live and own_channels_fn is not None:
         try:
             rows = own_channels_fn(addr) or []
         except Exception as e:
             rows = []
             log(f"[direct] tìm kênh mồ côi lỗi ({type(e).__name__}) — thử lại lượt sau")
         known = {_short(p["channel"]) for p in pending} | set(g.get("done") or [])
+        cands = []
         for r in rows:
             try:
                 cid = str(r.get("channelId") or "")
                 opened = int(r.get("openedAt") or 0) // 1000
             except (AttributeError, TypeError, ValueError):
                 continue
-            if not _CHANNEL_RE.match(cid) or _short(cid) in known or opened < since - 300:
+            if not _CHANNEL_RE.match(cid) or _short(cid) in known or opened <= 0:
                 continue
             if r.get("agent") and not fg.same_account(r.get("agent"), addr):
                 continue
+            cands.append((opened, cid, r))
+        # Mỗi kênh chỉ thay cho MỘT khoản giữ mà nó khớp: cùng mạng, mở trong khoảng giờ của phiên bị ngắt, cùng miner
+        # (khoản giữ dạng cũ không có miner thì bỏ qua điều kiện này). Kênh không khớp khoản giữ nào KHÔNG được nhận.
+        holds = sorted(held_live, key=lambda h: int(h[0] or 0))
+        for opened, cid, r in sorted(cands, key=lambda x: x[0]):
+            rm = str(r.get("miner") or "")
+            j = next((j for j, h in enumerate(holds)
+                      if h[1] == network and _hold_window(h)[0] <= opened <= _hold_window(h)[1]
+                      and not (len(h) >= 4 and h[3] and rm and not fg.same_account(h[3], rm))), None)
+            if j is None:
+                continue
+            holds.pop(j)
             rec = {"channel": cid.lower(), "ts": opened or now, "network": network,
-                   "miner": str(r.get("miner") or ""), "error": "mồ côi (CLI bị ngắt, tìm lại qua explorer)"}
+                   "miner": rm, "error": "mồ côi (CLI bị ngắt, tìm lại qua explorer)"}
             esc = _flop(r.get("escrow"))
             if esc:
                 rec["max_flop"] = _flop_str(esc)       # escrow THẬT (cổng gateway trừ đúng số, không lấy trần)
             pending.append(rec)
             known.add(_short(cid))
-            # Kênh đã tìm thấy thay cho một khoản giữ "không rõ kết quả" (cũ nhất, cùng mạng).
-            held = [h for h in (g.get("unknown_escrow") or []) if isinstance(h, list) and len(h) == 3]
-            for j, h in enumerate(held):
-                if h[1] == network:
-                    del held[j]
-                    break
-            g["unknown_escrow"] = held
             alert(f"⚠️ FLOP direct: tìm thấy kênh {cid[:18]}… của ví mình mà CLI không báo id (lượt bị ngắt) — đã đưa vào "
                   "theo dõi; PAID thì ghi sổ, còn mở thì chặn miner đó tới khi xong.")
+        if len(holds) != len(held_live):
+            g["unknown_escrow"] = holds                # kênh đã tìm thấy thay cho khoản giữ của nó
 
     # 1) Đối soát kênh đã mở ở các lượt trước.
     keep = []
@@ -892,8 +956,24 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
     last = ("idle", "")                                               # (kết quả, lý do) của lần thử cuối
     start = int(g.get("miner_idx") or 0)
     tried = 0
+    dirty = False                                                     # có kết quả phiên chưa lưu xuống đĩa
+
+    def save():
+        """Đẩy trạng thái hiện tại cho caller lưu (checkpoint). Lỗi lưu không được làm hỏng lượt."""
+        g["miners"] = ms
+        state[KEY] = g
+        if checkpoint is None:
+            return
+        try:
+            checkpoint()
+        except Exception as e:
+            log(f"[direct] ⚠️ không lưu được mốc phiên ({type(e).__name__}: {str(e)[:80]})")
+
     try:
         while out["opened"] < cfg["per_run"] and tried < len(miners) * cfg["per_run"]:
+            if dirty:
+                save()                                                # kết quả phiên trước (kênh mới) xuống đĩa
+                dirty = False
             if deadline is not None and clock() + cfg["timeout"] + 30 > deadline:
                 last = ("run_budget", "không đủ thời gian của lượt cho thêm một phiên (CLI có thể chờ hạn on-chain)")
                 break
@@ -1052,10 +1132,18 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
             g["last_attempt"] = now
             if bal["avail"] is not None:
                 bal["avail"] -= Decimal(max_flop)
+            # Mốc "phiên đang chạy" + trần ngày đã giữ XUỐNG ĐĨA trước khi CLI có thể khoá escrow on-chain.
+            sess_start = now + max(0, int(clock() - t0))
+            orphan_kw = {"miner": m["miner"], "start": sess_start, "span": int(sess_timeout) + MAXDUR_MARGIN_SEC}
+            g["attempt"] = {"ts": sess_start, "network": network, "miner": m["miner"], "escrow": max_flop,
+                            "span": orphan_kw["span"]}
+            save()
             rc, so, se = runner(cmd, env_run, sess_timeout)
+            g.pop("attempt", None)
+            dirty = True
             if rc is None:
                 st["unknown_until"] = now + UNKNOWN_HOLD_SEC
-                _mark_orphan(g, now, network, max_flop)
+                _mark_orphan(g, now, network, max_flop, **orphan_kw)
                 alert(f"⚠️ FLOP direct: phiên với miner {m['miner'][:8]}… quá {sess_timeout}s và bị ngắt — có thể đã mở "
                       f"kênh mà không biết id. Ngừng miner này {UNKNOWN_HOLD_SEC // 3600}h; kiểm ví {addr[:8]}… trên "
                       "explorer/RPC.")
@@ -1066,7 +1154,7 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
                 ch = str(res.get("channel") or "")
                 if not _CHANNEL_RE.match(ch):
                     st["unknown_until"] = now + UNKNOWN_HOLD_SEC
-                    _mark_orphan(g, now, network, max_flop)
+                    _mark_orphan(g, now, network, max_flop, **orphan_kw)
                     alert(f"⚠️ FLOP direct: CLI báo thành công nhưng không trả id kênh hợp lệ (miner {m['miner'][:8]}…) — "
                           "ngừng miner này, kiểm tay.")
                     last = ("unknown_outcome", "thành công nhưng thiếu id kênh")
@@ -1093,26 +1181,39 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
             err = last_json(se) or {}
             msg = str(err.get("message") or se.strip()[-200:] or f"exit {rc}")[:240]
             ch = str(err.get("channel") or "")
-            if _CHANNEL_RE.match(ch):
+            has_ch = bool(_CHANNEL_RE.match(ch))
+            low = msg.lower()
+            unsupported = "unknown option" in low or "unknown command" in low      # lỗi cú pháp: CLI chưa làm gì
+            ambiguous = "outcome unknown" in low or "recovery failed" in low
+            # Từ chối RÕ RÀNG trước khi có kênh: JSON ok:false không mơ hồ, lỗi cú pháp, hoặc Docker không khởi động được
+            # container. Còn lại (thoát lỗi KHÔNG kèm JSON: container bị giết 137, Node crash...) = KHÔNG RÕ: CLI có thể đã
+            # mở kênh trước khi chết. Trước đây nhánh này chỉ nghỉ 1 giờ, kênh (nếu có) không bao giờ được tìm lại.
+            refused = not ambiguous and (unsupported or err.get("ok") is False or _never_started(cmd, rc))
+            if has_ch:
                 g["pending"] = g["pending"] + [{"channel": ch, "ts": now, "network": network, "miner": m["miner"],
                                                 "model": m["model"], "error": msg[:120], "max_flop": max_flop}]
-            elif err.get("ok") is False and not ("outcome unknown" in msg.lower() or "recovery failed" in msg.lower()):
+            elif refused:
                 # CLI từ chối RÕ RÀNG trước khi có kênh (vd. ví thiếu FLOP) -> không khoá đồng nào: trả lại phần đã giữ
                 # trong trần ngày, kẻo vài lần lỗi "ăn" hết trần dù chưa chi gì. Mơ hồ (quá giờ/không JSON) thì giữ.
                 ds = {"day": day, "escrow": round(max(0.0, float(ds["escrow"]) - per_session), 9)}
                 g["day"] = ds
                 if bal["avail"] is not None:
                     bal["avail"] += Decimal(max_flop)
-            if "unknown option" in msg.lower() or "unknown command" in msg.lower():
+            if unsupported:
                 g.update(wait_until=now + UNSUPPORTED_BACKOFF_SEC, wait_why="CLI unsupported option")
                 alert(f"⛔ FLOP direct: CLI không nhận tuỳ chọn ({msg[:120]}) — dừng 24h, kiểm phiên bản image/CLI.")
                 last = ("unsupported", msg)
                 break
-            if "outcome unknown" in msg.lower() or "recovery failed" in msg.lower():
+            if ambiguous or not (has_ch or refused):
                 st["unknown_until"] = now + UNKNOWN_HOLD_SEC
-                if not _CHANNEL_RE.match(ch):
-                    _mark_orphan(g, now, network, max_flop)
-                alert(f"⚠️ FLOP direct (miner {m['miner'][:8]}…): {msg[:160]}" + (f" — kênh {ch[:18]}…" if ch else ""))
+                if not has_ch:
+                    _mark_orphan(g, now, network, max_flop, **orphan_kw)
+                if ambiguous:
+                    alert(f"⚠️ FLOP direct (miner {m['miner'][:8]}…): {msg[:160]}" + (f" — kênh {ch[:18]}…" if ch else ""))
+                else:
+                    alert(f"⚠️ FLOP direct: CLI thoát mã {rc} không kèm kết quả rõ ràng (miner {m['miner'][:8]}…: "
+                          f"{msg[:120]}) — có thể đã mở kênh. Ngừng miner này {UNKNOWN_HOLD_SEC // 3600}h, tìm kênh của "
+                          f"ví {addr[:8]}… trên explorer.")
                 last = ("unknown_outcome", msg)
                 continue
             st.update(wait_until=now + ERROR_BACKOFF_SEC, wait_why=str(err.get("code") or "session failed")[:60])
@@ -1122,6 +1223,7 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
             shutil.rmtree(work, ignore_errors=True)
         g["miners"] = ms
         g["miner_idx"] = (start + tried) % max(1, len(miners))
+        state[KEY] = g                     # ngoại lệ giữa phiên: mốc `attempt` vẫn tới tay caller để lưu
     if out["opened"]:
         return done("opened", channel=out["sessions"][-1]["channel"],
                     reason=(None if last[0] == "opened" else f"dừng: {last[1]}"))

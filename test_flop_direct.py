@@ -1755,3 +1755,167 @@ def test_an_unfound_hold_expires_with_an_alert():
     step(st, CLI(), now=NOW + fd.ORPHAN_WINDOW_SEC + 1, own_channels_fn=lambda a: [], alerts=alerts)
     assert not st[fd.KEY].get("unknown_escrow") and "orphan_since" not in st[fd.KEY]
     assert any("không tìm thấy kênh" in a for a in alerts)
+
+
+# --- H1: lượt bị giết GIỮA phiên không được quên kênh / trần ngày ------------------------------------------------------
+
+class SeqCLI(CLI):
+    """CLI giả trả lần lượt từng kết quả phiên; một phần tử là ngoại lệ thì NÉM nó (runner chết giữa phiên)."""
+
+    def __init__(self, results):
+        super().__init__()
+        self.results = list(results)
+
+    def __call__(self, cmd, env, timeout):
+        if "keys" in cmd and "import" in cmd:
+            return super().__call__(cmd, env, timeout)
+        self.calls.append({"cmd": list(cmd), "env": dict(env), "timeout": timeout})
+        r = self.results.pop(0)
+        if isinstance(r, BaseException):
+            raise r
+        return r
+
+
+def test_checkpoint_runs_before_every_cli_session_with_the_attempt_mark(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_RUN", "2")
+    st, snaps = {}, []
+    ok1 = (0, json.dumps({"ok": True, "channel": CH}), "")
+    ok2 = (0, json.dumps({"ok": True, "channel": CH2}), "")
+    step(st, SeqCLI([ok1, ok2]), checkpoint=lambda: snaps.append(json.loads(json.dumps(st[fd.KEY]))))
+    before = [s for s in snaps if s.get("attempt")]
+    assert len(before) == 2                                                     # một mốc trước MỖI phiên
+    assert before[0]["attempt"]["miner"] == MINER and before[0]["day"]["escrow"] == pytest.approx(0.05)
+    assert [p["channel"] for p in before[1]["pending"]] == [CH]                 # kênh phiên 1 đã xuống đĩa trước phiên 2
+    assert "attempt" not in st[fd.KEY]                                          # phiên xong: không còn mốc
+
+
+def test_a_run_killed_mid_session_is_recovered_as_an_unknown_outcome(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_RUN", "2")
+    st, snaps = {}, []
+    ok1 = (0, json.dumps({"ok": True, "channel": CH}), "")
+    with pytest.raises(RuntimeError):
+        step(st, SeqCLI([ok1, RuntimeError("runner chết giữa phiên 2")]),
+             checkpoint=lambda: snaps.append(json.loads(json.dumps(st[fd.KEY]))))
+    disk = snaps[-1]                                                            # thứ duy nhất còn lại trên đĩa
+    assert [p["channel"] for p in disk["pending"]] == [CH]                      # phiên 1 không bị quên
+    assert disk["day"]["escrow"] == pytest.approx(0.1)                          # trần ngày giữ cả phiên 2
+    assert fd.durable_view(disk)["attempt"]["escrow"] == "0.05"                 # đi cả lên KV
+    a_ts = disk["attempt"]["ts"]
+    rows = [{"channelId": CH2, "agent": ADDR, "miner": MINER, "openedAt": (a_ts + 8) * 1000,
+             "escrow": str(5 * 10 ** 16)}]
+    st2, alerts, cli = {fd.KEY: disk}, [], CLI()
+    step(st2, cli, now=NOW + 300, own_channels_fn=lambda a: rows, alerts=alerts)
+    g = st2[fd.KEY]
+    assert "attempt" not in g and any("NGẮT giữa phiên" in a for a in alerts)
+    assert {p["channel"] for p in g["pending"]} == {CH, CH2}                    # kênh của phiên bị ngắt được tìm ra
+    assert g["unknown_escrow"] == [] and mst(st2)["unknown_until"] == a_ts + fd.UNKNOWN_HOLD_SEC
+    assert cli.sessions() == []                                                 # miner đó bị giữ, không mua tiếp
+
+
+def test_agent_saves_direct_state_when_the_step_raises(monkeypatch):
+    sent = {}
+    monkeypatch.setattr(ac, "kv_set", lambda pk, did, k, v: sent.update({k: v}) or True)
+    monkeypatch.setattr(ac, "kv_get", lambda *a, **k: None)
+
+    def dying(state, **kw):
+        state[fd.KEY] = {"attempt": {"ts": NOW, "miner": MINER, "escrow": "1", "network": "testnet"}}
+        kw["checkpoint"]()
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(fd, "run_step", dying)
+    assert ac.direct_session_step({}, KEY, NOW) == "error"
+    assert ac.load_state()[fd.KEY]["attempt"]["miner"] == MINER
+    assert ac._kv_open(sent[ac.DIRECT_KV_KEY], KEY)["attempt"]["escrow"] == "1"  # checkpoint đẩy cả KV
+
+
+# --- H4: CLI thoát lỗi KHÔNG kèm JSON = không rõ kết quả ----------------------------------------------------------------
+
+@pytest.mark.parametrize("session", [(137, "", "Killed"), (1, "", "Segmentation fault"), (1, "", "")])
+def test_non_json_failure_starts_orphan_discovery(session):
+    st, alerts = {}, []
+    r = step(st, CLI(session=session), alerts=alerts)
+    g = st[fd.KEY]
+    assert r["outcome"] == "unknown_outcome" and g["orphan_since"] == NOW
+    assert len(g["unknown_escrow"]) == 1 and g["unknown_escrow"][0][3] == MINER
+    assert mst(st)["unknown_until"] == NOW + fd.UNKNOWN_HOLD_SEC and alerts
+    assert g["day"]["escrow"] == pytest.approx(0.05)                            # không trả lại phần giữ
+
+
+def test_docker_that_never_started_the_container_is_a_clean_refusal():
+    st = {}
+    r = step(st, CLI(session=(125, "", "docker: Error response from daemon: Conflict.")))
+    g = st[fd.KEY]
+    assert r["outcome"] == "error" and "orphan_since" not in g and not g.get("unknown_escrow")
+    assert g["day"]["escrow"] == 0.0
+
+
+def test_unknown_option_without_json_is_still_unsupported():
+    st = {}
+    r = step(st, CLI(session=(1, "", "error: unknown option '--via'")))
+    assert r["outcome"] == "unsupported" and "orphan_since" not in st[fd.KEY]
+    assert st[fd.KEY]["day"]["escrow"] == 0.0
+
+
+# --- H2: không nhặt lại kênh đã ghi sổ, không ghi sổ hai lần -----------------------------------------------------------
+
+def _ch(i):
+    import hashlib
+    return "0x" + hashlib.sha256(f"ch-{i}".encode()).hexdigest()
+
+
+def test_orphan_search_only_adopts_the_cut_sessions_channel():
+    st = {}
+    step(st, CLI(session=(None, "", "")))                                       # ngắt lúc NOW, miner MINER
+    later = [{"channelId": _ch(i), "agent": ADDR, "miner": MINER, "openedAt": (NOW + 7 * 3600 + i * 300) * 1000}
+             for i in range(60)]                                                 # phiên SAU đó (đã ghi sổ, rời `done`)
+    other = [{"channelId": _ch(100), "agent": ADDR, "miner": OTHER, "openedAt": (NOW + 10) * 1000}]
+    alerts = []
+    step(st, CLI(), now=NOW + 12 * 3600, own_channels_fn=lambda a: later + other, alerts=alerts)
+    def orphans():
+        return [p["channel"] for p in st[fd.KEY].get("pending") or [] if "mồ côi" in str(p.get("error"))]
+
+    assert orphans() == [] and len(st[fd.KEY]["unknown_escrow"]) == 1
+    assert not any("tìm thấy kênh" in a for a in alerts)
+    mine = [{"channelId": _ch(200), "agent": ADDR, "miner": MINER, "openedAt": (NOW + 15) * 1000}]
+    step(st, CLI(), now=NOW + 12 * 3600 + 300, own_channels_fn=lambda a: later + other + mine)
+    assert orphans() == [_ch(200)] and st[fd.KEY]["unknown_escrow"] == []
+
+
+def test_legacy_three_field_hold_still_matches_near_its_run():
+    st = {fd.KEY: {"orphan_since": NOW, "orphan_last": NOW, "unknown_escrow": [[NOW, "testnet", "0.05"]]}}
+    rows = [{"channelId": CH, "agent": ADDR, "miner": MINER, "openedAt": (NOW + 600) * 1000},
+            {"channelId": CH2, "agent": ADDR, "miner": MINER, "openedAt": (NOW + 6 * 3600) * 1000}]
+    step(st, CLI(session=(0, json.dumps({"ok": True, "channel": "0x" + "99" * 32}), "")), now=NOW + 300,
+         own_channels_fn=lambda a: rows)
+    chans = [p["channel"] for p in st[fd.KEY]["pending"]]
+    assert CH in chans and CH2 not in chans
+
+
+def test_direct_dedupe_survives_heavy_gateway_traffic():
+    assert tm.record_direct_spend("1", "m", CH)["outcome"] == "direct_settled"
+    for j in range(tm.GATEWAY_REFS_KEEP + 50):                                  # biên nhận gateway xen giữa
+        tm.record_gateway_spend("0.5", "inference-session gateway m", f"req-{j}", log=lambda m: None)
+    assert tm.record_direct_spend("1", "m", CH)["outcome"] == "duplicate"
+    assert tm.record_direct_spend("1", "m", "0x" + CH[2:].upper())["outcome"] == "duplicate"   # hoa/thường
+
+
+def test_direct_dedupe_still_reads_hashes_written_by_older_ledgers():
+    import hashlib
+    old = hashlib.sha256(f"direct:{CH}".encode()).hexdigest()[:16]
+    tm.save_ledger({"balances": {"FLOP": "5"}, "entries": [], "gateway_refs": [old]})
+    assert tm.record_direct_spend("1", "m", CH)["outcome"] == "duplicate"
+
+
+def test_direct_refs_fit_the_signed_kv_ledger(monkeypatch):
+    for i in range(tm.DIRECT_REFS_KEEP + 20):
+        tm.record_direct_spend("1", "inference-session direct some/model-name-14B", _ch(i), escrow="1.01",
+                               log=lambda m: None)
+    for j in range(tm.GATEWAY_REFS_KEEP + 20):
+        tm.record_gateway_spend("0.5", "inference-session gateway some/model", f"req-{j}", log=lambda m: None)
+    sent = {}
+    monkeypatch.setattr(ac, "kv_set", lambda pk, did, k, v: sent.update({k: v}) or True)
+    ac.persist_ledger_to_kv(KEY, "did")
+    raw = sent["token_ledger_testnet"]
+    body = ac._kv_open(raw, KEY)
+    assert len(raw) <= ac.KV_VALUE_MAX
+    assert len(body["direct_refs"]) == tm.DIRECT_REFS_KEEP and len(body["gateway_refs"]) == tm.GATEWAY_REFS_KEEP

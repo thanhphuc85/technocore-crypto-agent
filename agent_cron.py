@@ -2074,6 +2074,8 @@ def persist_ledger_to_kv(private_key, did) -> None:
                 "stake": led.get("stake", {}),
                 # Dấu băm biên nhận gateway đã ghi -> cache mất vẫn không ghi trùng.
                 "gateway_refs": (led.get("gateway_refs") or [])[-100:],
+                # ... và dấu kênh MUA TRỰC TIẾP đã ghi (danh sách riêng, xem token_manager.DIRECT_REFS_KEEP).
+                "direct_refs": (led.get("direct_refs") or [])[-100:],
                 # Chi qua gateway chờ / đã được chain xác nhận đứng tên ví mình (mở khoá 3:1).
                 "gateway_unattributed": led.get("gateway_unattributed", {}),
                 "gateway_attributed": led.get("gateway_attributed", {}),
@@ -4786,7 +4788,7 @@ def direct_unbooked(state: dict) -> float:
     # Phiên không rõ kết quả (CLI bị ngắt...) chưa tìm ra kênh: kênh có thể đã settle trên chain mà chưa có ở trên.
     for h in (state.get(flop_direct.KEY) or {}).get("unknown_escrow") or []:
         try:
-            if isinstance(h, list) and len(h) == 3 and (not h[1] or h[1] == net):
+            if isinstance(h, list) and len(h) >= 3 and (not h[1] or h[1] == net):
                 total += max(0.0, float(h[2]))
         except (TypeError, ValueError):
             total += float(flop_direct.DEFAULT_ESCROW_CAP)
@@ -5501,13 +5503,19 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
             except ValueError:
                 return None
 
+        def checkpoint():
+            # Trước MỖI phiên (mốc phiên đang chạy + trần ngày) và sau mỗi phiên (kênh mới): xuống state.json VÀ KV.
+            # Job bị giết giữa phiên thì cache có thể không kịp lưu — bản KV vẫn còn mốc để lượt sau đối soát.
+            save_state({flop_direct.KEY: state.get(flop_direct.KEY)})
+            direct_kv_persist(state, private_key)
+
         r = flop_direct.run_step(
             state, agent_key=private_key, now=now, prompts=prompts, network=network,
             fetch_channel=fetch_channel, book_fn=book if testnet else None, offers_fn=offers,
             price_fn=price, miner_cap_fn=miner_cap, balance_fn=balance,
             indexer_url=explorer, own_channels_fn=own_channels,
             deny=[d for d in PROACTIVE_DENY_DIDS if not d.startswith("did:")],
-            deadline=direct_deadline(), alert=_telegram_send)
+            deadline=direct_deadline(), alert=_telegram_send, checkpoint=checkpoint)
         save_state({flop_direct.KEY: state.get(flop_direct.KEY)})
         direct_kv_persist(state, private_key)
         global _DIRECT_LAST
@@ -5519,6 +5527,9 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
         return status
     except Exception as e:
         print(f"[direct] bỏ qua ({type(e).__name__}: {str(e)[:100]})")
+        if isinstance(state.get(flop_direct.KEY), dict):
+            # Lỗi giữa phiên: giữ những gì đã có (mốc phiên đang chạy, trần ngày, kênh vừa mở) cho lượt sau.
+            save_state({flop_direct.KEY: state.get(flop_direct.KEY)})
         return "error"
 
 

@@ -535,6 +535,20 @@ def spend(amount, memo, token: str = None, *, path: str = None,
 
 
 GATEWAY_REFS_KEEP = 100      # gateway trả tối đa ~20 biên nhận/lần -> 100 là dư
+# Kênh MUA TRỰC TIẾP đã ghi sổ: danh sách RIÊNG. Trước đây chung `gateway_refs` (100 mục) nên chạy cả hai đường thì
+# biên nhận gateway (tới 4 lần gọi/lượt) đẩy dấu của kênh trực tiếp ra sau vài giờ, và kênh bị nhặt lại (đối soát /
+# tìm kênh mồ côi) được ghi sổ LẦN HAI. Mục cũ trong `gateway_refs` vẫn được kiểm (sổ có từ trước bản này).
+DIRECT_REFS_KEEP = 100
+
+
+def _direct_ref_hashes(channel_id) -> tuple:
+    """(dấu để lưu, mọi dấu cần kiểm). Id kênh là hex: so không phân biệt hoa/thường (đường tìm kênh mồ côi hạ chữ,
+    CLI có thể không), vẫn kiểm cả dấu của chuỗi gốc cho sổ cũ."""
+    raw = str(channel_id).strip()
+
+    def h(c):
+        return hashlib.sha256(f"direct:{c}".encode("utf-8")).hexdigest()[:16]
+    return h(raw.lower()), {h(raw), h(raw.lower())}
 
 
 def record_gateway_spend(amount, memo, ref: str, token: str = None, *, path: str = None,
@@ -605,11 +619,12 @@ def record_direct_spend(amount, memo, channel_id: str, token: str = None, *, esc
     if amt is None or amt <= 0 or not channel_id:
         return {"outcome": "skipped_insufficient", "reason": f"thiếu số lượng/kênh ({amount!r}, {channel_id!r})"}
     state = load_ledger(path)
-    h = hashlib.sha256(f"direct:{channel_id}".encode("utf-8")).hexdigest()[:16]
-    refs = [x for x in (state.get("gateway_refs") or []) if isinstance(x, str)]
-    if h in refs:
+    h, check = _direct_ref_hashes(channel_id)
+    drefs = [x for x in (state.get("direct_refs") or []) if isinstance(x, str)]
+    legacy = {x for x in (state.get("gateway_refs") or []) if isinstance(x, str)}
+    if check & (set(drefs) | legacy):
         return {"outcome": "duplicate", "reason": f"kênh {str(channel_id)[:18]} đã ghi sổ"}
-    state["gateway_refs"] = (refs + [h])[-GATEWAY_REFS_KEEP:]
+    state["direct_refs"] = (drefs + [h])[-DIRECT_REFS_KEEP:]
     esc = _parse_amount(escrow) if escrow is not None else None
     outflow = max(amt, esc) if esc is not None and esc > 0 else amt
     cur = _parse_amount(state["balances"].get(token, "0")) or Decimal(0)
