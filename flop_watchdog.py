@@ -61,7 +61,7 @@ def pending_block(state: dict, now: int, cap: int, window_sec: int = DEFAULT_BLO
     return (cap > 0 and n >= cap), n
 
 
-_GATEWAY_NEUTRAL = r"gateway/(pace_wait|daily_cap|attribution_hold|overloaded|budget_spent)$"
+_GATEWAY_NEUTRAL = r"gateway/(pace_wait|daily_cap|attribution_hold|overloaded|budget_spent|price_mismatch|empty_answer)$"
 _GATEWAY_HINT = "→ Xem log run, sửa adapter theo checklist ngày 1 trong STRATEGY.md."
 _GATEWAY_RECOVERED = ("✅ TESTNET: agent đã có phiên settle lại sau khoảng {mins} phút gián đoạn (chưa phải bằng "
                       "chứng chain đã ghi cho ví mình).")

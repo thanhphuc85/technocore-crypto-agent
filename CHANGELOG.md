@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Signed KV records are bound to their namespace and key, plus the time they were sealed. Before, a record
+  only signed its body, so any valid record of this agent could be copied to another key (the KV is
+  world-writable) and still pass. Body-only records are read until 2026-11-21 so the first run after the
+  upgrade can hydrate. When direct state has to be restored from a KV copy sealed more than 6 hours ago,
+  a Telegram alert is sent.
+- The gateway's `max_cost_flop` no longer exceeds the share of the due amount for the call. The 10%
+  headroom used to be applied after the cap, so it could overrun the run, daily, combined and attribution
+  caps by up to 10%.
+- The gateway stops buying when its charge differs from usage tokens × the catalog price by more than
+  `FLOP_GATEWAY_PRICE_RATIO_MAX` (10×, or 100× when the charge is inferred from the quota drop). Before,
+  the ratio was only logged, so a misread price unit (such as per 1K tokens) would have mis-sized every call.
+  The stop persists until the operator acts, with one Telegram alert per day.
+- A paid call with no answer is now detected. After three in a row the gateway pauses for an hour, and
+  direct purchase pauses that miner for 6 hours (0 completion tokens, or an empty `reply`). Both send an
+  alert.
+- The attribution gate needs per-channel evidence. A probe purchase reopens the gate (and writes off old
+  pending gateway spend) only when the explorer shows a gateway channel settled in the agent's own name
+  since the probe. Gateway spend is not confirmed from chain totals while the latest gateway channel seen
+  belonged to someone else. Before, any untracked spend that raised the wallet's on-chain total could
+  reopen the gate.
 - A stale `state.json` no longer overrides a newer KV copy. When saving the Actions cache failed in run N,
   run N+1 restored the cache of run N-1. Because that copy was not empty it won, and the channels, daily
   reservation and in-flight session mark of run N were lost. The direct-purchase state now carries a
