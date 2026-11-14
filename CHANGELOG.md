@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Direct purchase saves its progress before every CLI session. A run killed mid-session (job timeout,
+  lost runner) used to lose the channels it had already opened, the escrow it had reserved against the
+  daily cap and any hint that a channel might be open. Now a `checkpoint` writes the in-flight session
+  mark, the daily reservation and the channels opened so far to `state.json` and the signed KV copy, and
+  writes again after each session. The next run treats a leftover mark as an unknown outcome: it holds
+  that escrow, blocks the miner for 6 hours and searches the explorer for the channel.
+- A CLI exit with an error code but no JSON (container killed with 137, a Node crash, empty stderr) is now
+  an unknown outcome. Before, it only backed off for an hour, so a channel opened before the crash was
+  never tracked or booked. A clear refusal (JSON `ok:false`, an unknown option, or Docker failing to
+  start the container with 125/126/127) still releases the daily reservation.
+- The orphan-channel search no longer re-adopts channels that were already booked. Each unknown-outcome
+  hold now records its miner and the window in which its session could have opened a channel. A channel
+  is adopted only if it falls inside a live hold's window and belongs to the same miner, and it consumes
+  that hold. Before, every wallet channel opened after the first cut was a candidate. Once a booked
+  channel had left the 50-entry `done` list, it came back as an orphan (a replay: 60 sessions after one
+  cut re-added 10 channels). Holds written before this change still match within 30 minutes of their run.
+- Direct channels have their own dedupe list (`direct_refs`, kept on KV) instead of sharing the 100
+  gateway receipt hashes. With both paths on, gateway receipts pushed direct hashes out within hours, and
+  a re-adopted channel was booked a second time (replay: +50 FLOP in the airdrop measure, epoch totals
+  and balance). Channel ids are compared case-insensitively, and hashes from older ledgers still count.
 - The Telegram health check in the agent workflow reports a network failure or timeout as "cannot
   reach api.telegram.org" again. curl already prints `000` on such failures and the `|| echo 000`
   fallback appended another one, so the code became `000000`, fell through to the unknown-status branch
