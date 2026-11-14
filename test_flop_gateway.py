@@ -1528,3 +1528,15 @@ def test_ambiguous_524_charges_the_operator_budget_with_the_reserve(monkeypatch)
     assert r["outcome"] == "unknown_outcome"
     assert _budget_spent(state) == pytest.approx(state[gw.KEY]["inflight"]["max_cost"])
     assert _budget_spent(state) > 0
+
+
+def test_replayed_answer_is_charged_once_to_the_operator_budget(monkeypatch):
+    """Lần gọi không rõ kết quả đã tạm trừ `max_cost` vào ngân sách operator; phát lại lấy được phản hồi thì
+    THAY khoản tạm bằng chi phí thật, không cộng thêm (giống sổ ngày)."""
+    monkeypatch.setenv("FLOP_GATEWAY_BUDGET_FLOP", "15")
+    fake, state = _hung(monkeypatch)
+    held = state[gw.KEY]["inflight"]["max_cost"]
+    assert _budget_spent(state) == pytest.approx(held)                   # tạm trừ mức tối đa
+    r = _step(state, fake, NOW + 1000, answer_fn=lambda p, t, c: None)
+    assert r["outcome"] == "replayed"
+    assert _budget_spent(state) == pytest.approx(fake.cost)              # trước: max_cost + cost

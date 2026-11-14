@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Gateway operator budget (`FLOP_GATEWAY_BUDGET_FLOP`): a call with an unknown outcome reserves `max_cost`
+  against the budget. When a later replay (`FLOP_GATEWAY_REPLAY_MAX`) recovered the answer, the real cost was
+  added on top of that reserve instead of replacing it, so the budget over-counted and buying stopped early.
+  The reserve is now recorded on the held request and replaced by the real cost. This is the same rule the
+  daily tally already followed. Neither variable is set in production, so the live agent was not affected.
 - `FLOP_KIBBLE_MAX_CHARS`, `FLOP_TCLK_MIN_CLAIM_WINDOW_MS` and `FLOP_TCLK_MIN_REFUND_GAP_MS` are documented
   in the README as Repo Variables but were not passed by the agent workflow, so setting them had no effect.
   They are now mapped. A test now requires every FLOP_/TESTNET_ variable that the README lists and the code

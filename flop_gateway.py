@@ -990,6 +990,16 @@ def _fb_charge(g: dict, fb: dict, amount: float) -> None:
     g["flop_budget"] = {k: v for k, v in fb.items() if k != "avail"}
 
 
+def _fb_hold(g: dict, fb: dict) -> None:
+    """Lần gọi KHÔNG RÕ kết quả: tạm trừ mức tối đa (`max_cost`) vào ngân sách và ghi lại khoản tạm vào request
+    treo, để khi phát lại lấy được chi phí thật thì THAY khoản tạm (không cộng hai lần)."""
+    inf = g.get("inflight") if isinstance(g.get("inflight"), dict) else {}
+    amt = max(0.0, float(inf.get("max_cost") or 0))
+    _fb_charge(g, fb, amt)
+    if inf:
+        inf["fb_held"] = round(float(inf.get("fb_held") or 0) + amt, 9)
+
+
 def _avail_out(fb):
     """Ngân sách FLOP còn lại để báo (None khi quota tính bằng FLOP)."""
     if fb is None:
@@ -1532,6 +1542,9 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
                     usage = r.get("usage") if isinstance(r.get("usage"), dict) else {}
                     cost = _cost(usage.get("cost_flop")) or drop or usage_cost(usage, *_price(model)) or 0.0
                     if fb is not None:
+                        # Đã tạm trừ `fb_held` ở lượt lỗi: thay bằng chi phí thật, không cộng thêm.
+                        held = max(0.0, float(inf.get("fb_held") or 0))
+                        fb["spent"] = round(max(0.0, float(fb.get("spent") or 0) - held), 9)
                         _fb_charge(g, fb, cost or float(inf.get("max_cost") or 0))
                     if inf.get("day_held"):
                         unhold_day(inf["day_held"], cost)    # đã tạm tính ở lượt lỗi: thay, không cộng
@@ -1869,7 +1882,7 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
             tally(calls, spent, n_sent=calls + 1)
             hold_day()
             if fb is not None:
-                _fb_charge(g, fb, float((g.get("inflight") or {}).get("max_cost") or 0))
+                _fb_hold(g, fb)
             backoff(unknown_backoff_sec(g.get("inflight")), f"{e.status} {e.code}")
             return done("unknown_outcome",
                         reason=(f"HTTP {e.status} khi chờ phản hồi — có thể server đã xử lý và trừ tiền; "
@@ -1924,7 +1937,7 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
         if unknown:
             hold_day()
             if fb is not None:
-                _fb_charge(g, fb, float((g.get("inflight") or {}).get("max_cost") or 0))
+                _fb_hold(g, fb)
         backoff(unknown_backoff_sec(g.get("inflight")) if unknown else 900, type(e).__name__)
         if unknown:
             return done("unknown_outcome",
