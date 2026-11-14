@@ -167,7 +167,10 @@ needs an adapter for the published testnet API. The mempool scaffold is refused 
 2. *(Gateway path: nothing to set — the gateway assigns the model at wallet enrollment and
    the agent re-enrolls if that model is retired.)* Only for the old mempool scaffold:
    `FLOP_SESSION_MODEL_HASH` from the published model catalog.
-3. **Gateway backend (the path FLOP published):** `FLOP_SESSION_BACKEND=gateway` (the default
+3. **Gateway backend (the path FLOP published):** **`FLOP_SESSION_ENABLED=on`** — the master
+   switch for buying compute; without it the gateway step never runs and the agent buys nothing
+   (removed on 2026-11-14 while testnet was not open, to stop a "missing model hash" line every
+   run in simulation). Then `FLOP_SESSION_BACKEND=gateway` (the default
    once `TESTNET_ENABLED` is on; set `mempool` only to force the old scaffold) and
    **`FLOP_WALLET_USE_DID=on` - the DID key is the FLOP wallet** (SS58
    `5CFP215CEbCtDduwG1Nzu5rmYXKfHc47wSATUi1oRvrkQnUP` for the current DID). Decided
@@ -218,8 +221,9 @@ needs an adapter for the published testnet API. The mempool scaffold is refused 
 6. Watch the first runs (or ask for a log check): `[faucet] +N FLOP … tx=…` then
    `[gateway] enroll ví 5CFP…`, `[session] N✓ gateway/spent … quota=…`, and one run later
    `[gateway] biên nhận: settled +N (X FLOP)` - that amount is booked as **unconfirmed** until the
-   explorer shows it under the wallet (see "Spend attribution gate"). `gateway/pace_wait` between buys is normal. Outcomes that need
-   action: `network_mismatch` (set `FLOP_GATEWAY_URL`/`FLOP_GATEWAY_NETWORK`),
+   explorer shows it under the wallet (see "Spend attribution gate"). `gateway/pace_wait` between buys is normal.
+   If the `[run]` line shows `session=off` and no `[gateway]` lines appear, `FLOP_SESSION_ENABLED=on` is missing
+   (item 3). Outcomes that need action: `network_mismatch` (set `FLOP_GATEWAY_URL`/`FLOP_GATEWAY_NETWORK`),
    `payment_required` (x402 - the agent never pays by itself; fit by hand), `unfunded` (faucet
    not reaching the DID wallet), `price_unknown` (item 5). The daily Telegram report carries a
    `gateway:` line (spend vs target, quota left, settled receipts); a lag alert fires after 3 h
