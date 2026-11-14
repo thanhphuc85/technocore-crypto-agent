@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Security: the release workflow pins `pypa/gh-action-pypi-publish` v1.14.3 instead of v1.14.2
+  (GHSA-5xjx-3w67-w9x9). The older action bundled a `certifi` that still trusted the compromised emSign
+  root, the same issue as above. That affects the Sigstore/Trusted Publishing traffic of a job holding
+  `id-token: write`. The workflow runs only when a version tag is pushed.
 - Security: `certifi` 2026.7.22 -> 2026.10.23 in `requirements.lock` and `requirements-dev.lock`
   (GHSA-6q48-6c7w-9gw2 / PYSEC-2026-4320, rated critical). Versions before 2026.10.18 trust the
   `emSign ECC Root CA - G3` root, and eight intermediate CAs under it have compromised private keys. An
