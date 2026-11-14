@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- The CLI that receives the wallet key is better isolated. A `FLOP_DIRECT_IMAGE` override must now be pinned
+  by digest, or direct buying stops with a configuration error; an unpinned value is never passed to
+  Docker. The container runs on the `bridge` network instead of `host` (`FLOP_DIRECT_DOCKER_NETWORK=host`
+  restores it). The CLI process, Docker or `FLOP_DIRECT_CLI`, gets only basic system variables plus what
+  it needs. Before, a local CLI inherited the agent's whole environment: `AGENT_PRIVATE_KEY`, LLM API
+  keys, Telegram and GitHub tokens.
 - Signed KV records are bound to their namespace and key, plus the time they were sealed. Before, a record
   only signed its body, so any valid record of this agent could be copied to another key (the KV is
   world-writable) and still pass. Body-only records are read until 2026-11-21 so the first run after the

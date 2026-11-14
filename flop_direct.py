@@ -198,6 +198,11 @@ def config() -> tuple:
     except (InvalidOperation, ValueError):
         errs.append(f"FLOP_DIRECT_ESCROW_CAP phải là số dương (nhận {raw_cap!r})")
         escrow_cap = DEFAULT_ESCROW_CAP
+    if _env("FLOP_DIRECT_IMAGE") and not _env("FLOP_DIRECT_CLI") and image_problem(_env("FLOP_DIRECT_IMAGE")):
+        errs.append(image_problem(_env("FLOP_DIRECT_IMAGE")))
+    raw_net = _env("FLOP_DIRECT_DOCKER_NETWORK").lower()
+    if raw_net and raw_net not in DOCKER_NETWORKS:
+        errs.append(f"FLOP_DIRECT_DOCKER_NETWORK phải là {' | '.join(DOCKER_NETWORKS)} (nhận {raw_net!r})")
     via = (_env("FLOP_DIRECT_VIA") or "offer").lower()
     if via not in ("offer", "auto", "force"):
         errs.append("FLOP_DIRECT_VIA phải là offer | auto | force")
@@ -384,15 +389,37 @@ def plan_session(*, prompt: str, max_tokens: int, gn_per_token: float, cap_gfs: 
     return {"escrow": _flop_str(escrow), "max_tokens": tokens, "gn_est": round(gn, 3), "ptok": ptok}, ""
 
 
+_PINNED_IMAGE_RE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
+DOCKER_NETWORKS = ("bridge", "host")
+
+
+def image_problem(image: str) -> str:
+    """'' nếu `image` ghim theo digest (`<tên>[:tag]@sha256:<64 hex>`), ngược lại lý do từ chối. Container này nhận khoá
+    ví (= khoá DID khi FLOP_WALLET_USE_DID=on): một tag trôi (`:latest`, `:v0.1`) có thể bị đẩy bản khác bất cứ lúc nào."""
+    if _PINNED_IMAGE_RE.match(image or ""):
+        return ""
+    return "FLOP_DIRECT_IMAGE phải ghim digest (`…@sha256:<64 hex>`) — container nhận khoá ví"
+
+
+def docker_network() -> str:
+    """Mạng của container CLI: `bridge` (mặc định — tách khỏi mạng và dịch vụ localhost của máy chạy) hoặc `host`
+    (FLOP_DIRECT_DOCKER_NETWORK=host, như trước — chỉ khi CLI cần dịch vụ chạy trên chính máy đó). Giá trị lạ -> bridge."""
+    v = _env("FLOP_DIRECT_DOCKER_NETWORK").lower()
+    return v if v in DOCKER_NETWORKS else "bridge"
+
+
 def cli_command(workdir: str, env_names, name: str = None) -> tuple:
     """(lệnh gốc, đường dẫn keystore mà CLI thấy). Mặc định image Docker ghim digest; FLOP_DIRECT_CLI =
     lệnh cục bộ (vd `node /path/cli.js`) cho môi trường không có Docker. Biến môi trường chỉ truyền TÊN
-    (`-e NAME`) — giá trị không bao giờ nằm trên dòng lệnh."""
+    (`-e NAME`) — giá trị không bao giờ nằm trên dòng lệnh. FLOP_DIRECT_IMAGE không ghim digest bị bỏ, dùng image
+    mặc định (config() đã từ chối chạy với cấu hình đó; đây là chốt thứ hai)."""
     local = _env("FLOP_DIRECT_CLI")
     if local:
         return shlex.split(local), os.path.join(workdir, "keystore.json")
     image = _env("FLOP_DIRECT_IMAGE") or DEFAULT_IMAGE
-    cmd = ["docker", "run", "--rm", "--network", "host", "-v", f"{workdir}:/work"]
+    if image_problem(image):
+        image = DEFAULT_IMAGE
+    cmd = ["docker", "run", "--rm", "--network", docker_network(), "-v", f"{workdir}:/work"]
     if name:
         cmd += ["--name", name]               # để giết ĐÚNG container khi hết giờ (giết `docker` không dừng nó)
     for n in env_names:
@@ -400,10 +427,28 @@ def cli_command(workdir: str, env_names, name: str = None) -> tuple:
     return cmd + [image], "/work/keystore.json"
 
 
+# Biến môi trường của tiến trình con (docker / CLI cục bộ): CHỈ các biến hệ thống cần để chạy + đúng những gì lệnh
+# cần (env_extra). Trước đây truyền NGUYÊN môi trường của agent — gồm AGENT_PRIVATE_KEY, FLOP_WALLET_SEED_HEX, các API
+# key LLM, token Telegram/GitHub — nên CLI cục bộ (FLOP_DIRECT_CLI) đọc được tất cả. Docker vốn chỉ chuyển vào
+# container các biến `-e NAME`, nhưng client docker cũng không cần bí mật nào.
+_CHILD_ENV_KEEP = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "LANGUAGE", "TZ", "TMPDIR", "TEMP", "TMP", "SHELL",
+                   "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT", "APPDATA", "LOCALAPPDATA",
+                   "USERPROFILE", "PROGRAMDATA", "PROGRAMFILES", "NODE_OPTIONS", "NODE_PATH",
+                   "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+                   "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy")
+_CHILD_ENV_PREFIXES = ("LC_", "DOCKER_", "XDG_")
+
+
+def _child_env(env_extra) -> dict:
+    keep = {k: v for k, v in os.environ.items()
+            if k.upper() in _CHILD_ENV_KEEP or k in _CHILD_ENV_KEEP or k.upper().startswith(_CHILD_ENV_PREFIXES)}
+    return {**keep, **(env_extra or {})}
+
+
 def _run(cmd, env_extra, timeout):
-    """-> (mã thoát | None nếu quá giờ, stdout, stderr). Môi trường = môi trường hiện tại + env_extra."""
+    """-> (mã thoát | None nếu quá giờ, stdout, stderr). Môi trường = biến hệ thống tối thiểu + env_extra (_child_env)."""
     try:
-        p = subprocess.run(cmd, env={**os.environ, **env_extra}, capture_output=True, text=True,
+        p = subprocess.run(cmd, env=_child_env(env_extra), capture_output=True, text=True,
                            timeout=timeout)
         return p.returncode, p.stdout or "", p.stderr or ""
     except subprocess.TimeoutExpired:

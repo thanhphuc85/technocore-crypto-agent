@@ -417,7 +417,10 @@ jobs:
           FLOP_DIRECT_VIA: ${{ vars.FLOP_DIRECT_VIA }}
           FLOP_DIRECT_ALLOW_FORCE: ${{ vars.FLOP_DIRECT_ALLOW_FORCE }}
           FLOP_DIRECT_DENY_MINERS: ${{ vars.FLOP_DIRECT_DENY_MINERS }}
+          # Image CLI ghi đè: BẮT BUỘC ghim digest (…@sha256:<64 hex>) — container nhận khoá ví.
           FLOP_DIRECT_IMAGE: ${{ vars.FLOP_DIRECT_IMAGE }}
+          # Mạng của container CLI: bridge (mặc định) | host (như trước, chỉ khi CLI cần dịch vụ trên chính máy chạy).
+          FLOP_DIRECT_DOCKER_NETWORK: ${{ vars.FLOP_DIRECT_DOCKER_NETWORK }}
           # Bộ canh chi thật (testnet): báo Telegram sau N run liền không có phiên spent_onchain.
           FLOP_REAL_SPEND_ALERT_RUNS: ${{ vars.FLOP_REAL_SPEND_ALERT_RUNS }}
           FLOP_REAL_SPEND_REALERT_HOURS: ${{ vars.FLOP_REAL_SPEND_REALERT_HOURS }}

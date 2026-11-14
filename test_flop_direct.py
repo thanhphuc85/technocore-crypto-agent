@@ -2113,3 +2113,51 @@ def test_a_real_answer_resets_the_empty_streak(monkeypatch):
     st = {}
     step(st, SeqCLI(seq))
     assert "empty_streak" not in mst(st) and not mst(st).get("wait_until")
+
+
+# --- M4: cô lập CLI nhận khoá ví ------------------------------------------------------------------------------------
+
+def test_unpinned_image_override_is_refused(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_IMAGE", "ghcr.io/flop-labs/flop-core/cli:latest")
+    cli = CLI()
+    r = step({}, cli)
+    assert r["outcome"] == "unconfigured" and "sha256" in r["reason"] and cli.calls == []
+
+
+def test_pinned_image_override_is_used(monkeypatch):
+    img = "ghcr.io/flop-labs/flop-core/cli:v9@sha256:" + "ab" * 32
+    monkeypatch.setenv("FLOP_DIRECT_IMAGE", img)
+    cli = CLI()
+    step({}, cli)
+    assert all(img in c["cmd"] for c in cli.calls) and cli.calls
+
+
+def test_cli_command_never_uses_an_unpinned_image(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_IMAGE", "evil/cli:latest")
+    cmd, _ = fd.cli_command("/tmp/w", [])
+    assert cmd[-1] == fd.DEFAULT_IMAGE                                          # chốt thứ hai, ngoài config()
+
+
+def test_container_uses_the_bridge_network_by_default(monkeypatch):
+    cmd, _ = fd.cli_command("/tmp/w", [])
+    assert cmd[cmd.index("--network") + 1] == "bridge"
+    monkeypatch.setenv("FLOP_DIRECT_DOCKER_NETWORK", "host")
+    cmd, _ = fd.cli_command("/tmp/w", [])
+    assert cmd[cmd.index("--network") + 1] == "host"
+    monkeypatch.setenv("FLOP_DIRECT_DOCKER_NETWORK", "macvlan")
+    assert any("FLOP_DIRECT_DOCKER_NETWORK" in e for e in fd.config()[1])
+
+
+def test_cli_process_does_not_inherit_the_agents_secrets(monkeypatch):
+    for k in ("AGENT_PRIVATE_KEY", "FLOP_WALLET_SEED_HEX", "GEMINI_API_KEY", "TELEGRAM_BOT_TOKEN", "GITHUB_TOKEN"):
+        monkeypatch.setenv(k, "secret-" + k)
+    monkeypatch.setenv("PATH", "/usr/bin")
+    seen = {}
+
+    class P:
+        returncode, stdout, stderr = 0, "{}", ""
+
+    monkeypatch.setattr(fd.subprocess, "run", lambda cmd, env=None, **k: seen.update(env) or P())
+    fd._run(["node", "cli.js"], {fd.PASSWORD_ENV: "pw"}, 5)
+    assert seen.get("PATH") == "/usr/bin" and seen[fd.PASSWORD_ENV] == "pw"
+    assert not [k for k, v in seen.items() if str(v).startswith("secret-")]
