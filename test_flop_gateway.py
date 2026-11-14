@@ -1501,3 +1501,30 @@ def test_repeated_empty_answers_stop_buying(monkeypatch):
     r = gw.run_step(st, agent_key=_key("22"), http=fake, now=NOW + 300, prompts=["q1", "q2", "q3"],
                     expect_network="devnet", sleep=lambda s: None, log=lambda *a: None)
     assert r["outcome"] == "empty_answer" and st[gw.KEY]["wait_why"] == "empty_answers"
+
+
+# --- ngân sách operator (FLOP_GATEWAY_BUDGET_FLOP) khi lần gọi KHÔNG RÕ kết quả --------------------------------------
+
+def _budget_spent(state):
+    return state[gw.KEY]["flop_budget"]["spent"]
+
+
+def test_transport_timeout_charges_the_operator_budget_with_the_reserve(monkeypatch):
+    monkeypatch.setenv("FLOP_GATEWAY_BUDGET_FLOP", "15")
+    monkeypatch.setenv("FLOP_GATEWAY_MAX_CALLS_PER_RUN", "1")
+    fake, state = FakeGateway(quota=25.0, expires_ms=LATER), {}
+    r = _step(state, _timeout_after_processing(fake), NOW)
+    assert r["outcome"] == "unknown_outcome"
+    assert _budget_spent(state) == pytest.approx(state[gw.KEY]["inflight"]["max_cost"])   # chưa rõ: tính mức tối đa
+    assert _budget_spent(state) > 0
+
+
+def test_ambiguous_524_charges_the_operator_budget_with_the_reserve(monkeypatch):
+    monkeypatch.setenv("FLOP_GATEWAY_BUDGET_FLOP", "15")
+    monkeypatch.setenv("FLOP_GATEWAY_MAX_CALLS_PER_RUN", "1")
+    fake, state = FakeGateway(quota=25.0, expires_ms=LATER), {}
+    fake.override[("POST", "/v1/chat/completions")] = Resp(524, {"error": "origin_timeout"})
+    r = _step(state, fake, NOW)
+    assert r["outcome"] == "unknown_outcome"
+    assert _budget_spent(state) == pytest.approx(state[gw.KEY]["inflight"]["max_cost"])
+    assert _budget_spent(state) > 0
