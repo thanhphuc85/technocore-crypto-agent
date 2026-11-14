@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- The public `kibble-score` no longer counts ATTEST votes that judged other workers' deliveries. The tracker
+  scored against the buffer fetched before the agent delivered, so every vote in it had been posted
+  earlier and was about someone else's work. Votes posted before the delivery time are now ignored by both
+  counters, and the delivery time is now taken after the DELIVER is posted. Every job on the board now
+  has 2-4 deliverers (measured 2026-11-14), and 29/35 votes carry no `rh`. So for a job with other
+  deliverers, the clean counter accepts only votes whose `rh` matches the agent's own delivery. Lifetime
+  totals before this change are inflated.
 - Security: the release workflow pins `pypa/gh-action-pypi-publish` v1.14.3 instead of v1.14.2
   (GHSA-5xjx-3w67-w9x9). The older action bundled a `certifi` that still trusted the compromised emSign
   root, the same issue as above. That affects the Sigstore/Trusted Publishing traffic of a job holding
