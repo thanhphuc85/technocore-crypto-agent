@@ -2249,3 +2249,49 @@ def test_tclk_preimages_are_sealed_and_legacy_ones_migrated():
                                 my_did="did:key:zMe", now_ms=10 ** 12, seal_fn=seal, open_fn=open_, log=lambda m: None)
     meta = st["tclk_secrets"]["c1"]
     assert "preimage" not in meta and open_(meta["preimage_enc"]) == "0x" + "ef" * 32
+
+
+# --- mua trực tiếp TẮT + mất state.json: kênh chờ / phiên dở trên KV vẫn được đối soát ------------------------------
+
+def _direct_off_env(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_ENABLED", "off")
+    kv, gets = {}, []
+    monkeypatch.setattr(ac, "kv_set", lambda pk, did, k, v: kv.update({k: v}) or True)
+    monkeypatch.setattr(ac, "kv_get", lambda k: gets.append(k) or kv.get(k))
+    ran = []
+    monkeypatch.setattr(fd, "run_step", lambda state, **kw: ran.append(json.loads(json.dumps(state.get(fd.KEY))))
+                        or {"outcome": "off", "settled": 0})
+    return kv, gets, ran
+
+
+def test_direct_off_after_cache_loss_reconciles_pending_channels_from_kv(monkeypatch):
+    kv, gets, ran = _direct_off_env(monkeypatch)
+    kv[ac.DIRECT_KV_KEY] = ac._kv_seal(KEY, {"rev": 4, "pending": [{"channel": CH, "ts": NOW, "network": "testnet"}]},
+                                       ac.DIRECT_KV_KEY)
+    st = {}                                                                     # state.json vừa mất
+    ac.direct_session_step(st, KEY, NOW)
+    assert ran and ran[0]["pending"][0]["channel"] == CH
+
+
+def test_direct_off_with_nothing_on_kv_checks_at_most_every_six_hours(monkeypatch):
+    kv, gets, ran = _direct_off_env(monkeypatch)
+    st = {}
+    assert ac.direct_session_step(st, KEY, NOW) == "off" and gets == [ac.DIRECT_KV_KEY] and not ran
+    assert fd.KEY not in st
+    ac.direct_session_step(st, KEY, NOW + 300)
+    assert gets == [ac.DIRECT_KV_KEY]                                           # chưa tới hạn đọc lại
+    ac.direct_session_step(st, KEY, NOW + ac.DIRECT_KV_OFF_CHECK_SEC + 1)
+    assert len(gets) == 2
+
+
+def test_direct_off_still_recovers_an_unfinished_session_mark(monkeypatch):
+    kv, gets, ran = _direct_off_env(monkeypatch)
+    st = {fd.KEY: {"attempt": {"ts": NOW, "miner": MINER, "escrow": "1", "network": "testnet"}}}
+    ac.direct_session_step(st, KEY, NOW)
+    assert ran and ran[0]["attempt"]["miner"] == MINER                          # trước: trả "off", mốc bị bỏ quên
+
+
+def test_direct_off_with_intact_cache_makes_no_kv_read(monkeypatch):
+    kv, gets, ran = _direct_off_env(monkeypatch)
+    st = {fd.KEY: {"pending": [], "day": {"day": "d", "escrow": 0.0}}}
+    assert ac.direct_session_step(st, KEY, NOW) == "off" and gets == [] and not ran

@@ -5467,8 +5467,13 @@ def gateway_session_step(state: dict, private_key, now: int):
 
 
 DIRECT_KV_KEY = "flop_direct"
-DIRECT_KV_HASH = "flop_direct_kv_hash"
-DIRECT_KV_STALE_SEC = 6 * 3600   # khôi phục từ bản KV cũ hơn chừng này (khi mất state.json) -> báo      # dấu của bản đã đẩy lên KV gần nhất (cục bộ): không đổi thì không ghi lại
+DIRECT_KV_HASH = "flop_direct_kv_hash"      # dấu của bản đã đẩy lên KV gần nhất (cục bộ): không đổi thì không ghi lại
+DIRECT_KV_STALE_SEC = 6 * 3600   # khôi phục từ bản KV cũ hơn chừng này (khi mất state.json) -> báo
+# Mua trực tiếp đang TẮT mà state.json không có phần flop_direct (vd cache vừa mất): đọc bản KV để kênh chờ /
+# phiên dở vẫn được đối soát. Đọc tối đa một lần mỗi chừng này giây (mốc nằm trong state.json: mất cache thì
+# mốc cũng mất -> đọc ngay ở lượt đầu).
+DIRECT_KV_OFF_CHECK_SEC = 6 * 3600
+DIRECT_KV_OFF_CHECK_KEY = "direct_kv_off_checked"
 
 
 def did_key_ss58(did: str):
@@ -5594,9 +5599,29 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
     """Mua compute TRỰC TIẾP từ một miner (flop_direct): kênh đứng tên ví agent. Testnet tắt -> chạy tập trên
     devnet, KHÔNG ghi sổ. Không ném lỗi; trả trạng thái cho dòng [run]."""
     import flop_direct
-    if not flop_direct.enabled() and not ((state.get(flop_direct.KEY) or {}).get("pending")
-                                          or (state.get(flop_direct.KEY) or {}).get("orphan_since")):
-        return "off"                                 # tắt mà còn kênh chờ: vẫn chạy để đối soát / ghi sổ
+
+    def _unfinished(g) -> bool:
+        """Còn việc phải đối soát dù mua trực tiếp đã tắt: kênh chờ, tìm kênh mồ côi, hoặc mốc phiên dở dang."""
+        g = g if isinstance(g, dict) else {}
+        return bool(g.get("pending") or g.get("orphan_since") or g.get("attempt"))
+
+    if not flop_direct.enabled() and not _unfinished(state.get(flop_direct.KEY)):
+        # state.json có phần flop_direct = cache còn nguyên, không có việc gì. Không có = có thể cache vừa mất: kênh chờ /
+        # phiên dở chỉ còn trên KV — đọc KV (tối đa mỗi DIRECT_KV_OFF_CHECK_SEC) thay vì bỏ qua tới khi bật lại.
+        if state.get(flop_direct.KEY) or now - int(state.get(DIRECT_KV_OFF_CHECK_KEY) or 0) < DIRECT_KV_OFF_CHECK_SEC:
+            return "off"
+        state[DIRECT_KV_OFF_CHECK_KEY] = now
+        save_state({DIRECT_KV_OFF_CHECK_KEY: now})
+        try:
+            direct_kv_hydrate(state, private_key)
+        except Exception as e:
+            print(f"[direct] đọc trạng thái KV lỗi ({type(e).__name__}) — thử lại sau")
+            return "off"
+        if not _unfinished(state.get(flop_direct.KEY)):
+            state.pop(flop_direct.KEY, None)         # KV không có việc dở: giữ nguyên hành vi "tắt"
+            return "off"
+        print("[direct] mua trực tiếp đang tắt nhưng bản KV còn kênh chờ / phiên dở — chạy đối soát")
+        save_state({flop_direct.KEY: state.get(flop_direct.KEY)})
     import token_manager as _tm
     try:
         testnet = _tm.testnet_enabled()
