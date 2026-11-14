@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- With direct buying off, pending channels and an unfinished-session mark are still reconciled. If
+  `state.json` has no direct state (for example, the Actions cache was just lost), the signed KV copy is
+  read, at most once every 6 hours, and is reconciled when it still has pending channels, an orphan
+  search or an unfinished session. Before, nothing was checked until direct buying was turned back on. A
+  local unfinished-session mark alone also used to be skipped while buying was off.
 - Direct purchase now moves to the next prompt after every session the CLI ran, including one with an
   unknown outcome. Before, it rotated only on success, so the next session sent the same prompt again and
   repeated its `prompt_hash` on chain.
