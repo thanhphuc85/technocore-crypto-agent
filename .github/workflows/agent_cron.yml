@@ -336,6 +336,8 @@ jobs:
           # Trần chi tuyệt đối của gateway, FLOP (mặc định 100/lượt, 2500/ngày UTC; 0 = tắt).
           FLOP_GATEWAY_MAX_PER_RUN: ${{ vars.FLOP_GATEWAY_MAX_PER_RUN }}
           FLOP_GATEWAY_MAX_PER_DAY: ${{ vars.FLOP_GATEWAY_MAX_PER_DAY }}
+          # Trần CHUNG mỗi ngày UTC cho CẢ HAI đường mua (gateway + trực tiếp), FLOP. Trống = 2500; 0 = tắt.
+          FLOP_MAX_SPEND_PER_DAY: ${{ vars.FLOP_MAX_SPEND_PER_DAY }}
           # Ngân sách FLOP tối đa cho MỖI allowance gateway (mặc định trống = rải cả quota; quota LÀ FLOP,
           # devnet: tới 20.000 FLOP/24h do gateway cấp, không phải tiền ví). Trần ngày: MAX_PER_DAY.
           FLOP_GATEWAY_BUDGET_FLOP: ${{ vars.FLOP_GATEWAY_BUDGET_FLOP }}
@@ -383,6 +385,10 @@ jobs:
           # Đặt số -> escrow cố định.
           FLOP_DIRECT_MAX_FLOP: ${{ vars.FLOP_DIRECT_MAX_FLOP }}
           FLOP_DIRECT_ESCROW_CAP: ${{ vars.FLOP_DIRECT_ESCROW_CAP }}
+          # Offer quá đắt: minEscrow > MAX_OVERPAY lần chi phí việc ước lượng (mặc định 3; 0 = tắt) VÀ dư >=
+          # OVERPAY_MIN_FLOP (mặc định 1) -> không mua của miner đó (escrow là chi phí, settle hợp tác trả hết).
+          FLOP_DIRECT_MAX_OVERPAY: ${{ vars.FLOP_DIRECT_MAX_OVERPAY }}
+          FLOP_DIRECT_OVERPAY_MIN_FLOP: ${{ vars.FLOP_DIRECT_OVERPAY_MIN_FLOP }}
           # Định cỡ phiên: thời gian chờ settle mục tiêu (mặc định 300s), biên escrow % (mặc định 20), giá
           # FLOP/GFLOP ghi đè registry, công suất giả định khi chưa biết miner (mặc định 10 GFLOP/s).
           FLOP_DIRECT_SETTLE_TARGET_SEC: ${{ vars.FLOP_DIRECT_SETTLE_TARGET_SEC }}

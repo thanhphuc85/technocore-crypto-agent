@@ -378,12 +378,14 @@ def test_exact_raw_amount_is_preserved(monkeypatch):
     step({}, cli, offers=[offer(min_escrow=123456789012345678)])
     assert _max_flop(cli) == "0.123456789012345678"                    # đủ 18 chữ số lẻ, không làm tròn
     monkeypatch.setenv("FLOP_DIRECT_ESCROW_CAP", "2")
+    monkeypatch.setenv("FLOP_DIRECT_MAX_OVERPAY", "0")                  # phiên 8 token: chỉ kiểm độ chính xác số
     cli = CLI()
     step({}, cli, offers=[offer(min_escrow=1050496031746020001)])       # kênh devnet thật: escrow 1.0505
     assert _max_flop(cli) == "1.050496031746020001"
 
 
 def test_offer_above_the_escrow_cap_is_not_bought(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_OVERPAY", "0")                  # phiên 8 token: chỉ kiểm trần escrow
     monkeypatch.setenv("FLOP_DIRECT_ESCROW_CAP", "1")
     cli = CLI()
     r = step({}, cli, offers=[offer(min_escrow=2 * 10 ** 18)])          # 2 FLOP > trần mặc định 1
@@ -1919,3 +1921,140 @@ def test_direct_refs_fit_the_signed_kv_ledger(monkeypatch):
     body = ac._kv_open(raw, KEY)
     assert len(raw) <= ac.KV_VALUE_MAX
     assert len(body["direct_refs"]) == tm.DIRECT_REFS_KEEP and len(body["gateway_refs"]) == tm.GATEWAY_REFS_KEEP
+
+
+# --- H3: bản KV MỚI hơn thắng state.json cũ (lưu cache lỗi một lượt) ---------------------------------------------------
+
+def _kv(monkeypatch):
+    kv = {}
+    monkeypatch.setattr(ac, "kv_set", lambda pk, did, k, v: kv.update({k: v}) or True)
+    monkeypatch.setattr(ac, "kv_get", lambda k: kv.get(k))
+    return kv
+
+
+def test_kv_persist_bumps_rev_only_when_the_content_changes(monkeypatch):
+    kv = _kv(monkeypatch)
+    st = {fd.KEY: {"day": {"day": "d", "escrow": 1.0}, "pending": []}}
+    assert ac.direct_kv_persist(st, KEY) and st[fd.KEY]["rev"] == 1
+    writes = dict(kv)
+    assert ac.direct_kv_persist(st, KEY) and st[fd.KEY]["rev"] == 1 and kv == writes   # không đổi: không ghi lại
+    st[fd.KEY]["day"] = {"day": "d", "escrow": 2.0}
+    ac.direct_kv_persist(st, KEY)
+    assert st[fd.KEY]["rev"] == 2 and ac._kv_open(kv[ac.DIRECT_KV_KEY], KEY)["rev"] == 2
+
+
+def test_newer_kv_copy_beats_a_stale_state_json(monkeypatch):
+    _kv(monkeypatch)
+    newer = {fd.KEY: {"rev": 7, "day": {"day": "d", "escrow": 9.0}, "done": [fd._short(CH2)],
+                      "pending": [{"channel": CH, "ts": NOW, "network": "testnet", "miner": MINER}],
+                      "attempt": {"ts": NOW, "miner": MINER, "escrow": "1", "network": "testnet"}}}
+    ac.direct_kv_persist(newer, KEY)                               # lượt N: KV ghi được (rev 8), cache thì lỗi
+    gone = "0x" + "77" * 32
+    stale = {fd.KEY: {"rev": 5, "day": {"day": "d", "escrow": 1.0},
+                      "pending": [{"channel": CH2, "ts": NOW}, {"channel": gone, "ts": NOW}]}}   # cache lượt N-1
+    assert ac.direct_kv_hydrate(stale, KEY)
+    g = stale[fd.KEY]
+    assert g["rev"] == 8 and g["day"]["escrow"] == 9.0 and g["attempt"]["miner"] == MINER
+    assert [p["channel"] for p in g["pending"]] == [CH, gone]       # CH2 đã xong ở lượt N; `gone` KV không có -> giữ
+    older = {fd.KEY: {"rev": 99, "day": {"day": "d", "escrow": 3.0}, "pending": []}}
+    assert not ac.direct_kv_hydrate(older, KEY) and older[fd.KEY]["day"]["escrow"] == 3.0   # local mới hơn: giữ
+
+
+def test_newer_gateway_inflight_blob_beats_the_local_one(monkeypatch):
+    kv = _kv(monkeypatch)
+    kv[ac.STATE_KV_KEY] = ac._kv_seal(KEY, {"gateway_inflight": {"at": NOW, "inflight": {"key": "new"}}})
+    monkeypatch.setattr(ac.time, "time", lambda: NOW + 60)
+    st = {"gateway_inflight": {"at": NOW - 300, "inflight": {"key": "old"}}}
+    ac.hydrate_durable_from_kv(st, KEY)
+    assert st["gateway_inflight"]["inflight"]["key"] == "new"
+    st2 = {"gateway_inflight": {"at": NOW + 5, "inflight": {"key": "local"}}}
+    ac.hydrate_durable_from_kv(st2, KEY)
+    assert st2["gateway_inflight"]["inflight"]["key"] == "local"
+
+
+def _gateway_seen(monkeypatch, state):
+    import flop_gateway as gw
+    seen = {}
+
+    def fake_run(state, **kw):
+        seen.update(json.loads(json.dumps(state.get(gw.KEY))))
+        state[gw.KEY] = dict(state.get(gw.KEY) or {}, last_run=kw["now"])
+        return {"outcome": "pace_wait", "calls": 0}
+
+    monkeypatch.setattr(gw, "run_step", fake_run)
+    monkeypatch.setenv("FLOP_GATEWAY_PROMPTS", "Q one|Q two")
+    monkeypatch.setattr(ac, "build_market_context", lambda *a, **k: "")
+    monkeypatch.setattr(ac, "_telegram_send", lambda m: True)
+    ac.gateway_session_step(state, KEY, NOW)
+    return seen
+
+
+def test_gateway_step_takes_the_newer_durable_inflight_and_the_higher_day_count(monkeypatch):
+    import flop_gateway as gw
+    day = time.strftime("%Y-%m-%d", time.gmtime(NOW))
+    prof = gw.profile_of("testnet")
+    st = {gw.KEY: {"profile": prof, "last_run": NOW - 600, "inflight": {"key": "old", "ts": NOW - 600},
+                   "day_spent": {"day": day, "spent": 5.0}},
+          "gateway_inflight": {"at": NOW - 300, "profile": prof, "inflight": None,
+                               "day_spent": {"day": day, "spent": 9.0}}}
+    seen = _gateway_seen(monkeypatch, st)
+    assert seen.get("inflight") is None and seen["day_spent"]["spent"] == 9.0   # lượt N đã đối soát + chi thêm
+    st = {gw.KEY: {"profile": prof, "last_run": NOW - 600, "day_spent": {"day": day, "spent": 5.0}},
+          "gateway_inflight": {"at": NOW - 300, "profile": prof, "inflight": {"key": "new", "ts": NOW - 300},
+                               "day_spent": {"day": day, "spent": 2.0}}}
+    seen = _gateway_seen(monkeypatch, st)
+    assert seen["inflight"]["key"] == "new" and seen["day_spent"]["spent"] == 5.0   # trần ngày: số lớn hơn
+
+
+# --- M1: offer quá đắt so với việc thật ------------------------------------------------------------------------------
+
+def test_plan_refuses_an_offer_far_above_the_work():
+    kw = dict(prompt="q" * 40, max_tokens=64, gn_per_token=2.0, cap_gfs=10.0, price=Decimal("0.003"),
+              escrow_cap=Decimal(100), settle_target=300, margin=0.2)
+    plan, why = fd.plan_session(min_escrow=Decimal(50), max_overpay=3.0, overpay_min=Decimal(1), **kw)
+    assert plan is None and "quá đắt" in why
+    assert fd.plan_session(min_escrow=Decimal(50), **kw)[0]["escrow"] == "50"            # tắt kiểm tra: như cũ
+    assert fd.plan_session(min_escrow=Decimal("0.5"), max_overpay=3.0, overpay_min=Decimal(1), **kw)[0]  # dư < 1 FLOP
+
+
+def test_overpriced_miner_is_skipped_with_one_alert(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_DAY", "2000")         # trần ngày 25 mặc định sẽ chặn trước (daily_cap)
+    st, alerts, cli = {}, [], CLI()
+    r = step(st, cli, offers=[offer(min_escrow=50 * 10 ** 18)], alerts=alerts)
+    assert r["outcome"] == "no_offer" and "quá đắt" in r["reason"] and cli.sessions() == []
+    assert mst(st)["wait_why"] == "offer overpriced" and sum("quá đắt" in a for a in alerts) == 1
+    step(st, CLI(), offers=[offer(min_escrow=50 * 10 ** 18)], alerts=alerts, now=NOW + 2 * 3600)
+    assert sum("quá đắt" in a for a in alerts) == 1                                   # không báo lặp
+    step(st, CLI(), alerts=alerts, now=NOW + 4 * 3600)                                   # miner hạ giá
+    assert "overpay_alerted" not in mst(st)
+
+
+# --- M7: trần chung cả hai đường ---------------------------------------------------------------------------------------
+
+def test_combined_room_stops_direct_purchases(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_RUN", "3")
+    cli = CLI()
+    r = step({}, cli, spend_room=lambda: 0.07)                      # đủ 1 phiên 0.05, không đủ phiên thứ 2
+    assert len(cli.sessions()) == 1 and "FLOP_MAX_SPEND_PER_DAY" in (r.get("reason") or "")
+    cli = CLI()
+    r = step({}, cli, spend_room=lambda: 0)
+    assert r["outcome"] == "daily_cap" and cli.sessions() == []
+
+
+def test_combined_spend_room_sums_both_paths(monkeypatch):
+    import flop_gateway as gw
+    day = time.strftime("%Y-%m-%d", time.gmtime(NOW))
+    st = {gw.KEY: {"day_spent": {"day": day, "spent": 1000.0}}, fd.KEY: {"day": {"day": day, "escrow": 1400.0}}}
+    assert ac.combined_spend_room(st, NOW) == pytest.approx(100.0)              # mặc định 2500
+    monkeypatch.setenv("FLOP_MAX_SPEND_PER_DAY", "2000")
+    assert ac.combined_spend_room(st, NOW) == 0.0
+    assert ac.combined_spend_room(st, NOW + 86400) == 2000.0                     # sang ngày mới: đếm lại
+    monkeypatch.setenv("FLOP_MAX_SPEND_PER_DAY", "0")
+    assert ac.combined_spend_room(st, NOW) is None
+    monkeypatch.setenv("FLOP_MAX_SPEND_PER_DAY", "nan")
+    assert ac.combined_spend_room(st, NOW) == pytest.approx(100.0)               # rác -> mặc định, không tắt trần
+
+
+def test_nan_direct_daily_cap_falls_back_to_the_default(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_DAY", "nan")
+    assert fd.config()[0]["per_day"] == fd.DEFAULT_MAX_PER_DAY

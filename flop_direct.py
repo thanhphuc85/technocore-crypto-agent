@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -55,6 +56,8 @@ DEFAULT_CAP_GFS = 10.0               # công suất giả định khi chưa bi�
 DEFAULT_SETTLE_TARGET_SEC = 300      # thời gian chờ settle mục tiêu (< FLOP_DIRECT_TIMEOUT_SEC mặc định 600)
 DEFAULT_MARGIN_PCT = 20              # dư escrow so với ước lượng (thiếu -> CLI từ chối lượt, kênh chờ hạn để hoàn)
 DEFAULT_GN_PER_TOKEN = 2.0           # GFLOP/token khi không suy được cỡ model (≈ 2 × 1B tham số)
+DEFAULT_MAX_OVERPAY = 3.0            # minEscrow > 3 lần chi phí việc ước lượng ...
+DEFAULT_OVERPAY_MIN = Decimal("1")   # ... và dư >= 1 FLOP -> không mua (FLOP_DIRECT_MAX_OVERPAY / _OVERPAY_MIN_FLOP)
 MIN_TOKENS = 16
 GNPT_EMA = 0.5                       # trọng số số đo mới khi học GFLOP/token từ kênh đã settle
 _HASH_RE = re.compile(r"^0x[0-9a-fA-F]{64}$")
@@ -104,10 +107,12 @@ def _env(name: str, default: str = "") -> str:
 
 
 def _num(name: str, default: float) -> float:
+    """Số từ biến môi trường; rác hoặc không hữu hạn ('nan', 'inf') -> mặc định (nan từng tắt trần ngày)."""
     try:
-        return float(_env(name) or default)
+        v = float(_env(name) or default)
     except ValueError:
         return float(default)
+    return v if math.isfinite(v) else float(default)
 
 
 def enabled() -> bool:
@@ -220,7 +225,16 @@ def config() -> tuple:
     except (InvalidOperation, ValueError):
         errs.append("FLOP_DIRECT_FEE_RESERVE phải là số >= 0 (FLOP)")
         fee_reserve = DEFAULT_FEE_RESERVE
+    try:
+        raw_om = _env("FLOP_DIRECT_OVERPAY_MIN_FLOP")
+        overpay_min = Decimal(raw_om) if raw_om else DEFAULT_OVERPAY_MIN
+        if not overpay_min.is_finite() or overpay_min < 0:
+            raise InvalidOperation
+    except (InvalidOperation, ValueError):
+        errs.append("FLOP_DIRECT_OVERPAY_MIN_FLOP phải là số >= 0 (FLOP)")
+        overpay_min = DEFAULT_OVERPAY_MIN
     cfg = {"miners": miners, "price": price, "fee_reserve": fee_reserve,
+           "max_overpay": max(0.0, _num("FLOP_DIRECT_MAX_OVERPAY", DEFAULT_MAX_OVERPAY)), "overpay_min": overpay_min,
            "settle_target": max(30, int(_num("FLOP_DIRECT_SETTLE_TARGET_SEC", DEFAULT_SETTLE_TARGET_SEC))),
            "margin": max(0.0, min(200.0, _num("FLOP_DIRECT_MARGIN_PCT", DEFAULT_MARGIN_PCT))) / 100,
            "default_cap": max(0.1, _num("FLOP_DIRECT_DEFAULT_CAP_GFS", DEFAULT_CAP_GFS)),
@@ -331,11 +345,16 @@ def model_size_b(slug: str):
 
 def plan_session(*, prompt: str, max_tokens: int, gn_per_token: float, cap_gfs: float, price: Decimal,
                  min_escrow: Decimal, escrow_cap: Decimal, settle_target: int, margin: float,
-                 max_duration=None):
+                 max_duration=None, max_overpay: float = None, overpay_min: Decimal = None):
     """({escrow, max_tokens, gn_est} | None, lý do). Khối lượng ước lượng = GFLOP/token × (token đề + token trả
     lời). Thu số token trả lời cho vừa (a) cap × thời gian chờ settle mục tiêu (và maxDuration của offer, block
     1 giây), (b) trần escrow. Escrow = giá × khối lượng × (1 + biên), không thấp hơn minEscrow của offer.
-    Escrow LÀ chi phí, nên không đặt dư hơn mức cần."""
+    Escrow LÀ chi phí, nên không đặt dư hơn mức cần.
+
+    `max_overpay` (tỉ lệ) + `overpay_min` (FLOP): minEscrow của offer vượt ước lượng việc thật QUÁ `max_overpay` lần
+    VÀ phần dư >= `overpay_min` -> không mua. Settle hợp tác trả CẢ escrow cho miner, nên một miner tự nâng minEscrow
+    sát trần (100 FLOP) bán một phiên vài chục token với giá trần mà trước đây agent vẫn mua. Ngưỡng tuyệt đối để
+    offer tối thiểu nhỏ (vd 0.05 FLOP cho phiên vài token) vẫn mua được."""
     ptok = max(1, len(prompt or "") // 4)
     secs = settle_target if not max_duration else min(settle_target, int(max_duration))
     if gn_per_token <= 0 or cap_gfs <= 0 or price <= 0:
@@ -351,7 +370,12 @@ def plan_session(*, prompt: str, max_tokens: int, gn_per_token: float, cap_gfs: 
         return None, (f"miner công suất {cap_gfs:g} GFLOP/s không settle kịp {floor} token của model này trong "
                       f"{secs}s")
     gn = gn_per_token * (ptok + tokens)
-    escrow = max(min_escrow, unit * Decimal(ptok + tokens))
+    work = unit * Decimal(ptok + tokens)                  # chi phí việc thật (đã gồm biên)
+    escrow = max(min_escrow, work)
+    if (max_overpay and overpay_min is not None and work > 0 and escrow > work * Decimal(str(max_overpay))
+            and escrow - work >= overpay_min):
+        return None, (f"offer quá đắt: minEscrow {_flop_str(min_escrow)} FLOP gấp {float(escrow / work):.1f} lần "
+                      f"chi phí việc ước lượng {_flop_str(work)} FLOP (FLOP_DIRECT_MAX_OVERPAY {max_overpay:g})")
     if escrow > escrow_cap:
         return None, (f"minEscrow của offer {_flop_str(min_escrow)} FLOP > trần {_flop_str(escrow_cap)} "
                       "(FLOP_DIRECT_ESCROW_CAP)")
@@ -485,7 +509,7 @@ def pace_limit(cfg: dict, now: int, salt: str = "") -> tuple[float, bool]:
 
 
 _DURABLE_TOP = ("day", "unknown_until", "wait_until", "wait_why", "prompt_idx", "miner_idx", "gnpt", "stats",
-                "last_attempt", "orphan_since", "orphan_last", "done", "unknown_escrow", "attempt")
+                "last_attempt", "orphan_since", "orphan_last", "done", "unknown_escrow", "attempt", "rev")
 _DURABLE_MINER = ("unknown_until", "wait_until", "wait_why", "cap", "sessions")
 _PENDING_CORE = ("channel", "ts", "network", "miner", "error", "alerted", "force", "fin_tries", "fin_at", "fin_tx",
                  "fin_alerted", "max_flop")
@@ -520,14 +544,31 @@ def durable_view(g: dict, level: int = 0) -> dict:
     return out
 
 
+def rev_of(g) -> int:
+    """Số phiên bản của trạng thái (tăng mỗi lần nội dung đổi và được sao lưu); 0 nếu không có / bản cũ."""
+    try:
+        return max(0, int((g or {}).get("rev") or 0))
+    except (TypeError, ValueError, AttributeError):
+        return 0
+
+
 def restore(state: dict, remote) -> bool:
-    """Khôi phục state[KEY] từ bản KV khi state.json mất phần này (Actions cache mất). Chỉ khi LOCAL TRỐNG: local
-    có thì local là bản mới nhất — trộn sẽ đưa lại kênh đã ghi sổ/đã bỏ. -> True nếu đã khôi phục."""
-    if state.get(KEY) or not isinstance(remote, dict):
+    """Khôi phục state[KEY] từ bản KV khi (a) state.json mất phần này (Actions cache mất), hoặc (b) bản KV MỚI HƠN
+    (`rev` lớn hơn): cache lưu lỗi ở lượt N thì lượt N+1 khôi phục cache của lượt N-1 — có dữ liệu nên trước đây
+    thắng, và kênh mở / trần ngày / mốc phiên dở của lượt N bị quên. Bản KV thắng thì kênh chờ của local mà bản KV
+    không có (KV bỏ bớt kênh cũ cho vừa 8192 ký tự) và cũng chưa xong (`done`) được giữ lại. -> True nếu đã khôi phục."""
+    if not isinstance(remote, dict):
         return False
+    local = state.get(KEY)
+    if local and rev_of(remote) <= rev_of(local):
+        return False                       # local mới bằng hoặc hơn: local thắng (trộn sẽ đưa lại kênh đã xong)
     g = {k: remote[k] for k in _DURABLE_TOP if k in remote}
     g["miners"] = {k: dict(v) for k, v in (remote.get("miners") or {}).items() if isinstance(v, dict)}
     g["pending"] = [dict(p) for p in (remote.get("pending") or []) if isinstance(p, dict) and p.get("channel")]
+    if isinstance(local, dict):
+        have = {_short(p["channel"]) for p in g["pending"]} | {d for d in (g.get("done") or []) if isinstance(d, str)}
+        g["pending"] += [dict(p) for p in (local.get("pending") or [])
+                         if isinstance(p, dict) and p.get("channel") and _short(p["channel"]) not in have]
     state[KEY] = g
     return True
 
@@ -628,7 +669,7 @@ def _mkey(miner: str) -> str:
 def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, prompt: str = None,
              prompts=None, book_fn=None, deny=(), deadline=None, runner=None, alert=None, log=print,
              clock=time.time, offers_fn=None, price_fn=None, miner_cap_fn=None, balance_fn=None,
-             indexer_url=None, own_channels_fn=None, checkpoint=None) -> dict:
+             indexer_url=None, own_channels_fn=None, checkpoint=None, spend_room=None) -> dict:
     """Một nhịp mua trực tiếp: tối đa FLOP_DIRECT_MAX_PER_RUN phiên, xoay vòng các miner. Trả {"outcome", ...};
     KHÔNG ném lỗi. `book_fn(amount, channel_id, model, escrow=)` ghi sổ (None = chạy tập devnet, không ghi).
     `fetch_channel(channel_id)` -> dict explorer | None. `offers_fn(miner, model_hash)` -> các dòng
@@ -646,6 +687,8 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
     `attempt` = phiên đang chạy, trần ngày đã giữ và các kênh đã mở trước đó trong lượt; và sau mỗi phiên. Lượt bị giết
     giữa phiên (timeout job, runner mất) thì lượt sau thấy `attempt` còn đó và xử lý như "không rõ kết quả" (giữ escrow,
     tìm kênh mồ côi, chặn miner 6 giờ) thay vì quên hẳn kênh và trần ngày.
+
+    `spend_room()` -> FLOP còn được cam kết hôm nay dưới trần CHUNG của mọi đường mua (None = không có trần chung).
 
     Chốt chặn theo TỪNG MINER (một miner hỏng không làm dừng miner khác): nghỉ sau lỗi / không có offer, giữ
     6 giờ khi không rõ kết quả, và không mở kênh mới với miner còn kênh LỖI chưa xong (có thể đang khoá FLOP).
@@ -932,6 +975,25 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
                     f"{float(ds['escrow']):.4g} — lượt sau tiếp")
         return f"đã cam kết {float(ds['escrow']):.4g} FLOP hôm nay, trần {cfg['per_day']:g}"
 
+    # Trần CHUNG mỗi ngày của cả hai đường mua (gateway + trực tiếp): caller trả số FLOP còn được cam kết lúc ĐẦU lượt
+    # (đã trừ phần đường kia và phần đường này đã cam kết). Trong lượt, trừ dần escrow vừa giữ.
+    try:
+        room0 = spend_room() if spend_room is not None else None
+        room0 = Decimal(str(room0)) if room0 is not None else None
+    except Exception as e:
+        room0 = Decimal(0)                                  # không tính được hạn mức chung -> an toàn: không mở phiên
+        log(f"[direct] không tính được trần chi chung ({type(e).__name__}) — không mở phiên lượt này")
+    esc0 = Decimal(str(ds["escrow"]))
+
+    def combined_left():
+        if room0 is None:
+            return None
+        return room0 - (Decimal(str(ds["escrow"])) - esc0)
+
+    def combined_reason():
+        return (f"chạm trần chi chung mỗi ngày (FLOP_MAX_SPEND_PER_DAY, cả gateway lẫn mua trực tiếp): còn "
+                f"{_flop_str(max(Decimal(0), combined_left()))} FLOP")
+
     bal = {"read": False, "avail": None}                 # số dư đọc MỘT lần mỗi lượt, trừ dần escrow đã đưa CLI
 
     def avail():
@@ -1049,6 +1111,14 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
                             break
                         if left < cap_eff:
                             cap_eff, limiter = left, cap_kind
+                    # Trần CHUNG cả hai đường mua (FLOP_MAX_SPEND_PER_DAY, caller tính): cũng thu phiên cho vừa.
+                    left_c = combined_left()
+                    if left_c is not None:
+                        if left_c <= 0:
+                            last = ("daily_cap", combined_reason())
+                            break
+                        if left_c < cap_eff:
+                            cap_eff, limiter = left_c, "combined"
                     # Số dư ví cũng vậy: chi hết phần đang có bằng một phiên nhỏ hơn, không gọi CLI để nhận lỗi thiếu tiền.
                     av = avail()
                     if av is not None:
@@ -1062,18 +1132,34 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
                         cap_gfs=float(cap or cfg["default_cap"]), price=Decimal(str(price or DEFAULT_PRICE_PER_GN)),
                         min_escrow=info["min_escrow"], escrow_cap=cap_eff,
                         settle_target=min(cfg["settle_target"], cfg["timeout"] - 60),
-                        margin=cfg["margin"], max_duration=info["min_duration"])
+                        margin=cfg["margin"], max_duration=info["min_duration"],
+                        max_overpay=cfg["max_overpay"] or None, overpay_min=cfg["overpay_min"])
                     if plan is None:
-                        if limiter == "low_balance" and "trần" in why:
+                        # Hạn mức (trần ngày / trần chung / số dư) đã thu nhỏ phiên: phiên nhỏ không vừa trần escrow, hoặc
+                        # minEscrow thành "quá đắt" so với phiên nhỏ — lỗi của hạn mức, không phải của miner: không phạt
+                        # miner 1 giờ, chỉ dừng lượt.
+                        squeezed = limiter and ("trần" in why or "quá đắt" in why)
+                        if squeezed and limiter == "low_balance":
                             last = ("low_balance", f"số dư khả dụng {_flop_str(cap_eff)} FLOP không đủ một phiên")
                             break
-                        if limiter and "trần" in why:
+                        if squeezed and limiter == "combined":
+                            last = ("daily_cap", f"phần trần chung còn lại ({_flop_str(cap_eff)} FLOP, "
+                                                 "FLOP_MAX_SPEND_PER_DAY) không đủ một phiên")
+                            break
+                        if squeezed:
                             last = (cap_kind, f"phần trần {'tới giờ này' if paced else 'ngày'} còn lại "
                                               f"({_flop_str(cap_eff)} FLOP) không đủ một phiên")
                             break
-                        st.update(wait_until=now + ERROR_BACKOFF_SEC, wait_why="session sizing")
+                        overpriced = "quá đắt" in why
+                        st.update(wait_until=now + ERROR_BACKOFF_SEC,
+                                  wait_why="offer overpriced" if overpriced else "session sizing")
+                        if overpriced and not st.get("overpay_alerted"):
+                            st["overpay_alerted"] = now
+                            alert(f"⚠️ FLOP direct: KHÔNG mua của miner {m['miner'][:8]}… — {why}. Escrow là chi phí (settle "
+                                  "hợp tác trả cả escrow); nới FLOP_DIRECT_MAX_OVERPAY nếu chấp nhận giá này.")
                         last = ("no_offer", why)
                         continue
+                    st.pop("overpay_alerted", None)
                     max_flop, tokens = plan["escrow"], plan["max_tokens"]
                     plan = {**plan, "model_hash": mh}
                 elif Decimal(max_flop) < Decimal(esc):
@@ -1088,6 +1174,10 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
             per_session = float(max_flop)
             if cfg["per_day"] > 0 and float(ds["escrow"]) + per_session > limit + 1e-9:
                 last = (cap_kind, cap_reason())
+                break
+            left_c = combined_left()
+            if left_c is not None and Decimal(max_flop) > left_c:
+                last = ("daily_cap", combined_reason())
                 break
             av = avail()
             if av is not None and Decimal(max_flop) > av:
