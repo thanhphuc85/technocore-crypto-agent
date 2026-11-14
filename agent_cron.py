@@ -1930,6 +1930,8 @@ def _miner_stats_key() -> str:
     mode = token_manager.ledger_mode()
     return "miner_stats" if mode == "simulation" else f"miner_stats_{mode}"
 LEDGER_KV_ENTRY_CAP = 20         # ~3.6KB, chừa dư địa cho phần còn lại
+LEDGER_KV_GATEWAY_REFS_MIN = 20  # /keys/me/receipts trả 20 biên nhận gần nhất: ít hơn chừng này là có thể ghi trùng
+_LEDGER_REF_KEYS = ("gateway_refs", "direct_refs")
 
 
 def _ledger_spent_magnitude(led) -> float:
@@ -2005,10 +2007,16 @@ def hydrate_ledger_from_kv(state: dict = None, private_key=None) -> None:
         local = token_manager.load_ledger()
         # CHẶT CHẼ (>) chứ không phải >=: hoà nhau thì GIỮ bản local. Bản local là bản vừa
         # được ghi trong run này, lấy bản bền khi hoà chỉ tạo thêm cơ hội tua ngược.
-        if _ledger_progress(best[1]) > _ledger_progress(local):
-            token_manager.save_ledger(best[1])
-            if best[0] != "KV":
-                print("[ledger] dùng bản sao trong state.json (bản KV cũ hơn — lần ghi KV trước lỗi)")
+        use_best = _ledger_progress(best[1]) > _ledger_progress(local)
+        target = dict(best[1]) if use_best else local
+        # Dấu biên nhận / kênh đã ghi sổ: GỘP từ mọi nguồn hợp lệ cùng chế độ. Bản KV có thể đã cắt bớt dấu gateway cho
+        # vừa 8192; thêm dấu chỉ làm chặt chống ghi trùng, không bao giờ làm mất một khoản chi.
+        others = [d for _, d in cands if _valid_ledger(d) and d.get("mode") in (None, mode)] + [local]
+        merged = _union_ledger_refs(target, others)
+        if use_best or merged:
+            token_manager.save_ledger(target)
+        if use_best and best[0] != "KV":
+            print("[ledger] dùng bản sao trong state.json (bản KV cũ hơn — lần ghi KV trước lỗi)")
     except Exception as e:
         print(f"[ledger] hydrate bỏ qua ({str(e)[:80]})")
 
@@ -2113,6 +2121,26 @@ def hydrate_miner_stats(state: dict, private_key=None) -> dict:
     return body if isinstance(body, dict) else {}
 
 
+def _union_ledger_refs(target: dict, others) -> bool:
+    """Thêm vào `target` các dấu ghi sổ (gateway_refs / direct_refs) chỉ có ở `others`. Dấu của target (bản được chọn,
+    mới nhất) đứng SAU nên được giữ khi cắt theo trần. True nếu target đổi."""
+    import token_manager
+    keep = {"gateway_refs": token_manager.GATEWAY_REFS_KEEP, "direct_refs": token_manager.DIRECT_REFS_KEEP}
+    changed = False
+    for k in _LEDGER_REF_KEYS:
+        own = [x for x in (target.get(k) or []) if isinstance(x, str)]
+        seen, extra = set(own), []
+        for d in others:
+            for x in (d.get(k) or []) if isinstance(d, dict) and isinstance(d.get(k), list) else []:
+                if isinstance(x, str) and x not in seen:
+                    seen.add(x)
+                    extra.append(x)
+        if extra:
+            target[k] = (extra + own)[-keep[k]:]
+            changed = changed or target[k] != own
+    return changed
+
+
 def persist_ledger_to_kv(private_key, did) -> None:
     """Đẩy sổ cái token lên KV (nguồn bền chung mọi runner). Cắt entries còn LEDGER_ENTRY_CAP
     gần nhất để BOUNDED — balances là tổng chạy (KHÔNG suy từ entries) nên cắt log KHÔNG sai số dư."""
@@ -2162,22 +2190,27 @@ def persist_ledger_to_kv(private_key, did) -> None:
                 "direct_count": led.get("direct_count", {}),
                 "direct_since_ok": led.get("direct_since_ok", {})}
         entries = (led.get("entries", []) or [])
+        # Bản sao ĐẦY ĐỦ vào state.json TRƯỚC, không phụ thuộc cỡ KV: Actions cache không có trần 8192. Trước đây sổ quá
+        # cỡ thì hàm thoát trước dòng này -> CẢ HAI bản bền ngừng cập nhật và mỗi run sổ tua về bản cũ.
+        save_state({_ledger_snapshot_key(): {**base, "entries": entries[-LEDGER_KV_ENTRY_CAP:]}})
         body = None
         # Cắt dần tới khi VỪA giới hạn. Số dư và các tổng chạy không suy từ entries, nên
-        # mất log cũ không làm sai số liệu — mất cả bản ghi mới là sai.
+        # mất log cũ không làm sai số liệu — mất cả bản ghi mới là sai. Còn quá cỡ thì bớt dấu biên nhận gateway:
+        # /keys/me/receipts chỉ trả 20 biên nhận gần nhất nên giữ 40 vẫn đủ chống ghi trùng (dấu kênh trực tiếp giữ đủ).
         sealed = None
-        for cap in (LEDGER_KV_ENTRY_CAP, 10, 5, 0):
-            obj = {**base, "entries": entries[-cap:] if cap else []}
+        gw_refs = base["gateway_refs"]
+        for cap, gw_keep in ((LEDGER_KV_ENTRY_CAP, None), (10, None), (5, None), (0, None),
+                             (0, LEDGER_KV_GATEWAY_REFS_MIN * 2), (0, LEDGER_KV_GATEWAY_REFS_MIN)):
+            obj = {**base, "entries": entries[-cap:] if cap else [],
+                   "gateway_refs": gw_refs[-gw_keep:] if gw_keep else gw_refs}
             cand = _kv_seal(private_key, obj, _ledger_kv_key())           # đo CẢ phần niêm phong
             if len(cand) <= KV_VALUE_MAX:
                 body, sealed = json.dumps(obj, ensure_ascii=False), cand
                 break
         if body is None:
-            print(f"[ledger] KHÔNG đẩy được lên KV — ngay cả bản không entries vẫn "
-                  f"> {KV_VALUE_MAX} ký tự")
+            print(f"[ledger] ⚠️ KHÔNG đẩy được lên KV — ngay cả bản tối thiểu vẫn > {KV_VALUE_MAX} ký tự "
+                  "(bản sao trong state.json vẫn được lưu)")
             return
-        # Bản sao vào state.json TRƯỚC khi ghi KV: Actions cache lưu nó dù KV lỗi.
-        save_state({_ledger_snapshot_key(): json.loads(body)})
         if not kv_set(private_key, did, _ledger_kv_key(), sealed):
             # Im lặng ở đây nghĩa là sổ cái NGỪNG BỀN mà không ai biết — đúng lỗi vừa rồi.
             print(f"[ledger] ⚠️ ĐẨY KV THẤT BẠI ({len(body)} ký tự) — sổ cái KHÔNG còn bền, "
