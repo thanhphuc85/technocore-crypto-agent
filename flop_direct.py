@@ -490,11 +490,16 @@ def classify_channel(info, addr: str):
     được coi "settled mà chưa PAID" là hoàn tiền — bỏ nó là bỏ luôn khoản chi chờ finalize."""
     if not isinstance(info, dict):
         return "missing", 0.0
-    if info.get("agent") and not fg.same_account(info.get("agent"), addr):
+    # Explorer thật (devnet, 2026-11-14) LUÔN trả `agent` và `observationHead` ở cả danh sách lẫn từng kênh. Thiếu một
+    # trong hai = phản hồi lạ: không ghi sổ, không coi là đã xong (trước đây thiếu `agent` -> coi là ví mình, thiếu
+    # `observationHead` -> coi là finalized).
+    if not info.get("agent"):
+        return "open", 0.0
+    if not fg.same_account(info.get("agent"), addr):
         return "foreign", 0.0
     status = str(info.get("status") or "").lower()
     pay = str(info.get("paymentStatus") or "").upper()
-    final = str(info.get("observationHead") or "finalized").lower() == "finalized"
+    final = str(info.get("observationHead") or "").lower() == "finalized"
     if pay == "PAID" and final:
         try:
             raw = int(str(info.get("minerPaid") or 0)) + int(str(info.get("burned") or 0))
@@ -946,31 +951,9 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
     g["pending"] = keep[-PENDING_KEEP:]
     out["booked_flop"] = round(out["booked_flop"], 9)
     g["miners"] = ms                          # công suất vừa học không mất khi lượt dừng sớm ở các chốt dưới
-    if not enabled():
-        g["miners"] = ms
-        return done("off", reason="đã tắt — chỉ đối soát kênh còn chờ")
-    cfg, errs = config()
-    if errs:
-        g["miners"] = ms
-        return done("unconfigured", reason="; ".join(errs)[:300])
-    deny_all = [d.strip() for d in list(deny or ()) + _env("FLOP_DIRECT_DENY_MINERS").split(",")
-                if d.strip() and fg.account_pubkey(d.strip()) is not None]
-    miners, refused = [], []
-    for m in cfg["miners"]:
-        if fg.same_account(m["miner"], addr):
-            refused.append("miner là chính ví agent — tự giao dịch không được tính")
-        elif any(fg.same_account(d, m["miner"]) for d in deny_all):
-            refused.append("miner nằm trong danh sách chặn (independent demand only)")
-        else:
-            miners.append(m)
-    if not miners:
-        g["miners"] = ms
-        return done("refused", reason="; ".join(dict.fromkeys(refused))[:300])
-
-    def mstate(m):
-        return ms.setdefault(_mkey(m["miner"]), {})
-
-    # Settle cưỡng bức đã qua cửa sổ tranh chấp -> tự finalize (tối đa FINALIZE_MAX_TRIES lần, mỗi ngày một lần).
+    # Settle cưỡng bức đã qua cửa sổ tranh chấp -> tự finalize (tối đa FINALIZE_MAX_TRIES lần, mỗi ngày một lần). Chạy
+    # TRƯỚC các chốt "đã tắt / cấu hình lỗi / mọi miner bị chặn": tắt mua trực tiếp không được để escrow của kênh cũ
+    # nằm khoá mãi và chi tiêu của nó không bao giờ được tính.
     if to_finalize and (deadline is None or clock() + 120 + 180 * len(to_finalize) < deadline):
         results = finalize_channels(to_finalize, wkey=wkey, addr=addr, network=network, runner=runner, log=log,
                                     alert=alert)
@@ -983,6 +966,26 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
                 elif p["fin_tries"] >= FINALIZE_MAX_TRIES:
                     alert(f"⚠️ FLOP direct: finalize kênh settle cưỡng bức {p['channel'][:18]}… thất bại "
                           f"{p['fin_tries']} lần ({info_s[:100]}) — FLOP còn khoá, chi tiêu chưa được tính; kiểm tay.")
+    if not enabled():
+        return done("off", reason="đã tắt — chỉ đối soát kênh còn chờ")
+    cfg, errs = config()
+    if errs:
+        return done("unconfigured", reason="; ".join(errs)[:300])
+    deny_all = [d.strip() for d in list(deny or ()) + _env("FLOP_DIRECT_DENY_MINERS").split(",")
+                if d.strip() and fg.account_pubkey(d.strip()) is not None]
+    miners, refused = [], []
+    for m in cfg["miners"]:
+        if fg.same_account(m["miner"], addr):
+            refused.append("miner là chính ví agent — tự giao dịch không được tính")
+        elif any(fg.same_account(d, m["miner"]) for d in deny_all):
+            refused.append("miner nằm trong danh sách chặn (independent demand only)")
+        else:
+            miners.append(m)
+    if not miners:
+        return done("refused", reason="; ".join(dict.fromkeys(refused))[:300])
+
+    def mstate(m):
+        return ms.setdefault(_mkey(m["miner"]), {})
 
 
     # 2) Chốt chung.
@@ -1278,6 +1281,9 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
             rc, so, se = runner(cmd, env_run, sess_timeout)
             g.pop("attempt", None)
             dirty = True
+            # Đề đã gửi tới miner (kể cả khi kết quả không rõ / kênh lỗi): xoay sang đề khác. Trước đây chỉ xoay khi
+            # thành công -> phiên sau gửi LẠI cùng đề, prompt_hash trùng trên chain (tín hiệu lặp việc).
+            g["prompt_idx"] = int(g.get("prompt_idx") or 0) + 1
             if rc is None:
                 st["unknown_until"] = now + UNKNOWN_HOLD_SEC
                 _mark_orphan(g, now, network, max_flop, **orphan_kw)
@@ -1322,7 +1328,6 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
                 else:
                     st.pop("empty_streak", None)
                 g["pending"] = g["pending"] + [rec]
-                g["prompt_idx"] = int(g.get("prompt_idx") or 0) + 1
                 out["opened"] += 1
                 out["sessions"].append({"miner": m["miner"], "channel": ch, "escrow": max_flop, "max_tokens": tokens})
                 st["sessions"] = int(st.get("sessions") or 0) + 1

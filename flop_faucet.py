@@ -66,6 +66,9 @@ def faucet_amount() -> str:
 
 
 AUTO_PROBE_HOURS = 1.0
+# Một lần claim lớn hơn số này là phi lý (mức cao nhất đã thấy: Verified 2000 FLOP): thường là số ở đơn vị raw (1e-18)
+# trong trường FLOP. Không ghi sổ — ghi vào là sổ có FLOP không tồn tại (ngân sách "auto" của pacer chi theo nó).
+DEFAULT_MAX_CREDIT = 100000.0
 # Claim LỖI (mạng, 4xx/5xx, thân báo lỗi) cũng phải lùi: không thì run 5 phút sau gõ lại ngay,
 # tức ~12 lần/giờ vào đúng lúc faucet đang từ chối.
 ERROR_BACKOFF_SEC = 3600
@@ -325,6 +328,20 @@ def run_faucet_cycle(claim_fn=None, token: str = None, now: int = None,
         _save(st, faucet_state)
         return {"outcome": "claimed_zero", "amount": "0",
                 "reason": f"faucet trả số lượng {raw_amt!r} — không ghi sổ"}
+    try:
+        max_credit = float(os.environ.get("FLOP_FAUCET_MAX_CREDIT", "").strip() or DEFAULT_MAX_CREDIT)
+    except ValueError:
+        max_credit = DEFAULT_MAX_CREDIT
+    if parsed is not None and max_credit > 0 and parsed > max_credit:
+        rec = st.setdefault(token, {})
+        rec["last_claim_ts"] = now
+        if nxt:
+            rec["next_claim_ts"] = nxt
+        rec["claims"] = {day: claims_today + 1}
+        _save(st, faucet_state)
+        return {"outcome": "claimed_implausible", "amount": amt,
+                "reason": (f"faucet báo cấp {amt} {token} > trần hợp lý {max_credit:g} (FLOP_FAUCET_MAX_CREDIT) — có "
+                           "thể là đơn vị raw; KHÔNG ghi sổ, đối chiếu số dư trên chain")}
     cr = tm.credit(amt, token=token, memo="faucet claim", path=ledger_path) if amt is not None else {}
     rec = st.setdefault(token, {})
     rec["last_claim_ts"] = now

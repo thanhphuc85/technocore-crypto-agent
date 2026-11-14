@@ -120,7 +120,8 @@ class FakeRail:
     def __init__(self, ok=True):
         self.ok = ok
         self.claims = []
-    def verify_lock(self, contract, statement, refund_after_ms):
+    def verify_lock(self, contract, statement, refund_after_ms, amount=None):
+        self.amount_seen = amount
         return self.ok
     def claim(self, contract, preimage_hex, *, now_ms, refund_after_ms=None, dry_run=True):
         self.claims.append((contract, preimage_hex, dry_run))

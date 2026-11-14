@@ -174,31 +174,42 @@ def wallet_address(key) -> str:
 
 # --- két bearer: AES-GCM, khoá HKDF từ khoá agent ---------------------------------------
 
-def _vault_key(agent_key) -> bytes:
+def _vault_key(agent_key, info: bytes = _VAULT_INFO) -> bytes:
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.kdf.hkdf import HKDF
     return HKDF(algorithm=hashes.SHA256(), length=32, salt=None,
-                info=_VAULT_INFO).derive(_raw_priv(agent_key))
+                info=info).derive(_raw_priv(agent_key))
 
 
-def seal_bearer(agent_key, bearer: str) -> dict:
+def seal_secret(agent_key, text: str, info: bytes) -> dict:
+    """Mã hoá AES-GCM một bí mật để cất trong state.json (Actions cache — workflow PR của repo công khai đọc được).
+    Khoá dẫn xuất HKDF từ khoá agent, tách theo mục đích (`info`)."""
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     nonce = os.urandom(12)
-    ct = AESGCM(_vault_key(agent_key)).encrypt(nonce, bearer.encode("utf-8"), _VAULT_INFO)
+    ct = AESGCM(_vault_key(agent_key, info)).encrypt(nonce, text.encode("utf-8"), info)
     return {"n": base64.b64encode(nonce).decode(), "c": base64.b64encode(ct).decode()}
 
 
-def open_bearer(agent_key, blob):
-    """Bearer đã giải mã, hoặc None (thiếu/hỏng/khoá khác — vd bản fork, bản giả)."""
+def open_secret(agent_key, blob, info: bytes):
+    """Bí mật đã giải mã, hoặc None (thiếu/hỏng/khoá khác — vd bản fork, bản giả)."""
     if not isinstance(blob, dict) or agent_key is None:
         return None
     try:
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-        pt = AESGCM(_vault_key(agent_key)).decrypt(
-            base64.b64decode(blob["n"]), base64.b64decode(blob["c"]), _VAULT_INFO)
+        pt = AESGCM(_vault_key(agent_key, info)).decrypt(
+            base64.b64decode(blob["n"]), base64.b64decode(blob["c"]), info)
         return pt.decode("utf-8")
     except Exception:
         return None
+
+
+def seal_bearer(agent_key, bearer: str) -> dict:
+    return seal_secret(agent_key, bearer, _VAULT_INFO)
+
+
+def open_bearer(agent_key, blob):
+    """Bearer đã giải mã, hoặc None (thiếu/hỏng/khoá khác — vd bản fork, bản giả)."""
+    return open_secret(agent_key, blob, _VAULT_INFO)
 
 
 # --- HTTP -------------------------------------------------------------------------------

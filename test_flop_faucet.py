@@ -299,3 +299,16 @@ def test_merge_state_drops_far_future_stamps():
     m = ff.merge_state({"FLOP": {"last_claim_ts": now - 100}},
                        {"FLOP": {"last_claim_ts": now + 10**6, "next_claim_ts": now + 10**8}})
     assert m["FLOP"]["last_claim_ts"] == now - 100 and m["FLOP"].get("next_claim_ts", 0) == 0
+
+
+
+# --- L5: số lượng faucet phi lý không vào sổ --------------------------------------------------------------------------
+
+def test_implausible_faucet_amount_is_not_credited(paths, monkeypatch):
+    monkeypatch.setenv("FLOP_FAUCET_ENABLED", "true")
+    monkeypatch.setenv("FLOP_FAUCET_URL", "https://faucet.test")
+    r = ff.run_faucet_cycle(claim_fn=lambda req: {"amount": str(25 * 10 ** 18)}, now=1_000_000,
+                            log=lambda m: None, **paths)
+    assert r["outcome"] == "claimed_implausible" and "FLOP_FAUCET_MAX_CREDIT" in r["reason"]
+    assert tm.check_balance("FLOP", path=paths["ledger_path"]) == "0"
+    assert ff.run_faucet_cycle(claim_fn=CLAIM_OK, now=1_000_060, **paths)["outcome"] == "skipped_cooldown"
