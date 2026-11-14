@@ -332,11 +332,18 @@ def run_faucet_cycle(claim_fn=None, token: str = None, now: int = None,
         max_credit = float(os.environ.get("FLOP_FAUCET_MAX_CREDIT", "").strip() or DEFAULT_MAX_CREDIT)
     except ValueError:
         max_credit = DEFAULT_MAX_CREDIT
+    if max_credit != max_credit or max_credit in (float("inf"), float("-inf")):
+        max_credit = DEFAULT_MAX_CREDIT                  # 'nan'/'inf' không được tắt chốt này
     if parsed is not None and max_credit > 0 and parsed > max_credit:
         rec = st.setdefault(token, {})
         rec["last_claim_ts"] = now
         if nxt:
             rec["next_claim_ts"] = nxt
+        if cap is None:                                  # như nhánh thường: đếm cộng dồn cả khi chưa đặt trần
+            try:
+                claims_today = int(rec.get("claims", {}).get(day, 0))
+            except (TypeError, ValueError, AttributeError):
+                claims_today = 0
         rec["claims"] = {day: claims_today + 1}
         _save(st, faucet_state)
         return {"outcome": "claimed_implausible", "amount": amt,

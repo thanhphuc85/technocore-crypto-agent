@@ -312,3 +312,23 @@ def test_implausible_faucet_amount_is_not_credited(paths, monkeypatch):
     assert r["outcome"] == "claimed_implausible" and "FLOP_FAUCET_MAX_CREDIT" in r["reason"]
     assert tm.check_balance("FLOP", path=paths["ledger_path"]) == "0"
     assert ff.run_faucet_cycle(claim_fn=CLAIM_OK, now=1_000_060, **paths)["outcome"] == "skipped_cooldown"
+
+
+def test_implausible_claim_keeps_counting_without_a_daily_cap(paths, monkeypatch):
+    monkeypatch.setenv("FLOP_FAUCET_ENABLED", "true")
+    monkeypatch.setenv("FLOP_FAUCET_URL", "https://faucet.test")
+    monkeypatch.setenv("FLOP_FAUCET_COOLDOWN_HOURS", "0")
+    day = "1970-01-12"                                                   # ngày UTC của now=1_000_000
+    ff.run_faucet_cycle(claim_fn=CLAIM_OK, now=1_000_000, log=lambda m: None, **paths)
+    ff.run_faucet_cycle(claim_fn=lambda req: {"amount": str(10 ** 20)}, now=1_000_100, log=lambda m: None, **paths)
+    st = json.load(open(paths["faucet_state"], encoding="utf-8"))
+    assert st["FLOP"]["claims"][day] == 2                                 # trước: bị đặt lại về 1
+
+
+def test_nan_max_credit_does_not_disable_the_check(paths, monkeypatch):
+    monkeypatch.setenv("FLOP_FAUCET_ENABLED", "true")
+    monkeypatch.setenv("FLOP_FAUCET_URL", "https://faucet.test")
+    monkeypatch.setenv("FLOP_FAUCET_MAX_CREDIT", "nan")
+    r = ff.run_faucet_cycle(claim_fn=lambda req: {"amount": str(10 ** 20)}, now=1_000_000, log=lambda m: None, **paths)
+    assert r["outcome"] == "claimed_implausible"
+    assert tm.check_balance("FLOP", path=paths["ledger_path"]) == "0"
