@@ -6,9 +6,9 @@ KHÔNG thể đo baseline từ bên ngoài — DELIVER của ta thưa (≤2/run)
 ATTEST tới. Điểm quan sát tin cậy DUY NHẤT là chính agent: nó biết chính xác nó đã bàn
 giao job nào với nội dung gì.
 
-Cách quy kết: theo JOBID. /r/kibble khoá 1 job cho 1 worker (đo live: mọi job chỉ có đúng
-1 DELIVER), nên ATTEST cùng jobid CHẮC CHẮN nói về deliverable của ta — jobid là khoá không
-mơ hồ. Nhiều ATTEST/1 jobid -> lấy đa số phiếu useful/not; hoà -> chưa chốt (giữ pending).
+Cách quy kết: theo JOBID, CHỈ phiếu đăng SAU lúc ta giao. Nhận định cũ "mỗi job đúng 1 DELIVER" KHÔNG còn đúng (đo
+2026-11-14: mọi job có 2–4 worker giao) — bộ đếm cũ vì thế lệch LÊN; bộ SẠCH (CLEAN_KEY) với job nhiều người giao chỉ
+nhận phiếu có rh khớp bài của ta. Nhiều ATTEST/1 jobid -> lấy đa số phiếu useful/not; hoà -> chưa chốt (giữ pending).
 `rh:<hash16>` (nếu có) chỉ là tín hiệu CỘNG THÊM: khớp một ứng viên hash -> xác nhận danh
 tính + LỘ recipe băm thật. QUAN TRỌNG: board thật BỎ `rh` ở verdict 'useful' (chỉ 'not' mới
 kèm rh), nên KHÔNG được dùng rh làm cổng — làm vậy thì 'useful' không bao giờ chốt được (đó
@@ -24,8 +24,10 @@ Thuần & test được: candidate_hashes / parse_attest_line / reconcile / summ
 """
 from __future__ import annotations
 
+import calendar
 import hashlib
 import re
+import time
 
 RH_LEN = 16                       # rh quan sát được = 16 hex (8 byte truncated)
 DELIVERIES_CAP = 300              # trần số delivery giữ trong state (chống phình)
@@ -45,6 +47,10 @@ _LT_FIELDS = ("useful", "not")
 # Còn lệch LÊN: phiếu 'useful' không kèm rh nên không tách được phiếu chấm bài người khác.
 # So hai giai đoạn trên CÙNG bộ đếm thì độ lệch triệt tiêu; đọc con số tuyệt đối thì thận trọng.
 CLEAN_KEY = "kibble_lifetime_clean"
+# Đo lại 2026-11-14 trên board: 6/6 job có DELIVER đều có 2–4 worker giao, 29/35 ATTEST KHÔNG kèm rh. Thêm vào đó,
+# agent chạy 5 phút/lần nên giao SAU các bot vài phút, và tracker chấm trên chính buffer đã fetch TRƯỚC khi giao: mọi
+# ATTEST trong đó là chấm bài người khác. Nên (1) cả hai bộ đếm bỏ phiếu đăng TRƯỚC lúc ta giao, (2) bộ SẠCH, với job
+# có worker khác cùng giao ("shared"), chỉ nhận phiếu có rh khớp bài của ta.
 
 
 def _as_count(v) -> int:
@@ -156,8 +162,23 @@ def record_deliveries(state: dict, items, now_ms: int) -> None:
     state["kibble_deliveries"] = merged[-DELIVERIES_CAP:]
 
 
+def _msg_ts_ms(m):
+    """Giờ đăng tin (ms) từ trường `ts` ('2026-11-14T18:56:09.031936Z' hoặc số giây/ms); None nếu không có/không đọc được."""
+    v = (m or {}).get("ts")
+    if isinstance(v, (int, float)):
+        return int(v if v > 1e11 else v * 1000)
+    if isinstance(v, str) and v:
+        try:
+            base, _, frac = v.rstrip("Z").partition(".")
+            ms = int((frac + "000")[:3]) if frac.isdigit() else 0
+            return calendar.timegm(time.strptime(base, "%Y-%m-%dT%H:%M:%S")) * 1000 + ms
+        except ValueError:
+            return None
+    return None
+
+
 def reconcile(state: dict, messages, now_ms: int, expire_ms: int = 48 * 3600 * 1000,
-              deny_dids=None) -> dict:
+              deny_dids=None, my_did=None) -> dict:
     """Đối chiếu deliveries đang 'pending' với ATTEST trong `messages` (tại chỗ), quy kết theo
     JOBID. /r/kibble khoá 1 job cho 1 worker (đo live: 0 job có >1 DELIVER), nên ATTEST cùng
     jobid CHẮC CHẮN nói về deliverable CỦA TA — jobid là khoá quy kết không mơ hồ. `rh` chỉ là
@@ -165,14 +186,26 @@ def reconcile(state: dict, messages, now_ms: int, expire_ms: int = 48 * 3600 * 1
     verdict 'useful' (chỉ 'not' mới kèm rh), nên gate-theo-rh khiến 'useful' không bao giờ chốt
     được. Nhiều ATTEST/1 jobid -> lấy đa số phiếu (useful vs not); HOÀ phiếu -> để 'pending'
     (chưa ngã ngũ). Pending không thấy attest quá `expire_ms` -> 'unattested'. Trả summary dict.
-    Phiếu của DID trong `deny_dids` (PROACTIVE_DENY_DIDS) không được tính."""
+    Phiếu của DID trong `deny_dids` (PROACTIVE_DENY_DIDS) không được tính.
+
+    Phiếu đăng TRƯỚC lúc ta giao (`ts` của tin < `ts` của delivery) không bao giờ chấm bài của ta -> bỏ ở cả hai bộ
+    đếm. `my_did`: DELIVER của DID khác cho cùng jobid -> delivery "shared"; bộ SẠCH khi đó chỉ nhận phiếu có rh khớp
+    bài của ta (phiếu không kèm rh không tách được là chấm bài nào)."""
     deny = set(deny_dids or ())
     attests = []
+    others = {}                                  # jobid -> có DELIVER của worker KHÁC trong buffer
     for m in (messages or []):
-        if deny and ((m or {}).get("from") or (m or {}).get("did")) in deny:
+        sender = (m or {}).get("from") or (m or {}).get("did")
+        text = str((m or {}).get("text", ""))
+        if my_did and sender and sender != my_did and text.startswith("DELIVER v1 | "):
+            jid = text.split(" | ", 2)[1].strip() if text.count(" | ") >= 1 else ""
+            if _JOBID_RE.match(jid):
+                others[jid] = True
+        if deny and sender in deny:
             continue
-        a = parse_attest_line(str((m or {}).get("text", "")))
+        a = parse_attest_line(text)
         if a:
+            a["ts"] = _msg_ts_ms(m)
             attests.append(a)
     by_job = {}
     for a in attests:
@@ -186,7 +219,11 @@ def reconcile(state: dict, messages, now_ms: int, expire_ms: int = 48 * 3600 * 1
         clean_pending = d.get("clean") == "pending"      # bản ghi cũ (không có khoá) -> bỏ
         if not (old_pending or clean_pending):
             continue
-        job_atts = by_job.get(d.get("jobid"), [])
+        if others.get(d.get("jobid")):
+            d["shared"] = True                       # dính: worker khác cùng giao job này
+        sent = d.get("ts")
+        job_atts = [a for a in by_job.get(d.get("jobid"), [])
+                    if a.get("ts") is None or not isinstance(sent, (int, float)) or a["ts"] >= sent]
         if not job_atts:                         # chưa thấy attest nào cho jobid này
             if now_ms - d.get("ts", now_ms) > expire_ms:
                 if old_pending:
@@ -220,6 +257,8 @@ def reconcile(state: dict, messages, now_ms: int, expire_ms: int = 48 * 3600 * 1
             votes = [a for a in job_atts                 # bỏ phiếu 'not' chấm bài KHÁC
                      if not (a["verdict"].startswith("not") and a["rh"]
                              and cand_vals and a["rh"] not in cand_vals)]
+            if d.get("shared"):                          # nhiều worker: chỉ phiếu rh khớp bài của ta
+                votes = [a for a in votes if a["rh"] and a["rh"] in cand_vals]
             cu = sum(1 for a in votes if a["verdict"].startswith("useful"))
             cn = sum(1 for a in votes if a["verdict"].startswith("not"))
             if cu != cn:

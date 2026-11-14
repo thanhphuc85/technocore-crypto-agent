@@ -279,3 +279,43 @@ def test_merge_lifetime_works_for_clean_key():
     st = {kt.CLEAN_KEY: {"useful": 5, "not": 1}}
     kt.merge_lifetime(st, {"useful": 3, "not": 4}, key=kt.CLEAN_KEY)
     assert st[kt.CLEAN_KEY] == {"useful": 5, "not": 4}
+
+
+
+# --- quy kết phiếu: bỏ phiếu đăng TRƯỚC lúc giao; job nhiều người giao -> bộ sạch chỉ nhận rh khớp ---------------------
+
+ME, OTHER = "did:key:zMe", "did:key:zOther"
+
+
+def _iso(ms):
+    import time as _t
+    return _t.strftime("%Y-%m-%dT%H:%M:%S", _t.gmtime(ms // 1000)) + f".{ms % 1000:03d}000Z"
+
+
+def test_votes_posted_before_our_delivery_are_ignored():
+    st, t_deliver = {}, 1_800_000_000_000
+    kt.record_deliveries(st, [{"jobid": JID, "answer": BODY}], t_deliver)
+    msgs = [{"text": f"ATTEST v1 | {JID} | useful | x", "ts": _iso(t_deliver - 60_000), "from": "did:key:zA"}]
+    sm = kt.reconcile(st, msgs, t_deliver + 1000, my_did=ME)
+    assert sm["pending"] == 1 and sm["useful"] == 0                       # trước: chốt 'useful'
+    msgs = [{"text": f"ATTEST v1 | {JID} | useful | x", "ts": _iso(t_deliver + 30_000), "from": "did:key:zA"}]
+    assert kt.reconcile(st, msgs, t_deliver + 60_000, my_did=ME)["useful"] == 1
+
+
+def test_shared_job_clean_counter_needs_a_matching_rh():
+    st, t = {}, 1_800_000_000_000
+    kt.record_deliveries(st, [{"jobid": JID, "answer": BODY}], t)
+    msgs = [{"text": f"DELIVER v1 | {JID} | someone else's answer", "ts": _iso(t - 5000), "from": OTHER},
+            {"text": f"ATTEST v1 | {JID} | useful | no rh", "ts": _iso(t + 5000), "from": "did:key:zA"}]
+    kt.reconcile(st, msgs, t + 10_000, my_did=ME)
+    d = st["kibble_deliveries"][0]
+    assert d["shared"] is True and d["clean"] == "pending"                  # phiếu không rh: không tính cho bộ sạch
+    rh = kt.candidate_hashes(JID, BODY)["sha256/body"]
+    msgs = [{"text": f"ATTEST v1 | {JID} | useful | rh:{rh} | good", "ts": _iso(t + 9000), "from": "did:key:zB"}]
+    kt.reconcile(st, msgs, t + 20_000, my_did=ME)
+    assert st["kibble_deliveries"][0]["clean"] == "useful"
+
+
+def test_message_timestamps_parse():
+    assert kt._msg_ts_ms({"ts": "2026-11-14T18:56:09.031936Z"}) == 1794682569031
+    assert kt._msg_ts_ms({"ts": 1794682569}) == 1794682569000 and kt._msg_ts_ms({}) is None

@@ -6067,9 +6067,10 @@ def main():
                 try:
                     import flop_kibble_track as kt
                     if not KIBBLE_DRY_RUN and ks.get("delivered_items"):
-                        kt.record_deliveries(state, ks["delivered_items"], now * 1000)
+                        # Giờ giao THẬT (sau khi DELIVER đã đăng): phiếu ATTEST đăng trước mốc này không chấm bài của ta.
+                        kt.record_deliveries(state, ks["delivered_items"], int(time.time() * 1000))
                     sm = kt.reconcile(state, ks.get("messages", []), now * 1000,
-                                      deny_dids=PROACTIVE_DENY_DIDS)
+                                      deny_dids=PROACTIVE_DENY_DIDS, my_did=did)
                     save_state({"kibble_deliveries": state.get("kibble_deliveries", []),
                                 "kibble_lifetime": state.get("kibble_lifetime", {}),
                                 kt.CLEAN_KEY: state.get(kt.CLEAN_KEY, {})})
