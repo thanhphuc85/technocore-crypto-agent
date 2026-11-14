@@ -4788,3 +4788,31 @@ def test_hydrate_keeps_local_but_adds_missing_refs(monkeypatch):
     ac.hydrate_ledger_from_kv()
     assert len(saved) == 1 and saved[0]["balances"]["FLOP"] == "70"               # local vẫn thắng
     assert saved[0]["gateway_refs"] == ["gKV000000000000", "gLOCAL000000000"]
+
+
+def test_gateway_sees_todays_direct_escrow_after_cache_loss(monkeypatch):
+    """Mất Actions cache: bộ đếm escrow mua trực tiếp hôm nay chỉ còn trên KV, mà bước mua trực tiếp (nạp KV) chạy SAU
+    bước gateway. Trước bản sửa, trần CHUNG của gateway bỏ qua escrow đó (fuzz seed 30: 32.4 FLOP dưới trần 30)."""
+    import flop_direct as fd
+    import flop_gateway
+    now = 1_800_000_000
+    today = __import__("time").strftime("%Y-%m-%d", __import__("time").gmtime(now))
+    pk = _real_key()
+    sealed = ac._kv_seal(pk, fd.durable_view({"day": {"day": today, "escrow": 23.5}, "rev": 4}), ac.DIRECT_KV_KEY)
+    monkeypatch.setattr(ac, "kv_get", lambda key: sealed if key == ac.DIRECT_KV_KEY else None)
+    monkeypatch.setattr(ac, "save_state", lambda d: None)
+    monkeypatch.setenv("FLOP_GATEWAY_PROMPTS", "q")
+    monkeypatch.setenv("FLOP_MAX_SPEND_PER_DAY", "30")
+    monkeypatch.setenv("FLOP_DIRECT_ENABLED", "on")
+    monkeypatch.delenv("TESTNET_ENABLED", raising=False)
+    rooms = []
+    monkeypatch.setattr(flop_gateway, "run_step", lambda state, **k: rooms.append(k["spend_room"]()) or
+                        {"outcome": "pace_wait", "calls": 0})
+    st = {"gateway_inflight": {"day_spent": {"day": today, "spent": 6.5}, "at": now - 60}}   # cache mất, KV còn
+    ac.gateway_session_step(st, pk, now)
+    assert rooms == [pytest.approx(30 - 6.5 - 23.5)]
+    # Mua trực tiếp TẮT: không đọc KV thêm ở bước gateway (đường tắt có kiểm tra KV riêng, theo nhịp 6 giờ).
+    monkeypatch.setenv("FLOP_DIRECT_ENABLED", "off")
+    rooms.clear()
+    ac.gateway_session_step({"gateway_inflight": {"day_spent": {"day": today, "spent": 6.5}, "at": now - 60}}, pk, now)
+    assert rooms == [pytest.approx(30 - 6.5)]

@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Combined daily cap (`FLOP_MAX_SPEND_PER_DAY`) after an Actions cache loss: the gateway step runs before the direct
+  step, but only the direct step restored today's direct-escrow counter from KV. So in the first run after a cache
+  loss, the gateway computed its room as if no direct escrow had been committed today. The fuzz test found a day
+  at 32.4 FLOP against a cap of 30. The gateway step now restores the direct state from KV first when direct
+  buying is on. The fuzz test now also checks both daily caps, through mid-day cache losses, and models the
+  KV 8192-character limit.
 - Token ledger persistence: if the ledger was still over the 8192-character KV limit after dropping every
   entry, `persist_ledger_to_kv` returned before it saved the `state.json` snapshot. Both durable copies then
   stopped updating, so the ledger rolled back every run, including its receipt dedupe hashes. A full testnet

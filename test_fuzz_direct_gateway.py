@@ -4,7 +4,9 @@ Mỗi lượt có thể gặp nhiều sự cố cùng lúc: CLI bị ngắt sau 
 finalize sau 7 ngày), explorer sập, mất Actions cache (state.json + sổ cục bộ; KV còn), Telegram lỗi, chain reset.
 Bất biến: gateway đứng tên broker KHÔNG BAO GIỜ được xác nhận; không kênh nào ghi sổ hai lần; mỗi kênh PAID trên
 chain hoặc đã ghi sổ ĐÚNG số chain trả, hoặc còn được theo dõi (danh sách chờ / khoản giữ của lượt bị ngắt); bước
-direct không ném lỗi. FUZZ_SEEDS=<n> để chạy nhiều seed hơn (mặc định 8; đã chạy 130 seed khi viết)."""
+direct không ném lỗi; mỗi ngày UTC escrow trực tiếp RÒNG (kênh hoàn thì trả lại) <= FLOP_DIRECT_MAX_PER_DAY và cộng phần
+gateway thu (tính theo max_cost_flop gateway cưỡng chế) <= FLOP_MAX_SPEND_PER_DAY, kể cả khi mất cache giữa ngày; KV từ
+chối value > 8192 như service thật. FUZZ_SEEDS=<n> để chạy nhiều seed hơn (mặc định 8; đã chạy 130 seed khi viết)."""
 import hashlib
 import json
 import random
@@ -37,6 +39,10 @@ def test_fuzz(monkeypatch, tmp_path, seed, capsys):
            "FLOP_DIRECT_MODEL": "Qwen/Qwen3-14B", "FLOP_DIRECT_MAX_PER_DAY": "2000",
            "FLOP_DIRECT_PACE": rnd.choice(["on", "off"]), "FLOP_DIRECT_MAX_PER_RUN": str(rnd.choice([1, 2])),
            "FLOP_TESTNET_RADAR": "off"}
+    # Trần ngày: nguồn ngẫu nhiên RIÊNG để chuỗi sự cố của từng seed giữ nguyên như trước.
+    caps = random.Random(seed + 10 ** 6)
+    env["FLOP_MAX_SPEND_PER_DAY"] = caps.choice(["0", "30", "60", "2500"])     # 0 = tắt trần chung
+    env["FLOP_DIRECT_MAX_PER_DAY"] = caps.choice(["2000", "20"])
     for k, v in env.items():
         monkeypatch.setenv(k, v)
     monkeypatch.delenv("FLOP_SESSION_BACKEND", raising=False)
@@ -48,7 +54,8 @@ def test_fuzz(monkeypatch, tmp_path, seed, capsys):
     monkeypatch.setattr(ac, "load_state", lambda: json.loads(json.dumps(state)))
     monkeypatch.setattr(ac, "save_state", lambda d: state.update(json.loads(json.dumps(d))))
     kv = {}
-    monkeypatch.setattr(ac, "kv_set", lambda pk, did, k, v: kv.update({k: v}) or True)
+    # Như service thật: value > KV_VALUE_MAX bị từ chối (không ghi).
+    monkeypatch.setattr(ac, "kv_set", lambda pk, did, k, v: len(v) <= ac.KV_VALUE_MAX and (kv.update({k: v}) or True))
     monkeypatch.setattr(ac, "kv_get", lambda k: kv.get(k))
     for name in ("write_heartbeat", "_write_summary", "check_price_alert"):
         monkeypatch.setattr(ac, name, lambda *a, **k: None)
@@ -64,10 +71,23 @@ def test_fuzz(monkeypatch, tmp_path, seed, capsys):
     fake.receipts, fake.receipt_state = [], "settled"
     real = fake.__call__
 
+    day_spend = {}                                                  # ngày UTC -> {"direct": escrow cam kết, "gw": gateway thu}
+
+    def _book(kind, amount):
+        d = _clock.strftime("%Y-%m-%d", _clock.gmtime(_clock.time()))
+        day_spend.setdefault(d, {"direct": 0.0, "gw": 0.0})[kind] += amount
+
     def gw_http(method, url, headers=None, json=None, timeout=20):
         if url.endswith("/keys/me") and method == "GET":
             return Resp(data={"credential": "owner", "remaining_quota": fake.quota, "expires_at": None})
-        return real(method, url, headers=headers, json=json, timeout=timeout)
+        before = fake.quota
+        try:
+            return real(method, url, headers=headers, json=json, timeout=timeout)
+        finally:
+            if before - fake.quota > 0:
+                # Gateway THẬT cưỡng chế max_cost_flop của request (FakeGateway thì không): tính đúng hợp đồng đó.
+                cap = float((json or {}).get("max_cost_flop") or 0) or float("inf")
+                _book("gw", min(before - fake.quota, cap))
     fake.override = {}
     monkeypatch.setattr(ac, "_gateway_http", gw_http)
 
@@ -141,6 +161,8 @@ def test_fuzz(monkeypatch, tmp_path, seed, capsys):
         kind = rnd.choices(["ok", "timeout", "refund", "force"], [65, 10, 15, 10])[0]
         events.append(kind)
         born[cid] = (cur_run[0], kind)
+        if kind != "refund":                                       # trần ngày tính escrow RÒNG: kênh hoàn thì trả lại
+            _book("direct", esc / RAW)
         if kind == "refund":
             chain["balance"] += esc
             chain["channels"][cid] = dict(base, status="timedout", paymentStatus="REFUNDED", minerPaid="0")
@@ -207,6 +229,17 @@ def test_fuzz(monkeypatch, tmp_path, seed, capsys):
             held = bool(g.get("unknown_escrow")) and int(c["openedAt"]) // 1000 >= int(g.get("orphan_since") or 0) - 300
             if not booked and cid not in pend and not held:
                 problems.append(f"kênh PAID {cid[:10]} không ghi sổ cũng không theo dõi (sinh {born.get(cid)})")
+    # Trần ngày phải giữ cả khi mất Actions cache giữa ngày (bộ đếm ngày bền qua KV).
+    dcap = float(env["FLOP_DIRECT_MAX_PER_DAY"])
+    ccap = float(env["FLOP_MAX_SPEND_PER_DAY"])
+    for d, v in sorted(day_spend.items()):
+        if v["direct"] > dcap + 1e-9:
+            problems.append(f"{d}: escrow trực tiếp {v['direct']:.4f} > FLOP_DIRECT_MAX_PER_DAY {dcap}")
+        if ccap > 0 and v["direct"] + v["gw"] > ccap + 1e-9:
+            problems.append(f"{d}: chi chung {v['direct'] + v['gw']:.4f} (trực tiếp {v['direct']:.4f} + gateway "
+                            f"{v['gw']:.4f}) > FLOP_MAX_SPEND_PER_DAY {ccap}")
+    if not any(v["direct"] + v["gw"] > 0 for v in day_spend.values()):
+        problems.append("không lượt nào chi: kịch bản không kiểm được gì")
     for bad in ("[direct] bỏ qua (", "Traceback", "[real-spend] bộ canh mua trực tiếp bỏ qua"):
         if bad in out:
             problems.append(f"lỗi trong log: {bad} -> {out[out.index(bad):out.index(bad) + 160]!r}")

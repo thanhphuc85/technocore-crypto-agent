@@ -5340,6 +5340,16 @@ def gateway_session_step(state: dict, private_key, now: int):
         state[flop_gateway.KEY] = {**_g, **_restore, "profile": _g.get("profile") or _gi.get("profile")
                                    or flop_gateway.profile_of(expect)}
 
+    # Trần CHUNG (FLOP_MAX_SPEND_PER_DAY) trừ cả escrow mua trực tiếp đã cam kết hôm nay. Mất Actions cache thì bộ đếm đó chỉ
+    # còn trên KV, mà bước mua trực tiếp (nạp KV) chạy SAU bước này -> nạp trước, nếu không gateway tính trần như thể hôm
+    # nay chưa cam kết escrow nào (fuzz seed 30: 32.4 FLOP dưới trần 30). Gọi lại trong direct_session_step là vô hại.
+    import flop_direct as _fd
+    if _fd.enabled():
+        try:
+            direct_kv_hydrate(state, private_key)
+        except Exception as e:
+            print(f"[gateway] không nạp được trạng thái mua trực tiếp từ KV ({type(e).__name__})")
+
     r = flop_gateway.run_step(
         state, agent_key=private_key, now=now, prompts=prompts, expect_network=expect,
         http=_gateway_http,
