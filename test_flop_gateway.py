@@ -1420,3 +1420,40 @@ def test_lag_alert_is_silent_while_the_attribution_gate_holds():
     g2 = {"window": {"total": 100.0, "spent": 0.0, "start": NOW, "horizon": NOW + 24 * 3600}}
     alerts = [gw.lag_status(g2, NOW + h * 3600, "rate_limited", **kw)[1] for h in range(0, 8)]
     assert any(alerts)                                             # lý do khác vẫn báo như cũ
+
+
+# --- trần CHUNG mỗi ngày của cả hai đường mua (spend_room) -------------------------------------------------------------
+
+def _chats(fake):
+    return [p for p in fake.paths() if p == "/v1/chat/completions"]
+
+
+def test_combined_room_limits_what_the_gateway_spends():
+    base = FakeGateway(expires_ms=SOON)
+    assert _run({}, base)["calls"] == 2                            # không có trần chung: 2 lần gọi (1.8 FLOP)
+    fake = FakeGateway(expires_ms=SOON)
+    r = _run({}, fake, spend_room=lambda: 1.0)
+    assert r["outcome"] == "spent" and len(_chats(fake)) == 1 and r["spent"] <= 1.0
+
+
+@pytest.mark.parametrize("room", [0.0, -3.0])
+def test_exhausted_combined_room_stops_the_gateway(room):
+    fake = FakeGateway(expires_ms=SOON)
+    r = _run({}, fake, spend_room=lambda: room)
+    assert r["outcome"] == "daily_cap" and "FLOP_MAX_SPEND_PER_DAY" in r["reason"] and _chats(fake) == []
+
+
+def test_a_failing_combined_room_is_treated_as_no_room():
+    def boom():
+        raise RuntimeError("x")
+    fake = FakeGateway(expires_ms=SOON)
+    assert _run({}, fake, spend_room=boom)["outcome"] == "daily_cap" and _chats(fake) == []
+
+
+def test_nan_daily_cap_falls_back_to_the_default(monkeypatch):
+    monkeypatch.setenv("FLOP_GATEWAY_MAX_PER_DAY", "nan")
+    day = time.strftime("%Y-%m-%d", time.gmtime(NOW))
+    fake = FakeGateway(expires_ms=SOON)
+    r = _run({gw.KEY: {"profile": gw.profile_of("devnet"),
+                       "day_spent": {"day": day, "spent": gw.DEFAULT_MAX_PER_DAY + 1}}}, fake)
+    assert r["outcome"] == "daily_cap" and _chats(fake) == []      # trước: nan tắt trần, vẫn mua

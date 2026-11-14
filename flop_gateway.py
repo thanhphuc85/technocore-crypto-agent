@@ -61,10 +61,13 @@ def _env(name: str, default: str = "") -> str:
 
 
 def _env_num(name: str, default: float) -> float:
+    """Số từ biến môi trường; rác hoặc không hữu hạn ('nan', 'inf') -> mặc định. `nan` từng TẮT trần chi: mọi phép so
+    với nan đều sai, nên `day_cap > 0` không bao giờ đúng."""
     try:
-        return float(_env(name) or default)
+        v = float(_env(name) or default)
     except ValueError:
         return float(default)
+    return v if math.isfinite(v) else float(default)
 
 
 def base_url() -> str:
@@ -972,7 +975,7 @@ def profile_of(expect_network: str) -> str:
 def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_network: str,
              book_fn=None, sleep=time.sleep, log=print, rng=None, deadline=None,
              clock=time.time, answer_fn=None, checkpoint=None, new_key=None,
-             channel_fn=None, gate=None, after_book=None, probe=None) -> dict:
+             channel_fn=None, gate=None, after_book=None, probe=None, spend_room=None) -> dict:
     """Một nhịp mua compute. Trả {"outcome", "calls", "spent", ...}; KHÔNG ném lỗi.
 
     `book_fn(amount, ref, model)` ghi sổ (chỉ khi mạng khớp `expect_network`); None = chạy
@@ -1000,7 +1003,10 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
     không có miner). Kết quả có `miners` và `foreign_channels` = số kênh KHÔNG đứng tên ví mình.
 
     Quota gateway là FLOP (flop.network/llms.txt). FLOP_GATEWAY_BUDGET_FLOP > 0 -> nhịp chi rải theo
-    ngân sách đó thay vì cả quota (xem _flop_budget); trần ngày vẫn là FLOP_GATEWAY_MAX_PER_DAY."""
+    ngân sách đó thay vì cả quota (xem _flop_budget); trần ngày vẫn là FLOP_GATEWAY_MAX_PER_DAY.
+
+    `spend_room()` -> FLOP còn được chi hôm nay dưới trần CHUNG của mọi đường mua (None = không có), đọc một lần trước
+    khi định phần đến hạn; <= 0 -> `daily_cap`."""
     import uuid
     new_key = new_key or (lambda: str(uuid.uuid4()))
     t0 = clock()                             # mốc đồng hồ đầu lượt: giờ gửi = now + (clock() - t0)
@@ -1572,6 +1578,20 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
         if day_cap > 0 and day_left <= 0:
             return done("daily_cap", due=round(due, 6), remaining=remaining, budget=_avail_out(fb),
                         reason=f"đã chi {g['day_spent']['spent']} FLOP hôm nay, trần {day_cap:g}")
+        room_c = None                                      # trần CHUNG cả hai đường mua (caller tính)
+        if spend_room is not None:
+            try:
+                room_c = spend_room()
+                room_c = None if room_c is None else float(room_c)
+                if room_c is not None and not math.isfinite(room_c):
+                    room_c = 0.0
+            except Exception as e:
+                room_c = 0.0                               # không tính được -> an toàn: không chi lượt này
+                log(f"[gateway] không tính được trần chi chung ({type(e).__name__}) — không chi lượt này")
+            if room_c is not None and room_c <= 0:
+                return done("daily_cap", due=round(due, 6), remaining=remaining, budget=_avail_out(fb),
+                            reason=("chạm trần chi chung mỗi ngày (FLOP_MAX_SPEND_PER_DAY, cả gateway lẫn mua "
+                                    "trực tiếp)"))
         # Rải việc mua như flop_pacer: thỉnh thoảng nghỉ cả lượt và co giãn phần đến
         # hạn ±FLOP_PACE_JITTER_PCT. Phần không chi được TÍCH sang lượt sau (window_due cộng
         # dồn) nên tổng chi trong ngày không đổi. Sát hạn thì không nghỉ, để kịp chi hết.
@@ -1588,6 +1608,8 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
             due = min(due, run_cap)
         if day_cap > 0:
             due = min(due, day_left)
+        if room_c is not None:
+            due = min(due, room_c)
         max_calls = max(1, int(_env_num("FLOP_GATEWAY_MAX_CALLS_PER_RUN", 2)))
         pp, pc, preq = _price(model)
         if pp <= 0 and pc <= 0 and preq <= 0:
@@ -1638,6 +1660,8 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
             due, max_calls = min(float(avail), min_cost * 1.25), 1
             if day_cap > 0:
                 due = min(due, day_left)
+            if room_c is not None:
+                due = min(due, room_c)
             log(f"[gateway] cổng đứng tên đang dừng — mua THĂM DÒ 1 lần nhỏ ({due:.4f} FLOP) để xem chain "
                 "có ghi chi tiêu cho ví mình không")
         if due < min_cost or min_cost <= 0:

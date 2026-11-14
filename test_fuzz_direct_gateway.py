@@ -198,7 +198,7 @@ def test_fuzz(monkeypatch, tmp_path, seed, capsys):
         problems.append(f"gateway xác nhận nhầm {led.get('gateway_attributed')}")
     if len(refs) != len(set(refs)):
         problems.append("ghi sổ trùng kênh")
-    hashes = set(led.get("gateway_refs") or [])
+    hashes = set(led.get("gateway_refs") or []) | set(led.get("direct_refs") or [])
     for cid, c in chain["channels"].items():
         if c["paymentStatus"] == "PAID":
             booked = hashlib.sha256(f"direct:{cid}".encode()).hexdigest()[:16] in hashes

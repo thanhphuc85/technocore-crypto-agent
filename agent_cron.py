@@ -209,10 +209,14 @@ def _env_float(name: str, default: float) -> float:
     KHÔNG để một biến cấu hình gõ nhầm làm crash agent lúc import."""
     raw = os.environ.get(name, "").strip()
     try:
-        return float(raw) if raw else float(default)
+        v = float(raw) if raw else float(default)
     except ValueError:
         print(f"[config] {name}={raw!r} không hợp lệ, dùng mặc định {default}")
         return float(default)
+    if v != v or v in (float("inf"), float("-inf")):      # 'nan'/'inf': mọi so sánh trần sai -> phanh mất tác dụng
+        print(f"[config] {name}={raw!r} không hữu hạn, dùng mặc định {default}")
+        return float(default)
+    return v
 
 
 # REPO_URL: ưu tiên env REPO_URL; nếu trống thì suy từ repo đang chạy (GITHUB_REPOSITORY, Actions
@@ -1762,6 +1766,15 @@ def _kv_open(raw, private_key):
         return None
 
 
+def _blob_newer(remote, local, limit: int) -> bool:
+    """True nếu cả hai là dict có mốc `at` (giây) và bản `remote` mới hơn — không quá `limit` (mốc tương lai = rác)."""
+    try:
+        r, l_ = int(remote.get("at")), int(local.get("at"))
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return l_ < r <= limit
+
+
 def hydrate_durable_from_kv(state: dict, private_key=None) -> None:
     """Kéo khóa BỀN từ KV vào state trước khi kiểm tra cooldown. Mốc thời gian: lấy
     MAX(local, kv) -> không re-post khi local rỗng (runner mới / cache mất) hoặc cũ (2 runner).
@@ -1786,6 +1799,11 @@ def hydrate_durable_from_kv(state: dict, private_key=None) -> None:
                 pass
     for k in _BLOB_DURABLE_KEYS:
         if k in remote and not state.get(k):
+            state[k] = remote[k]
+        elif k in remote and _blob_newer(remote[k], state.get(k), _limit):
+            # Blob có mốc `at` (gateway_inflight): bản KV MỚI hơn bản local = lưu cache lượt trước đã lỗi, local là
+            # cache của lượt TRƯỚC NỮA. Trước đây local luôn thắng -> quên request treo / trần ngày của lượt vừa rồi.
+            print(f"[kv] {k}: bản KV mới hơn state.json — dùng bản KV")
             state[k] = remote[k]
     if "faucet_state" in remote:                 # mốc claim faucet -> MAX, không bao giờ lùi
         try:
@@ -2074,6 +2092,8 @@ def persist_ledger_to_kv(private_key, did) -> None:
                 "stake": led.get("stake", {}),
                 # Dấu băm biên nhận gateway đã ghi -> cache mất vẫn không ghi trùng.
                 "gateway_refs": (led.get("gateway_refs") or [])[-100:],
+                # ... và dấu kênh MUA TRỰC TIẾP đã ghi (danh sách riêng, xem token_manager.DIRECT_REFS_KEEP).
+                "direct_refs": (led.get("direct_refs") or [])[-100:],
                 # Chi qua gateway chờ / đã được chain xác nhận đứng tên ví mình (mở khoá 3:1).
                 "gateway_unattributed": led.get("gateway_unattributed", {}),
                 "gateway_attributed": led.get("gateway_attributed", {}),
@@ -4786,7 +4806,7 @@ def direct_unbooked(state: dict) -> float:
     # Phiên không rõ kết quả (CLI bị ngắt...) chưa tìm ra kênh: kênh có thể đã settle trên chain mà chưa có ở trên.
     for h in (state.get(flop_direct.KEY) or {}).get("unknown_escrow") or []:
         try:
-            if isinstance(h, list) and len(h) == 3 and (not h[1] or h[1] == net):
+            if isinstance(h, list) and len(h) >= 3 and (not h[1] or h[1] == net):
                 total += max(0.0, float(h[2]))
         except (TypeError, ValueError):
             total += float(flop_direct.DEFAULT_ESCROW_CAP)
@@ -5085,6 +5105,56 @@ def brief_flush(state: dict, now: int, network: str = "") -> str:
     return status
 
 
+MAX_SPEND_PER_DAY_DEFAULT = 2500.0     # = trần ngày mặc định của gateway; phanh cho lỗi/cấu hình sai, không phải nhịp
+
+
+def spend_today(state: dict, now: int) -> tuple:
+    """(FLOP gateway đã chi/giữ, FLOP escrow mua trực tiếp đã cam kết) trong ngày UTC của `now`, theo bộ đếm ngày bền
+    của từng đường. Bộ đếm của ngày khác -> 0."""
+    import flop_direct
+    import flop_gateway
+    day = time.strftime("%Y-%m-%d", time.gmtime(now))
+
+    def counter(d, field):
+        if not (isinstance(d, dict) and d.get("day") == day):
+            return 0.0
+        try:
+            v = float(d.get(field) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+        return v if v == v and v >= 0 else 0.0
+    gw = counter((state.get(flop_gateway.KEY) or {}).get("day_spent"), "spent")
+    dr = counter((state.get(flop_direct.KEY) or {}).get("day"), "escrow")
+    return gw, dr
+
+
+def combined_spend_room(state: dict, now: int):
+    """FLOP còn được chi/cam kết hôm nay dưới trần CHUNG `FLOP_MAX_SPEND_PER_DAY` của cả hai đường mua (mặc định
+    2500; 0 = tắt -> None). Trước đây mỗi đường có trần riêng (gateway 2500, trực tiếp 2000 với cấu hình hiện tại),
+    nên tổng một ngày có thể gấp đôi mức operator nghĩ là trần."""
+    cap = _env_float("FLOP_MAX_SPEND_PER_DAY", MAX_SPEND_PER_DAY_DEFAULT)
+    if cap <= 0:
+        return None
+    gw, dr = spend_today(state, now)
+    return max(0.0, cap - gw - dr)
+
+
+def _merge_day_spent(a, b):
+    """Gộp hai bộ đếm chi trong ngày {"day", "spent"}: cùng ngày -> số lớn hơn; khác ngày -> ngày mới hơn."""
+    vals = [x for x in (a, b) if isinstance(x, dict) and x.get("day")]
+    if not vals:
+        return None
+    day = max(str(x["day"]) for x in vals)
+    spent = 0.0
+    for x in vals:
+        if str(x["day"]) == day:
+            try:
+                spent = max(spent, float(x.get("spent") or 0))
+            except (TypeError, ValueError):
+                pass
+    return {"day": day, "spent": round(spent, 6)}
+
+
 def gateway_session_step(state: dict, private_key, now: int):
     """Mua compute qua api.flop.network (FLOP_SESSION_BACKEND=gateway). Trả
     (session_status, settled_count, last) cho dòng [session] và bộ canh chi thật.
@@ -5146,14 +5216,26 @@ def gateway_session_step(state: dict, private_key, now: int):
     _gi = state.get("gateway_inflight")
     _dur = _gi.get("inflight") if isinstance(_gi, dict) else None
     _restore = {}
-    if not _g.get("inflight") and isinstance(_dur, dict) and _dur.get("key"):
-        print(f"[gateway] khôi phục request treo {str(_dur['key'])[:8]}… từ KV (mất state.json)")
+    # Bản bền mới hơn trạng thái gateway trong state.json (mốc `at` của nó > lượt cuối local): cache của lượt trước
+    # lưu lỗi, state.json là của lượt trước nữa. Khi đó request treo theo bản bền (kể cả "không còn treo").
+    _newer = bool(_g) and isinstance(_gi, dict) and int(_gi.get("at") or 0) > int(_g.get("last_run") or 0)
+    _dkey = _dur.get("key") if isinstance(_dur, dict) else None
+    if _dkey and (not _g.get("inflight") or (_newer and (_g.get("inflight") or {}).get("key") != _dkey)):
+        print(f"[gateway] khôi phục request treo {str(_dkey)[:8]}… từ KV "
+              f"({'state.json cũ hơn bản KV' if _newer else 'mất state.json'})")
         _restore["inflight"] = _dur
+    elif _newer and not _dkey and _g.get("inflight"):
+        print("[gateway] state.json cũ hơn bản KV: request treo trong state.json đã được đối soát ở lượt sau — bỏ")
+        _restore["inflight"] = None
     # first_enrolled_at: mốc lọc biên nhận "trước lần enroll đầu". Mất theo cache thì lần enroll lại
     # đặt mốc = bây giờ và biên nhận của CHÍNH MÌNH settle trước đó (chưa kịp đọc) bị bỏ, không ghi sổ.
-    for _k in ("day_spent", "replay_unsafe", "first_enrolled_at"):   # không được mất theo cache
+    for _k in ("replay_unsafe", "first_enrolled_at"):            # không được mất theo cache
         if isinstance(_gi, dict) and _gi.get(_k) and not _g.get(_k):
             _restore[_k] = _gi[_k]
+    # Trần ngày: luôn lấy số LỚN hơn của cùng ngày UTC (bản cũ không bao giờ được hạ số đã chi).
+    _ds = _merge_day_spent(_g.get("day_spent"), _gi.get("day_spent") if isinstance(_gi, dict) else None)
+    if _ds and _ds != _g.get("day_spent"):
+        _restore["day_spent"] = _ds
     if _restore:
         # Mang theo profile: run_step xoá sạch trạng thái không có profile khớp.
         state[flop_gateway.KEY] = {**_g, **_restore, "profile": _g.get("profile") or _gi.get("profile")
@@ -5170,6 +5252,7 @@ def gateway_session_step(state: dict, private_key, now: int):
         channel_fn=lambda cid: channel_info(expect, cid),
         gate=lambda: (attribution_hold(state, now), attribution_room(state, now)),
         probe=(lambda: attrib_probe_due(state, now)) if testnet else None,
+        spend_room=lambda: combined_spend_room(state, now),
         # Lưu sổ NGAY khi có biên nhận mới, TRƯỚC khi checkpoint ghi "đã thấy" xuống state.json.
         after_book=(lambda: persist_ledger_to_kv(private_key, did_of(private_key))) if testnet else None)
     if testnet:
@@ -5309,17 +5392,22 @@ DIRECT_KV_HASH = "flop_direct_kv_hash"      # dấu của bản đã đẩy lên
 
 
 def direct_kv_hydrate(state: dict, private_key) -> bool:
-    """state.json không có phần flop_direct (Actions cache mất / runner mới) -> lấy bản đã ký trên KV. Thiếu bước này
-    thì quên trần ngày (chi gấp đôi trong ngày), kênh chờ ghi sổ, lệnh giữ 6 giờ và miner đang có kênh lỗi."""
+    """Lấy bản đã ký trên KV khi state.json không có phần flop_direct (Actions cache mất / runner mới) HOẶC bản KV mới
+    hơn (`rev`): lưu cache lỗi một lượt thì lượt sau khôi phục cache CŨ hơn một lượt. Thiếu bước này thì quên trần ngày
+    (chi gấp đôi trong ngày), kênh chờ ghi sổ, mốc phiên dở, lệnh giữ 6 giờ và miner đang có kênh lỗi."""
     import flop_direct
-    if state.get(flop_direct.KEY):
-        return False
+    local = state.get(flop_direct.KEY)
     try:
         body = _kv_open(kv_get(DIRECT_KV_KEY), private_key)
     except Exception:
         return False
     if flop_direct.restore(state, body):
-        print(f"[direct] khôi phục trạng thái từ KV ({len(state[flop_direct.KEY].get('pending') or [])} kênh chờ)")
+        n = len(state[flop_direct.KEY].get("pending") or [])
+        if local:
+            print(f"[direct] ⚠️ state.json CŨ hơn bản KV (rev {flop_direct.rev_of(local)} < {flop_direct.rev_of(body)}) "
+                  f"— dùng bản KV ({n} kênh chờ). Lần lưu cache trước có thể đã lỗi.")
+        else:
+            print(f"[direct] khôi phục trạng thái từ KV ({n} kênh chờ)")
         return True
     return False
 
@@ -5331,6 +5419,13 @@ def direct_kv_persist(state: dict, private_key) -> bool:
     g = state.get(flop_direct.KEY)
     if not isinstance(g, dict):
         return False
+    # Nội dung không đổi (bỏ qua `rev`) thì không ghi lại. Đổi -> tăng `rev` TRƯỚC khi niêm phong: caller lưu
+    # state.json SAU bước này nên cả hai bản mang cùng `rev`; KV ghi lỗi thì local giữ `rev` cao hơn và thắng.
+    digest = hashlib.sha256(json.dumps({k: v for k, v in flop_direct.durable_view(g).items() if k != "rev"},
+                                       sort_keys=True).encode("utf-8")).hexdigest()[:16]
+    if state.get(DIRECT_KV_HASH) == digest:
+        return True
+    g["rev"] = flop_direct.rev_of(g) + 1
     full = len(g.get("pending") or [])
     for level in range(0, 2 + (full + 4) // 5 + 1):
         view = flop_direct.durable_view(g, level)
@@ -5342,9 +5437,6 @@ def direct_kv_persist(state: dict, private_key) -> bool:
         return False
     if len(view["pending"]) < full:
         print(f"[direct] ⚠️ KV chỉ chứa {len(view['pending'])}/{full} kênh chờ (bỏ kênh cũ nhất không lỗi)")
-    digest = hashlib.sha256(json.dumps(view, sort_keys=True).encode("utf-8")).hexdigest()[:16]
-    if state.get(DIRECT_KV_HASH) == digest:
-        return True
     if kv_set(private_key, did_of(private_key), DIRECT_KV_KEY, sealed):
         state[DIRECT_KV_HASH] = digest
         save_state({DIRECT_KV_HASH: digest})
@@ -5501,15 +5593,22 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
             except ValueError:
                 return None
 
+        def checkpoint():
+            # Trước MỖI phiên (mốc phiên đang chạy + trần ngày) và sau mỗi phiên (kênh mới): xuống state.json VÀ KV.
+            # Job bị giết giữa phiên thì cache có thể không kịp lưu — bản KV vẫn còn mốc để lượt sau đối soát.
+            direct_kv_persist(state, private_key)            # trước: bước này tăng `rev` của bản sẽ lưu
+            save_state({flop_direct.KEY: state.get(flop_direct.KEY)})
+
         r = flop_direct.run_step(
             state, agent_key=private_key, now=now, prompts=prompts, network=network,
             fetch_channel=fetch_channel, book_fn=book if testnet else None, offers_fn=offers,
             price_fn=price, miner_cap_fn=miner_cap, balance_fn=balance,
             indexer_url=explorer, own_channels_fn=own_channels,
             deny=[d for d in PROACTIVE_DENY_DIDS if not d.startswith("did:")],
-            deadline=direct_deadline(), alert=_telegram_send)
-        save_state({flop_direct.KEY: state.get(flop_direct.KEY)})
+            deadline=direct_deadline(), alert=_telegram_send, checkpoint=checkpoint,
+            spend_room=lambda: combined_spend_room(state, now))
         direct_kv_persist(state, private_key)
+        save_state({flop_direct.KEY: state.get(flop_direct.KEY)})
         global _DIRECT_LAST
         _DIRECT_LAST = (r, network, explorer)
         status = (f"{r.get('outcome')}" + (f"×{r['opened']}" if r.get("opened", 0) > 1 else "")
@@ -5519,6 +5618,9 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
         return status
     except Exception as e:
         print(f"[direct] bỏ qua ({type(e).__name__}: {str(e)[:100]})")
+        if isinstance(state.get(flop_direct.KEY), dict):
+            # Lỗi giữa phiên: giữ những gì đã có (mốc phiên đang chạy, trần ngày, kênh vừa mở) cho lượt sau.
+            save_state({flop_direct.KEY: state.get(flop_direct.KEY)})
         return "error"
 
 
