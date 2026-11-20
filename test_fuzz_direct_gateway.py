@@ -102,6 +102,8 @@ def test_fuzz(monkeypatch, tmp_path, seed, capsys):
                 # Gateway THẬT cưỡng chế max_cost_flop của request (FakeGateway thì không): tính đúng hợp đồng đó.
                 cap = float((json or {}).get("max_cost_flop") or 0) or float("inf")
                 _book("gw", min(before - fake.quota, cap))
+        if chat and fake.receipts and before - fake.quota > 0:
+            fake.receipts[-1]["created_at"] = int(_clock.time())   # biên nhận mang giờ thật (sàn bộ đếm ngày đọc nó)
         if chat and gw_fault[0] == "timeout":
             raise TimeoutError("read timed out")                   # server ĐÃ xử lý + thu tiền, phía ta mất phản hồi
         if chat and gw_fault[0] == "524":

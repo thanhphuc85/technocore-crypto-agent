@@ -1464,6 +1464,29 @@ def run_step(state: dict, *, agent_key, http, now: int, prompts: list, expect_ne
                         miners.append(str(info["miner"]))
                     if info.get("agent"):
                         agents[str(info["agent"])] = agents.get(str(info["agent"]), 0) + 1
+            if rcpt["ok"]:
+                # Sàn bộ đếm ngày = biên nhận của CHÍNH gateway tạo hôm nay (settle -> số cuối, còn chờ -> phần giữ chỗ).
+                # Bộ đếm sống ở state.json + KV; một lượt ghi KV lỗi rồi cache cũ thì quên phần gateway đã chi hôm nay, và
+                # chi gateway không hiện trên chain của ví (kênh đứng tên broker) nên chỉ biên nhận còn nhớ (fuzz seed 298).
+                # Chỉ nâng; danh sách chỉ có 20 biên nhận gần nhất nên đây là SÀN, không phải tổng.
+                d = time.strftime("%Y-%m-%d", time.gmtime(now))
+                floor, seen_k = 0.0, set()
+                for rc in items:
+                    k = _receipt_key(rc)
+                    made = epoch_s(rc.get("created_at"))
+                    if k in seen_k or not made or made < REAL_TIME_MIN                             or time.strftime("%Y-%m-%d", time.gmtime(made)) != d:
+                        continue
+                    seen_k.add(k)
+                    fa = final_amount(rc)
+                    if fa is None:
+                        fa = _num(rc.get("reserved_spend")) or _spend_value(rc) or 0.0
+                    floor += max(0.0, float(fa or 0))
+                dc = g.get("day_spent") if isinstance(g.get("day_spent"), dict) else {}
+                have = float(dc.get("spent") or 0) if dc.get("day") == d else 0.0
+                if floor > have + 1e-9:
+                    log(f"[gateway] ⚠️ biên nhận hôm nay cộng {floor:.6g} FLOP, bộ đếm ngày chỉ có {have:.6g} "
+                        "(state/KV cũ) — nâng bộ đếm theo biên nhận")
+                    g["day_spent"] = {"day": d, "spent": round(floor, 6)}
             foreign = {a: n for a, n in agents.items() if not same_account(a, addr)}
             if foreign:
                 log(f"[gateway] ⚠️ {sum(foreign.values())} kênh vừa settle đứng tên "

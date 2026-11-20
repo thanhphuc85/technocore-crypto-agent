@@ -722,7 +722,7 @@ def _mkey(miner: str) -> str:
 def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, prompt: str = None,
              prompts=None, book_fn=None, deny=(), deadline=None, runner=None, alert=None, log=print,
              clock=time.time, offers_fn=None, price_fn=None, miner_cap_fn=None, balance_fn=None,
-             indexer_url=None, own_channels_fn=None, checkpoint=None, spend_room=None) -> dict:
+             indexer_url=None, own_channels_fn=None, checkpoint=None, spend_room=None, booked_fn=None) -> dict:
     """Một nhịp mua trực tiếp: tối đa FLOP_DIRECT_MAX_PER_RUN phiên, xoay vòng các miner. Trả {"outcome", ...};
     KHÔNG ném lỗi. `book_fn(amount, channel_id, model, escrow=)` ghi sổ (None = chạy tập devnet, không ghi).
     `fetch_channel(channel_id)` -> dict explorer | None. `offers_fn(miner, model_hash)` -> các dòng
@@ -857,36 +857,56 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
     # (state cũ chưa biết) bị sổ chặn ghi trùng theo direct_refs. Không có bước này kênh PAID không bao giờ vào sổ (fuzz).
     # Chỉ khi state CÓ mốc phiên trước: không có thì không phân biệt được kênh của agent với kênh đứng tên ví do nơi khác mở
     # (cùng lý do tìm kênh mồ côi chỉ nhận kênh khớp một khoản giữ).
+    # Thêm: kênh đã xử lý (`done`) mà SỔ chưa ghi — sổ token ghi KV lỗi rồi cache cũ tua sổ về trước lần ghi, còn trạng
+    # thái mua trực tiếp (KV khác, ghi được) vẫn nói "xong" -> đưa lại vào chờ để ghi sổ (cần booked_fn: chỉ testnet).
     floor = int(g.get("last_attempt") or 0)
-    if floor and own_channels_fn is not None and now - int(g.get("lost_sweep_at") or 0) >= LOST_SWEEP_SEC:
+    if ((floor or booked_fn is not None) and own_channels_fn is not None
+            and now - int(g.get("lost_sweep_at") or 0) >= LOST_SWEEP_SEC):
         g["lost_sweep_at"] = now
         try:
             rows = own_channels_fn(addr) or []
         except Exception as e:
             rows = []
             log(f"[direct] quét kênh mất dấu lỗi ({type(e).__name__}) — thử lại sau")
-        known = {_short(p["channel"]) for p in pending} | set(g.get("done") or [])
+        tracked = {_short(p["channel"]) for p in pending}
+        done_set = set(g.get("done") or [])
+        known = tracked | done_set
         for r in rows:
             try:
                 cid = str(r.get("channelId") or "")
                 opened = int(r.get("openedAt") or 0) // 1000
             except (AttributeError, TypeError, ValueError):
                 continue
-            if (not _CHANNEL_RE.match(cid) or _short(cid) in known or opened <= floor
-                    or not fg.same_account(str(r.get("agent") or ""), addr)
+            if (not _CHANNEL_RE.match(cid) or not fg.same_account(str(r.get("agent") or ""), addr)
                     or str(r.get("paymentStatus") or "").upper() == "REFUNDED"
                     # Chỉ miner agent đã mua TRỰC TIẾP: kênh gateway đứng tên ví (nếu FLOP ghi như vậy) không bị nhận nhầm.
                     or _mkey(str(r.get("miner") or "")) not in ms):
                 continue
+            sc = _short(cid)
+            if sc in tracked:
+                continue
+            if sc in done_set:
+                try:
+                    unbooked = (booked_fn is not None and str(r.get("paymentStatus") or "").upper() == "PAID"
+                                and not booked_fn(cid))
+                except Exception:
+                    unbooked = False
+                if not unbooked:
+                    continue
+                g["done"] = [d for d in (g.get("done") or []) if d != sc]
+                why = "đã xử lý nhưng sổ chưa ghi (sổ bị tua về bản cũ)"
+            elif floor and opened >= floor:              # kênh đã biết đã bị loại ở trên; mở đúng giây phiên cuối vẫn có thể mất
+                why = "mất dấu (state/KV cũ, tìm lại qua explorer)"
+            else:
+                continue
             rec = {"channel": cid.lower(), "ts": opened, "network": network, "miner": str(r.get("miner") or ""),
-                   "error": "mất dấu (state/KV cũ, tìm lại qua explorer)"}
+                   "error": why}
             esc = _flop(r.get("escrow"))
             if esc:
                 rec["max_flop"] = _flop_str(esc)
             pending.append(rec)
-            known.add(_short(cid))
-            alert(f"⚠️ FLOP direct: kênh {cid[:18]}… đứng tên ví mình mở sau phiên cuối mà state biết (state.json/KV cũ) "
-                  "— đã đưa lại vào theo dõi để ghi sổ.")
+            tracked.add(sc)
+            alert(f"⚠️ FLOP direct: kênh {cid[:18]}… đứng tên ví mình — {why} — đã đưa lại vào theo dõi để ghi sổ.")
 
     # 1) Đối soát kênh đã mở ở các lượt trước.
     keep = []

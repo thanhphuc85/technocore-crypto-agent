@@ -2403,3 +2403,20 @@ def test_lost_channel_sweep_needs_a_known_previous_session():
     step(st, CLI(session=(1, "", json.dumps({"ok": False, "message": "insufficient balance"}))),
          own_channels_fn=lambda a: seen.append(a) or [_row(CH)])
     assert not any("mất dấu" in str(p.get("error")) for p in st[fd.KEY].get("pending") or [])
+
+
+def test_done_channel_the_ledger_lost_is_booked_again():
+    """Sổ token ghi KV lỗi rồi cache cũ tua sổ về trước lần ghi, còn trạng thái mua trực tiếp (KV khác) vẫn nói kênh đã
+    xong -> kênh PAID không bao giờ vào sổ (fuzz seed 128). Sổ chưa có -> đưa lại vào chờ; sổ có rồi -> bỏ qua."""
+    st, alerts = _lost_state(), []
+    st[fd.KEY]["done"] = [fd._short(CH)]
+    step(st, CLI(session=(1, "", json.dumps({"ok": False, "message": "insufficient balance"}))),
+         explorer={CH: paid()}, own_channels_fn=lambda a: [_row(CH, opened=NOW - 7200)],
+         booked_fn=lambda cid: tm.direct_booked(cid), alerts=alerts)
+    assert sum(1 for e in tm.load_ledger().get("entries", []) if e.get("ref") == CH) == 1
+    st2 = _lost_state()
+    st2[fd.KEY]["done"] = [fd._short(CH)]
+    step(st2, CLI(session=(1, "", json.dumps({"ok": False, "message": "insufficient balance"}))),
+         explorer={CH: paid()}, own_channels_fn=lambda a: [_row(CH, opened=NOW - 7200)],
+         booked_fn=lambda cid: tm.direct_booked(cid))
+    assert sum(1 for e in tm.load_ledger().get("entries", []) if e.get("ref") == CH) == 1   # không ghi lần hai

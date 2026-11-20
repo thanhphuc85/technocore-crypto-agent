@@ -5876,7 +5876,8 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
             indexer_url=explorer, own_channels_fn=own_channels,
             deny=direct_deny_list(PROACTIVE_DENY_DIDS),
             deadline=direct_deadline(), alert=_telegram_send, checkpoint=checkpoint,
-            spend_room=lambda: combined_spend_room(state, now))
+            spend_room=lambda: combined_spend_room(state, now),
+            booked_fn=(lambda cid: _tm.direct_booked(cid)) if testnet else None)
         direct_kv_persist(state, private_key)
         save_state({flop_direct.KEY: state.get(flop_direct.KEY)})
         global _DIRECT_LAST
