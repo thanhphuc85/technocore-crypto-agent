@@ -15,6 +15,7 @@ from test_agent_cron import SEED_HEX
 from test_flop_gateway import FakeGateway, Resp
 
 MINER = gw.ss58_encode(bytes([7]) * 32)
+GW_MINER = gw.ss58_encode(bytes([8]) * 32)        # miner gateway định tuyến tới (khác miner mua trực tiếp)
 MH = "0x" + "11" * 32
 RAW = 10 ** 18
 
@@ -58,6 +59,7 @@ def test_gateway_and_direct_together_over_many_runs(monkeypatch, tmp_path, gatew
 
     # --- gateway giả (đứng tên broker: không đụng chain của ví) ---
     fake = FakeGateway(network="testnet", quota=300.0, expires_ms=0, cost=6.5)
+    gw_channels = {}                                   # kênh của biên nhận gateway trên explorer (chỉ khi gateway_own)
     fake.receipts, fake.receipt_state = [], "settled"
     real = fake.__call__
 
@@ -68,6 +70,11 @@ def test_gateway_and_direct_together_over_many_runs(monkeypatch, tmp_path, gatew
         if gateway_own and method == "POST" and url.endswith("/chat/completions") and r.status_code == 200:
             chain["spent"] += int(6.5 * RAW)               # gateway đứng tên VÍ MÌNH: chain cộng cho ví,
             chain["balance"] -= int(6.5 * RAW)             # và kênh đứng tên ví thì ví trả escrow
+            # ... và explorer thấy kênh của biên nhận đứng tên ví (bằng chứng cổng đứng tên cần), miner của gateway.
+            gw_channels[fake.receipts[-1]["channel_id"]] = {
+                "agent": addr, "miner": GW_MINER, "observationHead": "finalized", "status": "settled",
+                "paymentStatus": "PAID", "escrow": str(int(6.5 * RAW)), "minerPaid": str(int(6.5 * RAW)),
+                "burned": "0", "openedAt": int(_t.time()) * 1000}
         return r
     fake.override = {}
     monkeypatch.setattr(ac, "_gateway_http", gw_http)
@@ -98,11 +105,11 @@ def test_gateway_and_direct_together_over_many_runs(monkeypatch, tmp_path, gatew
             return R({"address": addr, "balance": str(chain["balance"])})
         if "/api/compute-channels/" in url:
             cid = url.rsplit("/", 1)[-1]
-            c = chain["channels"].get(cid)
+            c = chain["channels"].get(cid) or gw_channels.get(cid)
             return R({"data": c}) if c else R({"error": "not found"}, 404)
         if url.endswith("/api/compute-channels"):
             if params.get("agent"):
-                return R({"data": [dict(c, channelId=k2) for k2, c in chain["channels"].items()]})
+                return R({"data": [dict(c, channelId=k2) for k2, c in {**chain["channels"], **gw_channels}.items()]})
             return R({"data": [{"miner": MINER, "capGflopsPerSec": 130}]})
         if url.endswith("/api/session-offers"):
             return R({"data": [{"offer": {"miner": MINER, "modelHash": MH, "minEscrow": str(5 * 10 ** 16),

@@ -1,7 +1,8 @@
 """Kiểm thử NGẪU NHIÊN main() thật, bật cùng lúc gateway (đứng tên broker) và mua trực tiếp, 42 lượt cách nhau 6 giờ.
 
 Mỗi lượt có thể gặp nhiều sự cố cùng lúc: CLI bị ngắt sau khi kênh đã settle, kênh bị hoàn, settle cưỡng bức (rồi
-finalize sau 7 ngày), explorer sập, mất Actions cache (state.json + sổ cục bộ; KV còn), Telegram lỗi, chain reset.
+finalize sau 7 ngày), explorer sập, mất Actions cache (state.json + sổ cục bộ; KV còn), cache CŨ (khôi phục bản của hai
+lượt trước), ghi KV lỗi, gateway timeout / 524 sau khi đã thu tiền / 429, Telegram lỗi, chain reset.
 Bất biến: gateway đứng tên broker KHÔNG BAO GIỜ được xác nhận; không kênh nào ghi sổ hai lần; mỗi kênh PAID trên
 chain hoặc đã ghi sổ ĐÚNG số chain trả, hoặc còn được theo dõi (danh sách chờ / khoản giữ của lượt bị ngắt); bước
 direct không ném lỗi; mỗi ngày UTC escrow trực tiếp RÒNG (kênh hoàn thì trả lại) <= FLOP_DIRECT_MAX_PER_DAY và cộng phần
@@ -54,8 +55,16 @@ def test_fuzz(monkeypatch, tmp_path, seed, capsys):
     monkeypatch.setattr(ac, "load_state", lambda: json.loads(json.dumps(state)))
     monkeypatch.setattr(ac, "save_state", lambda d: state.update(json.loads(json.dumps(d))))
     kv = {}
-    # Như service thật: value > KV_VALUE_MAX bị từ chối (không ghi).
-    monkeypatch.setattr(ac, "kv_set", lambda pk, did, k, v: len(v) <= ac.KV_VALUE_MAX and (kv.update({k: v}) or True))
+    # Sự cố thêm (RNG riêng, chuỗi sự cố cũ của seed giữ nguyên): ghi KV lỗi, gateway timeout/524/429, cache cũ.
+    faults = random.Random(seed + 2 * 10 ** 6)
+    kv_fail = [0.0]
+
+    def kv_set(pk, did, k, v):
+        if faults.random() < kv_fail[0]:
+            return False                                           # 502/timeout khi ghi KV
+        # Như service thật: value > KV_VALUE_MAX bị từ chối (không ghi).
+        return len(v) <= ac.KV_VALUE_MAX and (kv.update({k: v}) or True)
+    monkeypatch.setattr(ac, "kv_set", kv_set)
     monkeypatch.setattr(ac, "kv_get", lambda k: kv.get(k))
     for name in ("write_heartbeat", "_write_summary", "check_price_alert"):
         monkeypatch.setattr(ac, name, lambda *a, **k: None)
@@ -77,17 +86,27 @@ def test_fuzz(monkeypatch, tmp_path, seed, capsys):
         d = _clock.strftime("%Y-%m-%d", _clock.gmtime(_clock.time()))
         day_spend.setdefault(d, {"direct": 0.0, "gw": 0.0})[kind] += amount
 
+    gw_fault = [None]
+
     def gw_http(method, url, headers=None, json=None, timeout=20):
         if url.endswith("/keys/me") and method == "GET":
             return Resp(data={"credential": "owner", "remaining_quota": fake.quota, "expires_at": None})
+        chat = method == "POST" and url.endswith("/chat/completions")
+        if chat and gw_fault[0] == "429":
+            return Resp(429, {"error": {"code": "overloaded", "message": "no admitted miner"}})   # không thu tiền
         before = fake.quota
         try:
-            return real(method, url, headers=headers, json=json, timeout=timeout)
+            resp = real(method, url, headers=headers, json=json, timeout=timeout)
         finally:
             if before - fake.quota > 0:
                 # Gateway THẬT cưỡng chế max_cost_flop của request (FakeGateway thì không): tính đúng hợp đồng đó.
                 cap = float((json or {}).get("max_cost_flop") or 0) or float("inf")
                 _book("gw", min(before - fake.quota, cap))
+        if chat and gw_fault[0] == "timeout":
+            raise TimeoutError("read timed out")                   # server ĐÃ xử lý + thu tiền, phía ta mất phản hồi
+        if chat and gw_fault[0] == "524":
+            return Resp(524, {"error": "origin_timeout"})          # như trên, nhưng qua Cloudflare
+        return resp
     fake.override = {}
     monkeypatch.setattr(ac, "_gateway_http", gw_http)
 
@@ -187,7 +206,25 @@ def test_fuzz(monkeypatch, tmp_path, seed, capsys):
     runs = 40
     reset_at = rnd.choice([None, None, rnd.randrange(5, 30)])
     old_channels = set()
+    hist = []                                                      # (state, sổ cục bộ) sau mỗi lượt: mô phỏng cache CŨ
+    led_path = _os.environ["TOKEN_LEDGER_FILE"]
     for i in range(runs):
+        gw_fault[0] = faults.choices([None, "timeout", "524", "429"], [80, 7, 7, 6])[0]
+        kv_fail[0] = faults.choice([0.0, 0.0, 0.05, 0.3])
+        if gw_fault[0]:
+            events.append(f"gw_{gw_fault[0]}@{i}")
+        if len(hist) >= 2 and faults.random() < 0.05:
+            # Lưu cache lượt trước lỗi -> lượt này khôi phục bản của HAI lượt trước (state.json + sổ cục bộ).
+            events.append(f"stale_cache@{i}")
+            st_old, led_old = hist[-2]
+            state.clear()
+            state.update(json.loads(st_old))
+            if led_old is None:
+                if _os.path.exists(led_path):
+                    _os.remove(led_path)
+            else:
+                with open(led_path, "w", encoding="utf-8") as f:
+                    f.write(led_old)
         chain["down"] = rnd.random() < 0.08
         tg_ok[0] = rnd.random() > 0.2
         if rnd.random() < 0.05:
@@ -202,6 +239,12 @@ def test_fuzz(monkeypatch, tmp_path, seed, capsys):
         monkeypatch.setattr(_t, "time", lambda i=i: t0 + i * 6 * 3600)
         cur_run[0] = i
         ac.main()
+        led_now = None
+        if _os.path.exists(led_path):
+            with open(led_path, encoding="utf-8") as f:
+                led_now = f.read()
+        hist.append((json.dumps(state), led_now))
+    gw_fault[0], kv_fail[0] = None, 0.0
     chain["down"] = False                                          # 2 lượt yên ổn cuối để đối soát
     for i in range(runs, runs + 2):
         monkeypatch.setattr(_t, "time", lambda i=i: t0 + i * 6 * 3600)

@@ -1600,9 +1600,24 @@ def test_gateway_confirmation_still_counts_real_gateway_growth_next_to_direct(mo
     tm.credit("3000")
     tm.record_gateway_spend("20", "inference-session gateway m", "g-1")
     tm.record_direct_spend("100", "inference-session direct m", "0x" + f"{7:064x}")
-    st = {flop_radar.KEY: _chain_read(120 * 10 ** 18)}                 # 100 trực tiếp (đã ghi) + 20 gateway
+    # 100 trực tiếp (đã ghi) + 20 gateway; đã thấy kênh gateway đứng tên ví mình -> phần tăng là gateway thật.
+    st = {flop_radar.KEY: _chain_read(120 * 10 ** 18), ac.OWN_SEEN_KEY: NOW}
     assert ac.gateway_attribution_step(st, NOW) == "ok"
     assert tm.gateway_attribution()["unattributed"] == Decimal("0")
+
+
+def test_unexplained_growth_next_to_direct_is_not_confirmed_without_own_gateway_channel(monkeypatch):
+    """Đang mua trực tiếp, chain ghi thêm 20 ngoài phần trực tiếp đã biết, nhưng CHƯA thấy kênh gateway nào đứng tên ví:
+    20 đó có thể là kênh trực tiếp mất dấu (ghi KV lỗi + cache cũ). Trước đây được xác nhận thành chi gateway, mở cổng
+    đứng tên nhầm (fuzz seed 18)."""
+    tm.credit("3000")
+    tm.record_gateway_spend("20", "inference-session gateway m", "g-1")
+    tm.record_direct_spend("100", "inference-session direct m", "0x" + f"{7:064x}")
+    st = {flop_radar.KEY: _chain_read(120 * 10 ** 18)}
+    ac.gateway_attribution_step(st, NOW)
+    assert tm.gateway_attribution()["unattributed"] == Decimal(20)
+    led = tm.load_ledger()
+    assert led["gateway_chain_hw"]["FLOP"] == "120"                    # vẫn ghi mốc kỳ (phát hiện reset chạy bình thường)
 
 
 def test_pending_direct_escrow_never_looks_like_a_chain_reset():

@@ -4816,3 +4816,47 @@ def test_gateway_sees_todays_direct_escrow_after_cache_loss(monkeypatch):
     rooms.clear()
     ac.gateway_session_step({"gateway_inflight": {"day_spent": {"day": today, "spent": 6.5}, "at": now - 60}}, pk, now)
     assert rooms == [pytest.approx(30 - 6.5)]
+
+
+def test_direct_day_counter_is_raised_to_the_escrow_the_chain_shows_today(monkeypatch):
+    """Ghi KV lỗi rồi cache cũ: state lẫn KV quên escrow vừa cam kết -> trần ngày chi lại lần nữa (fuzz seed 3: 118.8 FLOP
+    dưới trần 60). Chain là sàn: escrow kênh đứng tên ví mở hôm nay (trừ kênh hoàn). Chỉ nâng, explorer lỗi thì giữ."""
+    import flop_direct as fd
+    import flop_gateway as fg
+    now = 1_800_000_000
+    today = __import__("time").strftime("%Y-%m-%d", __import__("time").gmtime(now))
+    monkeypatch.setenv("FLOP_DIRECT_ENABLED", "on")
+    monkeypatch.setenv("FLOP_WALLET_USE_DID", "on")
+    pk = _real_key()
+    addr = fg.wallet_address(fg.wallet_key(pk))
+    other = fg.ss58_encode(bytes([9]) * 32)
+    E = 10 ** 18
+
+    def row(cid, esc, opened, status="PAID", agent=addr):
+        return {"channelId": cid, "agent": agent, "escrow": str(esc * E), "openedAt": opened * 1000,
+                "paymentStatus": status}
+    rows = [row("a", 5, now - 60), row("b", 3, now - 120, "LOCKED"), row("c", 10, now - 180, "REFUNDED"),
+            row("d", 7, now - 86400), row("e", 9, now - 60, agent=other)]
+
+    class R:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"data": rows}
+    monkeypatch.setattr(ac.requests, "get", lambda *a, **k: R())
+    st = {fd.KEY: {"day": {"day": today, "escrow": 2.0}, "rev": 7}}
+    ac.direct_day_floor_from_chain(st, pk, now)
+    assert st[fd.KEY]["day"] == {"day": today, "escrow": 8.0} and st[fd.KEY]["rev"] == 7
+    st = {fd.KEY: {"day": {"day": today, "escrow": 20.0}}}
+    ac.direct_day_floor_from_chain(st, pk, now)
+    assert st[fd.KEY]["day"]["escrow"] == 20.0                                  # chỉ nâng, không bao giờ hạ
+    monkeypatch.setattr(ac.requests, "get", lambda *a, **k: (_ for _ in ()).throw(ac.requests.ConnectionError("x")))
+    st = {fd.KEY: {"day": {"day": today, "escrow": 2.0}}}
+    ac.direct_day_floor_from_chain(st, pk, now)
+    assert st[fd.KEY]["day"]["escrow"] == 2.0                                   # explorer lỗi -> giữ nguyên
+    monkeypatch.setenv("FLOP_DIRECT_ENABLED", "off")
+    monkeypatch.setattr(ac.requests, "get", lambda *a, **k: pytest.fail("mua trực tiếp tắt: không gọi explorer"))
+    ac.direct_day_floor_from_chain({}, pk, now)

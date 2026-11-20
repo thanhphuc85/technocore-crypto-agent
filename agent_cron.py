@@ -4916,6 +4916,17 @@ def balance_line(state: dict, chain_bal, ledger_bal, direct_count: int = 0) -> s
             + (f" · ⚠️ lệch {float(gap):.4g}" if gap >= tol else ""))
 
 
+def _direct_active(state: dict) -> bool:
+    """Đường mua trực tiếp đang/đã dùng (bật, đã ghi sổ trong kỳ, hoặc còn kênh chờ): khi đó phần chain ghi thêm cho ví
+    không còn chắc là của gateway."""
+    import flop_direct
+    import token_manager as tm
+    try:
+        return bool(flop_direct.enabled() or float(tm.direct_epoch_done()) > 0 or direct_unbooked(state) > 0)
+    except Exception:
+        return True                                   # không biết -> coi như có (chặt hơn, không bao giờ lỏng)
+
+
 def direct_on_chain(state: dict) -> float:
     """Phần số chain ghi cho ví có thể là MUA TRỰC TIẾP: đã ghi sổ trong kỳ + còn chờ ghi sổ."""
     import token_manager as tm
@@ -5113,8 +5124,21 @@ def gateway_attribution_step(state: dict, now: int) -> str:
             print("[attrib] kênh gateway đứng tên người khác, chưa thấy kênh nào của ví mình sau đó — không xác nhận "
                   "chi gateway theo tổng chain")
         else:
+            # Có mua trực tiếp mà CHƯA từng thấy kênh gateway nào đứng tên ví mình: phần chain ghi thêm có thể là kênh MUA
+            # TRỰC TIẾP bị mất dấu (ghi KV lỗi + cache cũ -> kênh rơi khỏi danh sách chờ), không phải gateway. Xác nhận theo
+            # tổng lúc đó là mở cổng đứng tên nhầm và đếm chi trực tiếp thành chi gateway (fuzz seed 18). Vẫn GỌI hàm (nó
+            # còn phát hiện chain reset / mở kỳ mới) nhưng trừ toàn bộ số đọc -> không xác nhận khoản nào. Chỉ dùng gateway
+            # thì không có gì để nhầm: giữ cách xác nhận theo tổng.
+            _block = not _own and _direct_active(state)
+            _excl = float(onchain) if _block else round(direct_unbooked(state), 9)
+            if _block:
+                _led = tm.load_ledger()
+                _ep = float(((_led.get("gateway_epoch_done") or {}).get(tm.default_token())) or 0)
+                if float(gateway_chain(onchain, state)) > _ep + 1e-9 and tm.gateway_attribution()["unattributed"] > 0:
+                    print("[attrib] đang mua trực tiếp và chưa thấy kênh gateway nào đứng tên ví mình trên explorer — "
+                          "chưa xác nhận chi gateway theo tổng chain (phần tăng có thể là kênh mua trực tiếp mất dấu)")
             tm.confirm_gateway_attribution(onchain, read_at=onchain_read_at(state), chain_id=_gen,
-                                           exclude=str(round(direct_unbooked(state), 9)))
+                                           exclude=str(_excl))
         _attrib_probe_result(state, now, float(onchain))
         pend = tm.gateway_attribution()["unattributed"]
         _gw = Decimal(str(gateway_chain(onchain, state)))
@@ -5347,6 +5371,7 @@ def gateway_session_step(state: dict, private_key, now: int):
     if _fd.enabled():
         try:
             direct_kv_hydrate(state, private_key)
+            direct_day_floor_from_chain(state, private_key, now)
         except Exception as e:
             print(f"[gateway] không nạp được trạng thái mua trực tiếp từ KV ({type(e).__name__})")
 
@@ -5568,6 +5593,59 @@ def direct_kv_hydrate(state: dict, private_key) -> bool:
     return False
 
 
+def direct_day_floor_from_chain(state: dict, private_key, now: int) -> None:
+    """Bộ đếm escrow mua trực tiếp HÔM NAY không được thấp hơn chain: cộng escrow các kênh đứng tên ví mở trong ngày UTC
+    (trừ kênh đã hoàn) rồi nâng bộ đếm nếu thiếu. Bộ đếm sống ở state.json + KV; một lượt GHI KV LỖI rồi lượt sau khôi
+    phục cache CŨ thì cả hai cùng quên escrow vừa cam kết và trần ngày bị chi lại lần nữa (fuzz seed 3: 118.8 FLOP dưới
+    trần 60). Chỉ nâng, không bao giờ hạ; explorer lỗi thì giữ nguyên. Kênh gateway đứng tên ví (nếu FLOP ghi như vậy)
+    cũng bị đếm -> chặt hơn, không bao giờ lỏng. Gọi SAU direct_kv_hydrate (bản KV rev cao hơn sẽ đè state)."""
+    from decimal import Decimal
+
+    import flop_direct
+    import flop_gateway
+    import token_manager as _tm
+    if not flop_direct.enabled():
+        return
+    wkey = flop_gateway.wallet_key(private_key)
+    if wkey is None:
+        return
+    addr = flop_gateway.wallet_address(wkey)
+    explorer = _explorer_base("testnet" if _tm.testnet_enabled() else "devnet")
+    try:
+        r = requests.get(f"{explorer}/api/compute-channels", params={"agent": addr, "limit": "100"},
+                         headers={"User-Agent": UA}, timeout=15)
+        r.raise_for_status()
+        d = r.json()
+        rows = d.get("data") if isinstance(d, dict) and isinstance(d.get("data"), list) else []
+    except Exception as e:
+        print(f"[direct] không đọc được kênh của ví trên explorer ({type(e).__name__}) — giữ bộ đếm ngày")
+        return
+    day = time.strftime("%Y-%m-%d", time.gmtime(now))
+    tot = Decimal(0)
+    for c in rows:
+        if not isinstance(c, dict) or not flop_gateway.same_account(str(c.get("agent") or ""), addr):
+            continue
+        if str(c.get("paymentStatus") or "").upper() == "REFUNDED":
+            continue                                   # escrow đã về ví: code cũng trả lại trần ngày cho kênh hoàn
+        try:
+            opened = int(c.get("openedAt") or 0) // 1000
+            esc = Decimal(int(str(c.get("escrow") or 0))) / Decimal(10 ** 18)
+        except (TypeError, ValueError):
+            continue
+        if opened > 0 and esc > 0 and time.strftime("%Y-%m-%d", time.gmtime(opened)) == day:
+            tot += esc
+    g = state.get(flop_direct.KEY) if isinstance(state.get(flop_direct.KEY), dict) else {}
+    ds = g.get("day") if isinstance(g.get("day"), dict) and g["day"].get("day") == day else {"day": day, "escrow": 0.0}
+    try:
+        have = float(ds.get("escrow") or 0)
+    except (TypeError, ValueError):
+        have = 0.0
+    if float(tot) > have + 1e-9:
+        print(f"[direct] ⚠️ chain: hôm nay ví đã cam kết {float(tot):.6g} FLOP escrow, bộ đếm chỉ có {have:.6g} "
+              "(state/KV cũ) — nâng bộ đếm ngày theo chain")
+        state[flop_direct.KEY] = {**g, "day": {"day": day, "escrow": round(float(tot), 9)}}
+
+
 def _direct_kv_stale_alert(raw) -> None:
     """Báo khi trạng thái mua trực tiếp vừa khôi phục (mất state.json) đến từ bản KV niêm phong quá DIRECT_KV_STALE_SEC:
     KV ai cũng ghi được, một bản CŨ có chữ ký hợp lệ có thể bị chép lại để tua lùi trần ngày / kênh chờ."""
@@ -5681,6 +5759,7 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
         prompts = _gateway_prompts(now, "")          # mỗi phiên một đề (flop_direct xoay theo prompt_idx)
         explorer = _explorer_base(network)
         direct_kv_hydrate(state, private_key)
+        direct_day_floor_from_chain(state, private_key, now)
 
         def fetch_channel(cid):
             r = requests.get(f"{explorer}/api/compute-channels/{cid}", headers={"User-Agent": UA}, timeout=15)

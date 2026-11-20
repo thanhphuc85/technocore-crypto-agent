@@ -94,6 +94,7 @@ ORPHAN_LEGACY_SPAN_SEC = 1800      # khoản giữ dạng cũ [ts, mạng, escro
 FINALIZE_AFTER_SEC = 7 * 86400 + 3600
 FINALIZE_RETRY_SEC = 86400
 FINALIZE_MAX_TRIES = 3
+LOST_SWEEP_SEC = 1800              # quét kênh MẤT DẤU (đứng tên ví, mở sau phiên cuối state biết) tối đa mỗi chừng này
 DONE_KEEP = 50                     # id (rút gọn) các kênh đã xử lý xong — để tìm kênh mồ côi không thêm lại
 DEFAULT_MAX_PER_RUN = 4            # phiên tối đa mỗi lượt (còn bị ngân sách thời gian của lượt chặn)
 DEFAULT_MAX_PENDING = 20           # kênh CLI báo đã settle nhưng explorer chưa ghi nhận — quá chừng này thì dừng
@@ -849,6 +850,43 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
                   "theo dõi; PAID thì ghi sổ, còn mở thì chặn miner đó tới khi xong.")
         if len(holds) != len(held_live):
             g["unknown_escrow"] = holds                # kênh đã tìm thấy thay cho khoản giữ của nó
+
+    # 0b) Kênh MẤT DẤU: một lượt GHI KV LỖI rồi lượt sau khôi phục cache CŨ -> cả state.json lẫn KV quên kênh vừa mở (CLI
+    # đã báo id, nên không có khoản giữ nào để tìm như trên). Chain vẫn nhớ: kênh đứng tên ví mở SAU phiên cuối mà state
+    # biết (`last_attempt`), chưa theo dõi, chưa hoàn -> đưa lại vào danh sách chờ để ghi sổ / finalize. Kênh đã ghi sổ
+    # (state cũ chưa biết) bị sổ chặn ghi trùng theo direct_refs. Không có bước này kênh PAID không bao giờ vào sổ (fuzz).
+    # Chỉ khi state CÓ mốc phiên trước: không có thì không phân biệt được kênh của agent với kênh đứng tên ví do nơi khác mở
+    # (cùng lý do tìm kênh mồ côi chỉ nhận kênh khớp một khoản giữ).
+    floor = int(g.get("last_attempt") or 0)
+    if floor and own_channels_fn is not None and now - int(g.get("lost_sweep_at") or 0) >= LOST_SWEEP_SEC:
+        g["lost_sweep_at"] = now
+        try:
+            rows = own_channels_fn(addr) or []
+        except Exception as e:
+            rows = []
+            log(f"[direct] quét kênh mất dấu lỗi ({type(e).__name__}) — thử lại sau")
+        known = {_short(p["channel"]) for p in pending} | set(g.get("done") or [])
+        for r in rows:
+            try:
+                cid = str(r.get("channelId") or "")
+                opened = int(r.get("openedAt") or 0) // 1000
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if (not _CHANNEL_RE.match(cid) or _short(cid) in known or opened <= floor
+                    or not fg.same_account(str(r.get("agent") or ""), addr)
+                    or str(r.get("paymentStatus") or "").upper() == "REFUNDED"
+                    # Chỉ miner agent đã mua TRỰC TIẾP: kênh gateway đứng tên ví (nếu FLOP ghi như vậy) không bị nhận nhầm.
+                    or _mkey(str(r.get("miner") or "")) not in ms):
+                continue
+            rec = {"channel": cid.lower(), "ts": opened, "network": network, "miner": str(r.get("miner") or ""),
+                   "error": "mất dấu (state/KV cũ, tìm lại qua explorer)"}
+            esc = _flop(r.get("escrow"))
+            if esc:
+                rec["max_flop"] = _flop_str(esc)
+            pending.append(rec)
+            known.add(_short(cid))
+            alert(f"⚠️ FLOP direct: kênh {cid[:18]}… đứng tên ví mình mở sau phiên cuối mà state biết (state.json/KV cũ) "
+                  "— đã đưa lại vào theo dõi để ghi sổ.")
 
     # 1) Đối soát kênh đã mở ở các lượt trước.
     keep = []

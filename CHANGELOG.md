@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Double fault (a failed KV write, then an Actions cache restored from an older run), found by adding KV write
+  failures, stale cache restores and gateway timeout/524/429 to the fuzz test. Before the fix, it caused three
+  problems when gateway and direct buying both ran:
+  - **Wrongly confirmed gateway spend:** the direct channel opened in the lost run fell out of tracking. Its
+    on-chain spend was then confirmed as gateway spend credited to our wallet, which opened the attribution
+    gate wrongly. With direct buying active, total-based confirmation now needs at least one gateway channel
+    seen under our wallet. Chain-reset detection still runs.
+  - **Daily cap overspent:** today's direct-escrow counter was forgotten and spent again (118.8 FLOP under a cap
+    of 60). The counter is now raised to the escrow of our own channels opened today on the explorer
+    (refunded channels excluded); it is only ever raised.
+  - **Channel never booked:** the lost channel was never booked. A sweep, at most every 30 minutes, puts own
+    channels back into the pending list. It takes only channels opened after the last session the state knows
+    about, from a miner the agent has bought from directly, and not refunded. The ledger's dedupe stops a
+    double booking.
 - Combined daily cap (`FLOP_MAX_SPEND_PER_DAY`) after an Actions cache loss: the gateway step runs before the direct
   step, but only the direct step restored today's direct-escrow counter from KV. So in the first run after a cache
   loss, the gateway computed its room as if no direct escrow had been committed today. The fuzz test found a day
