@@ -1540,3 +1540,20 @@ def test_replayed_answer_is_charged_once_to_the_operator_budget(monkeypatch):
     r = _step(state, fake, NOW + 1000, answer_fn=lambda p, t, c: None)
     assert r["outcome"] == "replayed"
     assert _budget_spent(state) == pytest.approx(fake.cost)              # trước: max_cost + cost
+
+
+def test_day_counter_is_raised_to_todays_receipts_after_a_stale_restore(monkeypatch):
+    """Ghi KV lỗi rồi cache cũ: bộ đếm ngày quên phần gateway đã chi hôm nay, mà chi gateway không hiện trên chain của
+    ví (broker). Biên nhận của chính gateway là sàn (fuzz seed 298: trần chung bị vượt). Chỉ nâng, không hạ."""
+    monkeypatch.setenv("FLOP_GATEWAY_MAX_CALLS_PER_RUN", "1")
+    fake, state = FakeGateway(quota=25.0, expires_ms=LATER), {}
+    assert _step(state, fake, NOW)["outcome"] == "spent"
+    paid = _day(state)
+    assert paid > 0
+    state[gw.KEY]["day_spent"] = {"day": state[gw.KEY]["day_spent"]["day"], "spent": 0.0}   # state cũ quên
+    monkeypatch.setenv("FLOP_GATEWAY_SKIP_PCT", "100")                  # lượt này không gọi thêm: chỉ đọc biên nhận
+    _step(state, fake, NOW + 600)
+    assert _day(state) == pytest.approx(paid)
+    state[gw.KEY]["day_spent"]["spent"] = paid + 50.0                   # bộ đếm cao hơn biên nhận: giữ nguyên
+    _step(state, fake, NOW + 1200)
+    assert _day(state) == pytest.approx(paid + 50.0)

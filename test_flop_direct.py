@@ -2364,3 +2364,59 @@ def test_clean_refusal_gives_the_escrow_back_to_this_runs_balance(monkeypatch):
     offers = {MINER: [offer(miner=MINER)], m2: [offer(miner=m2)]}
     r = step({}, cli, balance_fn=lambda a: Decimal("0.06"), offers_fn=lambda mi, mh: offers[mi])
     assert len(cli.sessions()) == 2 and r["opened"] == 1          # không trả lại: còn 0.01 -> low_balance, 1 phiên
+
+
+# --- kênh MẤT DẤU: ghi KV lỗi + cache cũ -> state lẫn KV quên kênh CLI đã báo id ------------------------------------
+
+def _lost_state():
+    """State cũ: biết phiên trước (last_attempt) với MINER, không biết kênh mở sau đó."""
+    return {fd.KEY: {"last_attempt": NOW - 3600, "miners": {fd._mkey(MINER): {"sessions": 1}}}}
+
+
+def _row(cid, miner=MINER, opened=NOW - 1800, status="PAID", agent=ADDR):
+    return {"channelId": cid, "agent": agent, "miner": miner, "openedAt": opened * 1000, "paymentStatus": status,
+            "escrow": str(5 * 10 ** 16)}
+
+
+def test_lost_channel_opened_after_the_last_known_session_is_tracked_and_booked():
+    st, alerts = _lost_state(), []
+    step(st, CLI(), explorer={CH: paid()}, own_channels_fn=lambda a: [_row(CH)], alerts=alerts)
+    led = tm.load_ledger()
+    assert any(e.get("ref") == CH for e in led.get("entries", []))              # PAID -> ghi sổ đúng một lần
+    assert any("mất dấu" in a or "state.json/KV cũ" in a for a in alerts)
+
+
+def test_lost_channel_sweep_ignores_what_it_cannot_attribute():
+    rows = [_row(CH, opened=NOW - 7200),                                        # trước phiên state biết: đã xử lý
+            _row(CH2, miner=OTHER),                                             # miner chưa từng mua trực tiếp
+            _row("0x" + "ef" * 32, status="REFUNDED"),                          # escrow đã về ví
+            _row("0x" + "12" * 32, agent=OTHER)]                                # ví khác
+    st = _lost_state()
+    step(st, CLI(session=(1, "", json.dumps({"ok": False, "message": "insufficient balance"}))),
+         own_channels_fn=lambda a: rows)
+    assert [p for p in st[fd.KEY].get("pending") or [] if "mất dấu" in str(p.get("error"))] == []
+
+
+def test_lost_channel_sweep_needs_a_known_previous_session():
+    seen = []
+    st = {fd.KEY: {"miners": {fd._mkey(MINER): {"sessions": 1}}}}             # không có last_attempt
+    step(st, CLI(session=(1, "", json.dumps({"ok": False, "message": "insufficient balance"}))),
+         own_channels_fn=lambda a: seen.append(a) or [_row(CH)])
+    assert not any("mất dấu" in str(p.get("error")) for p in st[fd.KEY].get("pending") or [])
+
+
+def test_done_channel_the_ledger_lost_is_booked_again():
+    """Sổ token ghi KV lỗi rồi cache cũ tua sổ về trước lần ghi, còn trạng thái mua trực tiếp (KV khác) vẫn nói kênh đã
+    xong -> kênh PAID không bao giờ vào sổ (fuzz seed 128). Sổ chưa có -> đưa lại vào chờ; sổ có rồi -> bỏ qua."""
+    st, alerts = _lost_state(), []
+    st[fd.KEY]["done"] = [fd._short(CH)]
+    step(st, CLI(session=(1, "", json.dumps({"ok": False, "message": "insufficient balance"}))),
+         explorer={CH: paid()}, own_channels_fn=lambda a: [_row(CH, opened=NOW - 7200)],
+         booked_fn=lambda cid: tm.direct_booked(cid), alerts=alerts)
+    assert sum(1 for e in tm.load_ledger().get("entries", []) if e.get("ref") == CH) == 1
+    st2 = _lost_state()
+    st2[fd.KEY]["done"] = [fd._short(CH)]
+    step(st2, CLI(session=(1, "", json.dumps({"ok": False, "message": "insufficient balance"}))),
+         explorer={CH: paid()}, own_channels_fn=lambda a: [_row(CH, opened=NOW - 7200)],
+         booked_fn=lambda cid: tm.direct_booked(cid))
+    assert sum(1 for e in tm.load_ledger().get("entries", []) if e.get("ref") == CH) == 1   # không ghi lần hai

@@ -551,6 +551,17 @@ def _direct_ref_hashes(channel_id) -> tuple:
     return h(raw.lower()), {h(raw), h(raw.lower())}
 
 
+def direct_booked(channel_id, path: str = None) -> bool:
+    """Kênh mua trực tiếp này ĐÃ vào sổ chưa (theo direct_refs, kèm gateway_refs của sổ cũ)."""
+    if not channel_id:
+        return False
+    state = load_ledger(path)
+    _, check = _direct_ref_hashes(channel_id)
+    seen = {x for x in (state.get("direct_refs") or []) if isinstance(x, str)}
+    seen |= {x for x in (state.get("gateway_refs") or []) if isinstance(x, str)}
+    return bool(check & seen)
+
+
 def record_gateway_spend(amount, memo, ref: str, token: str = None, *, path: str = None,
                          log=print) -> dict:
     """Ghi sổ một lần chi ĐÃ XẢY RA ở gateway FLOP (api.flop.network trừ quota; `ref` = id
