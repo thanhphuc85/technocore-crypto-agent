@@ -39,9 +39,11 @@ from decimal import Decimal, InvalidOperation
 import flop_gateway as fg
 
 KEY = "flop_direct"
-# releases.json (2026-11-13): cli.image — bản >= 0.1.172 có `session run`.
-DEFAULT_IMAGE = ("ghcr.io/flop-labs/flop-core/cli:v0.1.321"
-                 "@sha256:3a473509dc0d5f9b5dfb5283a78886e285f4275274741b96a5e5575334b664e8")
+# releases.json (2026-11-22): cli.image — bản >= 0.1.172 có `session run`. v0.1.418 = SDK 0.7.2, nhận runtime devnet
+# 1014020/1014027/1014029; v0.1.321 (SDK 0.5.2) bị runtime đó từ chối (flop-labs/network#238). Đã đối chiếu mã CLI hai bản:
+# mọi tham số agent dùng (keys import, session run, channel finalize, --output agent) và JSON trả về không đổi.
+DEFAULT_IMAGE = ("ghcr.io/flop-labs/flop-core/cli:v0.1.418"
+                 "@sha256:fd97fab267e47bc69c40a014e562a69480cae7328dd0f139267ef940826fe223")
 # ESCROW LÀ CHI PHÍ: SDK (compute-channel/session-estimate) ghi "A cooperative spot settle pays the whole escrow
 # to the miner (D-0403), so the escrow is the cost, not a ceiling". Không đặt FLOP_DIRECT_MAX_FLOP -> escrow =
 # minEscrow của offer miner công bố (mức thấp nhất miner nhận), kẹp dưới FLOP_DIRECT_ESCROW_CAP.
