@@ -1134,7 +1134,7 @@ def test_failed_kv_write_is_retried_next_run(monkeypatch):
 
 
 def test_agent_restores_direct_state_from_kv_after_cache_loss(monkeypatch):
-    sealed = ac._kv_seal(KEY, fd.durable_view(_rich_state(2, 1)[fd.KEY]))
+    sealed = ac._kv_seal(KEY, fd.durable_view(_rich_state(2, 1)[fd.KEY]), ac.DIRECT_KV_KEY)
     monkeypatch.setattr(ac, "kv_get", lambda key: sealed if key == ac.DIRECT_KV_KEY else None)
     st = {}
     assert ac.direct_kv_hydrate(st, KEY) and st[fd.KEY]["day"]["escrow"] == 900.0

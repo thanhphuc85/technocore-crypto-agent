@@ -763,7 +763,7 @@ def test_auto_respond_restores_cursor_from_kv_and_skips_old(pk, respond_env):
     """State trống nhưng KV còn cursor -> khôi phục, và tin cũ (<=cursor) bị bỏ qua,
     chỉ xử lý tin mới. Đây là bất biến khiến state persist mới có ý nghĩa."""
     did = ac.did_of(pk)
-    respond_env.setattr(ac, "kv_get", lambda k: ac._kv_seal(pk, {"seq": 50}))  # state rỗng, KV có cursor=50 (đã ký)
+    respond_env.setattr(ac, "kv_get", lambda k: ac._kv_seal(pk, {"seq": 50}, k))  # state rỗng, KV có cursor=50 (đã ký)
     posts = []
     respond_env.setattr(ac, "post_message", lambda pk_, did_, msg, **k: posts.append(msg) or True)
     respond_env.setattr(ac, "fetch_messages", lambda since=None: {
@@ -3610,7 +3610,7 @@ def test_forged_heartbeat_and_cursors_are_ignored(monkeypatch):
     ac.write_heartbeat(key, ac.did_of(key), now)
     kv["heartbeat"] = sent["heartbeat"]
     assert ac.primary_alive(now + 60, 15, key) is True         # heartbeat tự ký -> nhận
-    kv["cursors"] = ac._kv_seal(key, {"lobby": 123})
+    kv["cursors"] = ac._kv_seal(key, {"lobby": 123}, "cursors")
     assert ac._load_room_cursors({}, True, key) == {"lobby": 123}
 
 

@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Direct buying pinned the FLOP CLI image `cli:v0.1.321` (SDK 0.5.2), which the current devnet runtime (spec
+  1014020 and later) rejects (flop-labs/network#238); every `session run` would have failed. The default is now
+  `cli:v0.1.418@sha256:fd97fab2…`, the image that `flop.network/releases.json` currently publishes (SDK 0.7.2).
+  The bundled CLI of both images was compared: every command, option and JSON field the agent uses is
+  unchanged. The new image only adds optional `diagnostics` and funding fields on errors.
 - Double fault (a failed KV write, then an Actions cache restored from an older run), found by adding KV write
   failures, stale cache restores and gateway timeout/524/429 to the fuzz test. Before the fix, it caused three
   problems when gateway and direct buying both ran:
