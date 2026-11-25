@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Testnet faucet agent lane (`flop_agent_claim.py`, gated by `FLOP_FAUCET_AGENT_CLAIM`, off by default). Follows the
+  official guide (flop.network/llms.txt, "Get Testnet FLOP"): checks `/chain` (network `testnet` and the published
+  genesis) and `/limits` (`open` plus `claimPath`) before signing, signs `flop-faucet-agent/v1|<genesis>|<address>|<nonce>`
+  with the wallet key and POSTs `{address, nonce, signature}`. Keeps the nonce until a final result (the faucet makes a
+  repeat with the same nonce idempotent), tries the `<Bytes>` wrapper once if the raw signature is rejected and then
+  pauses 7 days, honours `retryAfterSeconds`/`Retry-After`, and sends a Telegram message on a grant or a first refusal.
+  It does not write the ledger. When enabled, the legacy `POST /fund` faucet path is skipped (closed on Testnet).
+
 ### Fixed
 - Direct buying pinned the FLOP CLI image `cli:v0.1.321` (SDK 0.5.2), which the current devnet runtime (spec
   1014020 and later) rejects (flop-labs/network#238); every `session run` would have failed. The default is now
