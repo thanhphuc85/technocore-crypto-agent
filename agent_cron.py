@@ -1708,7 +1708,7 @@ _TS_DURABLE_KEYS = ("last_seq", "last_telemetry", "last_manifest", "last_digest"
 # gateway_inflight: request gateway đang treo (timeout/5xx mơ hồ) + trần ngày + cờ cấm phát lại — mất
 # Actions cache vẫn đối soát được và không tự đặt lại phanh an toàn.
 _BLOB_DURABLE_KEYS = ("weekly_samples", "last_alert_price", "testnet_radar", "gateway_inflight", "llm_paid",
-                      "real_spend_watch_direct")
+                      "real_spend_watch_direct", "testnet_claim")
 # Khóa BỘ ĐẾM cộng dồn: hợp nhất bằng MAX từng ô (đếm chỉ tăng) — KHÔNG dùng luật blob
 # "local có thì local thắng", vì state.json rỗng sau khi cache mất sẽ nuốt số đã tích.
 _COUNTER_DURABLE_KEYS = ("kibble_lifetime", "kibble_lifetime_clean")
@@ -3762,6 +3762,51 @@ def _faucet_claim_fn(req: dict) -> dict:
     return out
 
 
+def _claim_http_get(url):
+    r = requests.get(url, headers={"User-Agent": UA}, timeout=15)
+    try:
+        return r.status_code, (r.json() if r.content else None)
+    except ValueError:
+        return r.status_code, None
+
+
+def _claim_http_post(url, body):
+    r = requests.post(url, json=body, headers={"User-Agent": UA, "Content-Type": "application/json"}, timeout=30)
+    try:
+        data = r.json() if r.content else None
+    except ValueError:
+        data = None
+    return r.status_code, data, dict(r.headers)
+
+
+def testnet_claim_step(state: dict, private_key, now: float = None) -> str:
+    """(GATED FLOP_FAUCET_AGENT_CLAIM) Nhận 10 FLOP testnet/ngày qua làn agent của faucet, ký bằng khoá ví (DID).
+    Không ghi sổ cái; chỉ lưu lịch sử claim (bền qua KV) và báo Telegram khi nhận / khi bị từ chối lần đầu."""
+    import flop_agent_claim as fac
+    if not fac.enabled():
+        return "off"
+    try:
+        import flop_gateway
+        wk = flop_gateway.wallet_key(private_key)
+        if wk is None:
+            print("[claim] bỏ qua — chưa có ví (FLOP_WALLET_USE_DID=on hoặc FLOP_WALLET_SEED_HEX)")
+            return "no-wallet"
+        addr = flop_gateway.wallet_address(wk)
+        rec, outcome, alert = fac.run_step(state.get(fac.KEY), wk, addr, time.time() if now is None else now,
+                                           _claim_http_get, _claim_http_post)
+        if outcome == "wait":
+            return outcome
+        print(f"[claim] faucet testnet: {outcome}")
+        if alert:
+            _telegram_send(alert)
+        state[fac.KEY] = rec
+        save_state({fac.KEY: rec})
+        return outcome
+    except Exception as e:
+        print(f"[claim] bỏ qua ({type(e).__name__}: {str(e)[:100]})")
+        return "error"
+
+
 FAUCET_WAIT_MAX = 2 * 86400            # chu kỳ faucet thật = 24h; hẹn xa hơn 2 ngày là rác
 
 
@@ -3840,6 +3885,11 @@ def faucet_step(state: dict, private_key, did) -> str:
     đều tưởng chưa claim lần nào: gõ faucet 288 lần/ngày, trần ngày vô tác dụng."""
     if os.environ.get("FLOP_FAUCET_ENABLED", "").strip().lower() not in ("1", "true", "on", "yes"):
         return "off"
+    import flop_agent_claim
+    if flop_agent_claim.enabled():
+        # Faucet testnet chỉ còn làn agent ký (POST /fund đã đóng): để testnet_claim_step lo, không gửi đường cũ.
+        print("[faucet] bỏ qua đường /fund — FLOP_FAUCET_AGENT_CLAIM bật (làn agent testnet)")
+        return "agent-claim-lane"
     # Chu kỳ 24h của faucet tính CHUNG cho mọi mức trên một địa chỉ (đo devnet 2026-10-24: nhận
     # quick 25 xong thì xin Verified báo "vừa được cấp vốn"). Operator tự xin Verified bằng
     # MetaMask (ký tay mỗi ngày) -> FLOP_FAUCET_TIER=manual: agent KHÔNG xin, để lượt 24h đó
@@ -6367,6 +6417,7 @@ def main():
         print(f"[sim-credit] bỏ qua ({str(e)[:80]})")
 
     faucet_status = faucet_step(state, private_key, did)
+    testnet_claim_step(state, private_key)
 
     # 3a9) (Tùy chọn, GATED) MUA PHIÊN INFERENCE từ thợ đào FLOP — đường "spend-to-earn" theo
     #      bản nháp FLOP (post session request -> PoUI -> settle). Testnet: đường gateway.

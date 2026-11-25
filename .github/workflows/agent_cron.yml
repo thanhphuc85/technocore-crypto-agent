@@ -454,6 +454,10 @@ jobs:
           # Lượt faucet kế tiếp mở trong <= N giây thì chờ ngay trong run để claim đúng giờ (mặc định 300).
           FLOP_FAUCET_WAIT_MAX_SEC: ${{ vars.FLOP_FAUCET_WAIT_MAX_SEC }}
           FLOP_FAUCET_JITTER_MIN: ${{ vars.FLOP_FAUCET_JITTER_MIN }}
+          # Faucet TESTNET làn agent (POST /v1/testnet/agent-claims, ký bằng khoá ví): on -> 10 FLOP/ngày.
+          FLOP_FAUCET_AGENT_CLAIM: ${{ vars.FLOP_FAUCET_AGENT_CLAIM }}
+          FLOP_FAUCET_TESTNET_URL: ${{ vars.FLOP_FAUCET_TESTNET_URL }}
+          FLOP_FAUCET_TESTNET_GENESIS: ${{ vars.FLOP_FAUCET_TESTNET_GENESIS }}
           # Nội dung AI tuỳ chọn (mặc định TẮT). Trước đây code đọc các biến này nhưng workflow
           # KHÔNG map -> đặt Repo Variable không có tác dụng gì.
           FLOP_DIGEST_ENABLED: ${{ vars.FLOP_DIGEST_ENABLED }}
