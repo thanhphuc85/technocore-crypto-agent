@@ -125,6 +125,24 @@ def test_force_needs_the_explicit_opt_in(monkeypatch):
     assert cli.sessions()[0]["cmd"][-1] == "force"
 
 
+def test_force_passes_a_channel_lifetime_the_cli_outlives(monkeypatch):
+    # CLI 0.10.x mặc định kênh 1200 s, dài hơn ngân sách bước direct: đường force luôn truyền --max-duration (mặc định 600)
+    # và CLI được chờ quá thời hạn đó + biên, không thì bị giết trước khi SDK kịp thu hồi escrow của kênh hỏng.
+    monkeypatch.setenv("FLOP_DIRECT_VIA", "force")
+    monkeypatch.setenv("FLOP_DIRECT_ALLOW_FORCE", "on")
+    cli = CLI()
+    assert step({}, cli)["outcome"] == "opened"
+    run = cli.sessions()[0]
+    assert run["cmd"][run["cmd"].index("--max-duration") + 1] == str(fd.DEFAULT_FORCE_MAX_DURATION_SEC)
+    assert run["timeout"] >= fd.DEFAULT_FORCE_MAX_DURATION_SEC + fd.MAXDUR_MARGIN_SEC
+    monkeypatch.setenv("FLOP_DIRECT_MAX_DURATION_SEC", "900")
+    cli = CLI()
+    step({}, cli)
+    assert cli.sessions()[0]["cmd"][cli.sessions()[0]["cmd"].index("--max-duration") + 1] == "900"
+    monkeypatch.setenv("FLOP_DIRECT_MAX_DURATION_SEC", "60")
+    assert any("FLOP_DIRECT_MAX_DURATION_SEC" in e for e in fd.config()[1])
+
+
 def test_buying_from_the_agents_own_wallet_is_refused(monkeypatch):
     monkeypatch.setenv("FLOP_DIRECT_MINER", fg.ss58_encode(fg._raw_pub(KEY), prefix=0))   # cùng ví, prefix khác
     cli = CLI()
@@ -2420,3 +2438,36 @@ def test_done_channel_the_ledger_lost_is_booked_again():
          explorer={CH: paid()}, own_channels_fn=lambda a: [_row(CH, opened=NOW - 7200)],
          booked_fn=lambda cid: tm.direct_booked(cid))
     assert sum(1 for e in tm.load_ledger().get("entries", []) if e.get("ref") == CH) == 1   # không ghi lần hai
+
+
+def test_agent_ignores_a_non_live_explorer_balance(monkeypatch):
+    # FLOPScan trả "balance":"0","liveBalance":false khi chỉ có số trong cache: KHÔNG được đọc thành ví rỗng (low_balance).
+    monkeypatch.setenv("FLOP_GATEWAY_PROMPTS", "Explain optimistic versus pessimistic locking in distributed databases.")
+    monkeypatch.setenv("FLOP_DIRECT_VIA", "force")
+    monkeypatch.setenv("FLOP_DIRECT_ALLOW_FORCE", "on")
+    monkeypatch.setenv("FLOP_DIRECT_MAX_FLOP", "0.005")
+    cli = CLI()
+    monkeypatch.setattr(fd, "_run", cli)
+
+    class _R:
+        status_code = 200
+        text = ""
+
+        def __init__(self, data):
+            self._d = data
+
+        def json(self):
+            return self._d
+
+        def raise_for_status(self):
+            return None
+
+    def get(url, **k):
+        if "/api/accounts/" in url:
+            return _R({"balance": "0", "nonce": 0, "liveBalance": False})
+        return _R({})
+
+    monkeypatch.setattr(ac.requests, "get", get)
+    monkeypatch.setattr(ac, "kv_set", lambda *a, **k: True)
+    monkeypatch.setattr(ac, "_telegram_send", lambda m: True)
+    assert ac.direct_session_step({}, KEY, NOW) == "opened"

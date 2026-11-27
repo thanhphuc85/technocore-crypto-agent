@@ -245,8 +245,11 @@ def parse_spent(text):
 
 
 def parse_balance(text):
-    """balance (int, đơn vị raw 1e18) của một ví trên explorer; None nếu hỏng."""
+    """balance (int, đơn vị raw 1e18) của một ví trên explorer; None nếu hỏng. FLOPScan (testnet) đôi khi trả
+    `"balance":"0","liveBalance":false` (số cũ trong cache, chain thật vẫn còn tiền) -> coi như KHÔNG đọc được."""
     d = _json(text)
+    if isinstance(d, dict) and d.get("liveBalance") is False:
+        return None
     v = d.get("balance") if isinstance(d, dict) else None
     try:
         return int(v) if isinstance(v, (str, int)) else None

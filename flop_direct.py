@@ -232,7 +232,7 @@ def config() -> tuple:
         except ValueError:
             errs.append(f"FLOP_DIRECT_MAX_DURATION_SEC phải là số nguyên >= {MIN_MAX_DURATION_SEC} (nhận {raw_md!r})")
             max_duration = None
-    if max_duration is None and via == "force":
+    if max_duration is None and via in ("auto", "force"):        # auto rơi về force khi không có offer
         max_duration = DEFAULT_FORCE_MAX_DURATION_SEC
     try:
         max_tokens = int(_env("FLOP_DIRECT_MAX_TOKENS") or 1024)
@@ -974,7 +974,7 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
             _learn(g, ms, p, info)
             _mark_done(g, p["channel"])
             log(f"[direct] kênh {p['channel'][:12]}… đã settle đứng tên ví mình: {float(amount):.6g} FLOP"
-                + ("" if book_fn else " (devnet tập, không ghi sổ)"))
+                + ("" if book_fn else " (" + network + ", không ghi sổ)"))
         elif kind == "refunded":
             st = dict(g.get("stats") or {})
             st["refunded"] = int(st.get("refunded") or 0) + 1

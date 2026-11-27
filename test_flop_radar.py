@@ -472,3 +472,10 @@ def test_yellowpaper_change_reaches_the_radar_alert():
     alert = rd.check(st, _pages(_fetcher(), pages))
     assert alert and "flop-labs/yellowpaper có 1 commit MỚI" in alert and "Checklist" not in alert
     assert rd.check(st, _pages(_fetcher(), pages)) is None
+
+
+def test_parse_balance_ignores_a_non_live_explorer_balance():
+    # FLOPScan trả "balance":"0","liveBalance":false khi số dư lấy từ cache (chain thật vẫn còn tiền).
+    assert rd.parse_balance('{"balance":"0","liveBalance":false}') is None
+    assert rd.parse_balance('{"balance":"9959691575425000000","liveBalance":true}') == 9959691575425000000
+    assert rd.parse_balance('{"balance":"5"}') == 5

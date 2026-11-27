@@ -5912,6 +5912,8 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
                 return None
             r.raise_for_status()
             d = r.json()
+            if isinstance(d, dict) and d.get("liveBalance") is False:
+                return None      # FLOPScan: "balance":"0" từ cache khi không đọc được chain -> không biết, không phải 0
             raw = d.get("balance") if isinstance(d, dict) else None
             from decimal import Decimal as _D
             try:
