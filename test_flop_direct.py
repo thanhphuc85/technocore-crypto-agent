@@ -2854,3 +2854,120 @@ def test_stale_probe_is_not_spent_when_the_run_stops_before_the_session():
     cli2 = CLI()
     step(st, cli2, now=NOW + fd.RPC_BACKOFF_SEC + 60, miner_channels_fn=_health_fn(table))
     assert len(cli2.sessions()) == 1 and mst(st)["probe_at"] == NOW + fd.RPC_BACKOFF_SEC + 60
+
+
+# --- lấy lại escrow kênh kẹt (flop_recover.mjs) ------------------------------------------------------------------
+
+class RecoverCLI(CLI):
+    """CLI giả + script lấy lại escrow: lệnh có `--entrypoint node` trả các dòng JSON trong `recover`."""
+
+    def __init__(self, recover=None, **kw):
+        super().__init__(**kw)
+        self.recover = recover or {}
+        self.recover_calls = []
+
+    def __call__(self, cmd, env, timeout):
+        if "--entrypoint" in cmd:
+            self.recover_calls.append({"cmd": list(cmd), "env": dict(env)})
+            ids = env.get("FLOP_RECOVER_CHANNELS", "").split(",")
+            lines = [json.dumps({"channel": c, **self.recover[c]}) for c in ids if c in self.recover]
+            return 0, "\n".join(lines + [json.dumps({"done": True})]), ""
+        return super().__call__(cmd, env, timeout)
+
+
+def _locked(agent=ADDR):
+    return {"agent": agent, "status": "open", "paymentStatus": "LOCKED", "observationHead": "finalized"}
+
+
+def _settle_unknown(st):
+    err = json.dumps({"ok": False, "message": "cooperative settlement outcome unknown; inspect finalized history",
+                      "channel": CH2})
+    step(st, CLI(session=(1, "", err)))
+    assert mst(st)["unknown_until"] == NOW + fd.UNKNOWN_HOLD_SEC and st[fd.KEY]["pending"][0]["error"]
+    return st
+
+
+def test_recover_command_runs_node_in_the_pinned_image_without_secrets_on_argv():
+    cli = RecoverCLI(recover={CH: {"state": "open", "action": "timeout", "ok": True, "tx": "0xt1", "refunded": "1"}})
+    st = _settle_unknown({})
+    st[fd.KEY]["pending"][0]["channel"] = CH
+    st[fd.KEY]["pending"][0]["ts"] = NOW
+    step(st, cli, explorer={CH: _locked()}, now=NOW + fd.RECOVER_AFTER_SEC + 60)
+    c = cli.recover_calls[0]
+    assert c["cmd"][:2] == ["docker", "run"] and "-w" in c["cmd"] and c["cmd"][c["cmd"].index("-w") + 1] == "/app"
+    assert c["cmd"][c["cmd"].index("--entrypoint") + 1] == "node" and fd.DEFAULT_IMAGE in c["cmd"]
+    secret = c["env"]["FLOP_RECOVER_SECRET"]
+    assert secret.startswith("0x") and len(secret) == 66 and not any(secret in a for a in c["cmd"])
+    assert c["env"]["FLOP_RECOVER_RPC"] == "wss://testnet.flop.network" and c["env"]["FLOP_RECOVER_ADDR"] == ADDR
+    assert c["env"]["FLOP_RECOVER_CHANNELS"] == CH and "--input-type=module" in c["cmd"]
+    assert st[fd.KEY]["pending"][0]["rec_tx"] == "0xt1"
+
+
+def test_stuck_channel_is_timed_out_then_refund_frees_the_miner():
+    st = _settle_unknown({})
+    early = RecoverCLI()
+    step(st, early, explorer={CH2: _locked()}, now=NOW + 300)
+    assert early.recover_calls == []                                            # chưa tới RECOVER_AFTER_SEC
+    cli = RecoverCLI(recover={CH2: {"state": "open", "action": "timeout", "ok": True, "tx": "0xt1", "refunded": "1"}})
+    t1 = NOW + fd.RECOVER_AFTER_SEC + 60
+    r = step(st, cli, explorer={CH2: _locked()}, now=t1)
+    assert len(cli.recover_calls) == 1 and r["outcome"] == "hold_unknown"
+    again = RecoverCLI()
+    step(st, again, explorer={CH2: _locked()}, now=t1 + fd.RECOVER_RETRY_SEC + 60)
+    assert again.recover_calls == []                                            # đã gửi tx: không gửi lại
+    refunded = {**_locked(), "status": "timedout", "paymentStatus": "REFUNDED"}
+    cli2 = CLI()
+    step(st, cli2, explorer={CH2: refunded}, now=t1 + 600)
+    assert "unknown_until" not in mst(st) and len(cli2.sessions()) == 1         # hết giữ 6 giờ: miner dùng lại ngay
+    assert st[fd.KEY]["stats"]["refunded"] == 1
+
+
+def test_not_yet_due_on_chain_is_retried_later_without_counting_a_try():
+    st = _settle_unknown({})
+    cli = RecoverCLI(recover={CH2: {"state": "open", "action": "wait", "deadline": "999"}})
+    t1 = NOW + fd.RECOVER_AFTER_SEC + 60
+    step(st, cli, explorer={CH2: _locked()}, now=t1)
+    p = st[fd.KEY]["pending"][0]
+    assert len(cli.recover_calls) == 1 and p["rec_at"] == t1 and not p.get("rec_tries")
+    cli2 = RecoverCLI(recover={CH2: {"state": "open", "action": "wait"}})
+    step(st, cli2, explorer={CH2: _locked()}, now=t1 + 300)
+    assert cli2.recover_calls == []                                             # cách nhau RECOVER_RETRY_SEC
+
+
+def test_recover_failures_alert_after_max_tries():
+    st = _settle_unknown({})
+    t, alerts = NOW + fd.RECOVER_AFTER_SEC + 60, []
+    for _ in range(fd.RECOVER_MAX_TRIES + 1):
+        cli = RecoverCLI(recover={CH2: {"state": "open", "action": "timeout", "ok": False, "error": "boom"}})
+        step(st, cli, explorer={CH2: _locked()}, now=t, alerts=alerts)
+        t += fd.RECOVER_RETRY_SEC + 60
+    assert st[fd.KEY]["pending"][0]["rec_tries"] == fd.RECOVER_MAX_TRIES
+    assert sum("lấy lại escrow" in a for a in alerts) == 1
+
+
+def test_recover_waits_for_a_fresh_rpc_and_skips_local_cli(monkeypatch):
+    st = _settle_unknown({})
+    cli = RecoverCLI(recover={CH2: {"state": "open", "action": "timeout", "ok": True, "tx": "0xt"}})
+    step(st, cli, explorer={CH2: _locked()}, now=NOW + fd.RECOVER_AFTER_SEC + 60, rpc_ready_fn=lambda: "lệch 40s")
+    assert cli.recover_calls == []
+    monkeypatch.setenv("FLOP_DIRECT_CLI", "node /x/cli.js")
+    logs = []
+    assert fd.recover_channels([CH2], wkey=None, addr=ADDR, network="testnet", runner=cli, log=logs.append) == {}
+    assert cli.recover_calls == [] and logs
+
+
+def test_recover_script_is_shipped_and_only_calls_refund_extrinsics():
+    src = open(fd.RECOVER_SCRIPT, encoding="utf-8").read()
+    assert "client.timeout(id)" in src and "client.expireForceOpen(id)" in src
+    assert "secret is not the agent wallet" in src and '"foreign"' in src
+    for bad in ("forceSettle", "openChannel", "transfer", "settle(", "finalize("):
+        assert bad not in src
+
+
+def test_legacy_errored_channel_without_hold_mark_still_releases_its_session_hold():
+    st = _settle_unknown({})
+    st[fd.KEY]["pending"][0].pop("hold")                                        # bản ghi trước bản sửa
+    refunded = {**_locked(), "status": "timedout", "paymentStatus": "REFUNDED"}
+    cli = CLI()
+    step(st, cli, explorer={CH2: refunded}, now=NOW + 900)
+    assert "unknown_until" not in mst(st) and len(cli.sessions()) == 1

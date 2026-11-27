@@ -132,6 +132,17 @@ ORPHAN_LEGACY_SPAN_SEC = 1800      # khoản giữ dạng cũ [ts, mạng, escro
 # tranh chấp (computeChannel.disputeWindow = 604800 block, block 1 s) rồi phải có người gọi computeChannel.finalize
 # thì miner mới được trả và kênh mới PAID — không ai gọi thì chi tiêu không được tính và escrow nằm khoá.
 FINALIZE_AFTER_SEC = 7 * 86400 + 3600
+# LẤY LẠI ESCROW khi CLI không tự khôi phục được (testnet 27/11: "cooperative settlement outcome unknown" và "on-chain
+# recovery failed" -> 2 kênh 0.5 FLOP nằm khoá, chặn cả miner tốt nhất). flop_recover.mjs chạy trong image CLI, đọc kênh ở
+# block ĐÃ CHỐT và chỉ gọi lệnh hoàn tiền của pallet: expireForceOpen (PendingAck quá ackDeadline = 600 block) hoặc
+# timeout (Open quá openedAt + maxDuration = 600 block). Thử sau RECOVER_AFTER_SEC, cách nhau RECOVER_RETRY_SEC.
+RECOVER_AFTER_SEC = 20 * 60
+RECOVER_RETRY_SEC = 30 * 60
+RECOVER_MAX_TRIES = 6
+RECOVER_RPC = {"testnet": "wss://testnet.flop.network", "devnet": "wss://rpc.devnet.flop.network"}
+RECOVER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "flop_recover.mjs")
+RECOVER_ENV = ("FLOP_RECOVER_SECRET", "FLOP_RECOVER_RPC", "FLOP_RECOVER_CHANNELS", "FLOP_RECOVER_ADDR",
+               "FLOP_RECOVER_RPC_TIMEOUT_MS")
 FINALIZE_RETRY_SEC = 86400
 FINALIZE_MAX_TRIES = 3
 LOST_SWEEP_SEC = 1800              # quét kênh MẤT DẤU (đứng tên ví, mở sau phiên cuối state biết) tối đa mỗi chừng này
@@ -650,7 +661,7 @@ _DURABLE_TOP = ("day", "unknown_until", "wait_until", "wait_why", "prompt_idx", 
 _DURABLE_MINER = ("unknown_until", "wait_until", "wait_why", "cap", "sessions", "unknown_nonce", "unknown_since",
                   "unknown_escrow", "unknown_day", "fail_streak", "probe_at")
 _PENDING_CORE = ("channel", "ts", "network", "miner", "error", "alerted", "force", "fin_tries", "fin_at", "fin_tx",
-                 "fin_alerted", "max_flop")
+                 "fin_alerted", "max_flop", "rec_at", "rec_tries", "rec_tx", "hold")
 _PENDING_LEARN = ("model", "model_hash", "ptok", "completion_tokens")
 
 
@@ -745,6 +756,62 @@ def finalize_channels(channels, *, wkey, addr: str, network: str, runner, log=pr
                 log(f"[direct] finalize kênh {cid[:12]}… lỗi: {msg}")
     finally:
         shutil.rmtree(work, ignore_errors=True)
+    return res
+
+
+def recover_command(env_names):
+    """Lệnh docker chạy `node` trong image CLI (cwd /app để resolve SDK của image) | None khi dùng CLI cục bộ
+    (FLOP_DIRECT_CLI: không có image để mượn SDK -> không tự lấy lại escrow)."""
+    if _env("FLOP_DIRECT_CLI"):
+        return None
+    image = _env("FLOP_DIRECT_IMAGE") or DEFAULT_IMAGE
+    if image_problem(image):
+        image = DEFAULT_IMAGE
+    cmd = ["docker", "run", "--rm", "--network", docker_network(), "-w", "/app", "--entrypoint", "node",
+           "--name", f"flop-direct-{secrets.token_hex(6)}"]
+    for n in env_names:
+        cmd += ["-e", n]
+    return cmd + [image]
+
+
+def recover_rpc(network: str) -> str:
+    v = _env("FLOP_DIRECT_RECOVER_RPC")
+    return v if v.startswith("wss://") else RECOVER_RPC.get(network, "")
+
+
+def recover_channels(channels, *, wkey, addr: str, network: str, runner, log=print) -> dict:
+    """Chạy flop_recover.mjs cho các kênh của ví -> {channel: dòng JSON của script} (state, action, ok, tx, error).
+    Seed chỉ đi qua biến môi trường của container (như `keys import`), không nằm trên dòng lệnh."""
+    res = {}
+    rpc = recover_rpc(network)
+    if not channels or not rpc:
+        return res
+    base = recover_command(RECOVER_ENV)
+    if base is None:
+        log("[direct] lấy lại escrow cần image Docker của CLI (FLOP_DIRECT_CLI đang đặt) — bỏ qua")
+        return res
+    try:
+        with open(RECOVER_SCRIPT, encoding="utf-8") as f:
+            script = f.read()
+    except OSError as e:
+        log(f"[direct] thiếu {os.path.basename(RECOVER_SCRIPT)} ({type(e).__name__}) — không lấy lại escrow được")
+        return res
+    rpc_ms = rpc_timeout_ms()
+    env = {"FLOP_RECOVER_SECRET": "0x" + fg._raw_priv(wkey).hex(), "FLOP_RECOVER_RPC": rpc,
+           "FLOP_RECOVER_CHANNELS": ",".join(channels), "FLOP_RECOVER_ADDR": addr,
+           "FLOP_RECOVER_RPC_TIMEOUT_MS": str(rpc_ms)}
+    rc, so, se = runner(base + ["--input-type=module", "-e", script], env, 120 + 90 * len(channels) + rpc_ms // 1000)
+    want = {str(c).lower() for c in channels}
+    for line in (so or "").splitlines():
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(d, dict) and str(d.get("channel") or "").lower() in want:
+            res[str(d["channel"]).lower()] = d
+    if not res:
+        msg = str((last_json(so) or {}).get("error") or (se or "").strip()[-160:] or f"exit {rc}")[:160]
+        log(f"[direct] lấy lại escrow: không có kết quả ({msg})")
     return res
 
 
@@ -969,6 +1036,25 @@ def release_unknown_holds(g: dict, ms: dict, *, now: int, addr: str, nonce_fn, l
     return freed
 
 
+def _release_session_hold(ms: dict, p: dict) -> bool:
+    """Kênh LỖI `p` (CLI báo id kênh kèm lỗi) đã có kết cục trên chain -> bỏ khoản giữ 6 giờ của ĐÚNG phiên đó
+    (`hold` của kênh == unknown_since của miner). Kênh mồ côi tìm lại qua explorer không có `hold`: giữ như cũ."""
+    if not (isinstance(p, dict) and p.get("error") and p.get("miner")):
+        return False
+    # Bản ghi cũ (trước khi có `hold`): kênh do CLI báo id có `model`, kênh mồ côi thì không; ts == giờ phiên.
+    mark = p.get("hold") or (p.get("ts") if p.get("model") else None)
+    if not mark:
+        return False
+    st = ms.get(_mkey(p["miner"]))
+    if not isinstance(st, dict) or int(st.get("unknown_until") or 0) <= 0:
+        return False
+    if int(st.get("unknown_since") or -1) != int(mark):
+        return False
+    for f in ("unknown_until", "unknown_nonce", "unknown_since", "unknown_escrow", "unknown_day"):
+        st.pop(f, None)
+    return True
+
+
 def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, prompt: str = None,
              prompts=None, book_fn=None, deny=(), deadline=None, runner=None, alert=None, log=print,
              clock=time.time, offers_fn=None, price_fn=None, miner_cap_fn=None, balance_fn=None,
@@ -1037,6 +1123,7 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
     addr = fg.wallet_address(wkey)
     ms = {k: dict(v) for k, v in (g.get("miners") or {}).items() if isinstance(v, dict)}
     to_finalize = []
+    to_recover = []
     # Lượt TRƯỚC bị giết giữa một phiên (mốc `attempt` lưu trước khi gọi CLI vẫn còn): không biết kênh đã mở chưa.
     att = g.pop("attempt", None)
     if isinstance(att, dict) and att.get("ts"):
@@ -1234,6 +1321,7 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
             st["paid_flop"] = round(float(st.get("paid_flop") or 0) + float(amount), 9)
             g["stats"] = st
             _learn(g, ms, p, info)
+            _release_session_hold(ms, p)
             _mark_done(g, p["channel"])
             log(f"[direct] kênh {p['channel'][:12]}… đã settle đứng tên ví mình: {float(amount):.6g} FLOP"
                 + ("" if book_fn else " (" + network + ", không ghi sổ)"))
@@ -1241,6 +1329,7 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
             st = dict(g.get("stats") or {})
             st["refunded"] = int(st.get("refunded") or 0) + 1
             g["stats"] = st
+            _release_session_hold(ms, p)
             _mark_done(g, p["channel"])
             # Escrow đã về ví: trả phần giữ trong trần NGÀY (nếu kênh mở hôm nay), kẻo miner hay hoàn kênh làm cạn trần
             # ngày mà không chi được gì (~20 lần hoàn 100 FLOP = hết 2000). Kênh mở hôm trước: trần ngày đó đã qua.
@@ -1285,6 +1374,10 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
                     to_finalize.append(p["channel"])
                 keep.append(p)
                 continue
+            if (age >= RECOVER_AFTER_SEC and kind in ("open", "missing") and not p.get("rec_tx")
+                    and now - int(p.get("rec_at") or 0) >= RECOVER_RETRY_SEC
+                    and int(p.get("rec_tries") or 0) < RECOVER_MAX_TRIES):
+                to_recover.append(p["channel"])        # quá hạn mà chưa xong: thử lấy lại escrow (chain tự kiểm hạn)
             if age >= PENDING_ALERT_SEC and not p.get("alerted"):
                 p = {**p, "alerted": now}
                 alert(f"⚠️ FLOP direct: kênh {p['channel'][:18]}… chưa xong sau "
@@ -1309,6 +1402,36 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
                 elif p["fin_tries"] >= FINALIZE_MAX_TRIES:
                     alert(f"⚠️ FLOP direct: finalize kênh settle cưỡng bức {p['channel'][:18]}… thất bại "
                           f"{p['fin_tries']} lần ({info_s[:100]}) — FLOP còn khoá, chi tiêu chưa được tính; kiểm tay.")
+    if to_recover and (deadline is None or clock() + 150 + 90 * len(to_recover) < deadline):
+        why = ""
+        if rpc_ready_fn is not None:
+            try:
+                why = rpc_ready_fn()
+            except Exception as e:
+                why = f"không kiểm được RPC ({type(e).__name__})"
+        if why:
+            log(f"[direct] chưa lấy lại escrow {len(to_recover)} kênh — RPC chưa sẵn sàng để ký ({why})")
+        else:
+            results = recover_channels(to_recover[:8], wkey=wkey, addr=addr, network=network, runner=runner, log=log)
+            for p in g["pending"]:
+                r = results.get(str(p.get("channel") or "").lower())
+                if not r:
+                    continue
+                p["rec_at"] = now
+                act = r.get("action")
+                if r.get("ok") is True and r.get("tx"):
+                    p["rec_tx"] = str(r["tx"])[:80]
+                    p["rec_tries"] = int(p.get("rec_tries") or 0) + 1
+                    log(f"[direct] đã gửi {'timeout' if act == 'timeout' else 'expireForceOpen'} cho kênh "
+                        f"{p['channel'][:12]}… (tx {p['rec_tx'][:12]}…) — escrow về ví, chờ explorer ghi nhận")
+                elif r.get("ok") is False:
+                    p["rec_tries"] = int(p.get("rec_tries") or 0) + 1
+                    log(f"[direct] lấy lại escrow kênh {p['channel'][:12]}… lỗi ({act}): {str(r.get('error'))[:160]}")
+                    if p["rec_tries"] >= RECOVER_MAX_TRIES:
+                        alert(f"⚠️ FLOP direct: lấy lại escrow kênh {p['channel'][:18]}… thất bại {p['rec_tries']} lần "
+                              f"({str(r.get('error'))[:100]}) — FLOP còn khoá; kiểm tay.")
+                else:
+                    log(f"[direct] kênh {p['channel'][:12]}… trên chain: {r.get('state')} ({act})")
     if not enabled():
         return done("off", reason="đã tắt — chỉ đối soát kênh còn chờ")
     cfg, errs = config()
@@ -1761,7 +1884,8 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
             refused = not ambiguous and (unsupported or err.get("ok") is False or _never_started(cmd, rc))
             if has_ch:
                 g["pending"] = g["pending"] + [{"channel": ch, "ts": now, "network": network, "miner": m["miner"],
-                                                "model": m["model"], "error": msg[:120], "max_flop": max_flop}]
+                                                "model": m["model"], "error": msg[:120], "max_flop": max_flop,
+                                                "hold": now}]   # = unknown_since nếu phiên này bị giữ 6 giờ
             elif refused:
                 # CLI từ chối RÕ RÀNG trước khi có kênh (vd. ví thiếu FLOP) -> không khoá đồng nào: trả lại phần đã giữ
                 # trong trần ngày, kẻo vài lần lỗi "ăn" hết trần dù chưa chi gì. Mơ hồ (quá giờ/không JSON) thì giữ.
