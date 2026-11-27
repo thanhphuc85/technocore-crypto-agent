@@ -427,6 +427,8 @@ jobs:
           FLOP_DIRECT_RPC_URL: ${{ vars.FLOP_DIRECT_RPC_URL }}
           # Giới hạn chờ kết nối RPC của CLI (ms, `--rpc-timeout`); trống = 60000. CLI mặc định 10000 hụt khi testnet đông.
           FLOP_DIRECT_RPC_TIMEOUT_MS: ${{ vars.FLOP_DIRECT_RPC_TIMEOUT_MS }}
+          # Chấm sức khoẻ miner qua explorer (mặc định bật; "off" = xoay vòng mù như cũ).
+          FLOP_DIRECT_HEALTH: ${{ vars.FLOP_DIRECT_HEALTH }}
           # Id (tiền tố >= 12 hex) các kênh LỖI operator xác nhận chưa từng mở: bỏ theo dõi + gỡ chặn miner (chỉ khi explorer 404).
           FLOP_DIRECT_FORGET: ${{ vars.FLOP_DIRECT_FORGET }}
           FLOP_DIRECT_ALLOW_FORCE: ${{ vars.FLOP_DIRECT_ALLOW_FORCE }}

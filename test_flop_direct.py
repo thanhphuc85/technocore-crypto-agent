@@ -2773,3 +2773,73 @@ def test_wallet_tx_read_error_keeps_the_block():
     cli = CLI()
     r = step(st, cli, now=NOW + 900, own_txs_fn=boom)
     assert r["outcome"] == "pending" and cli.sessions() == []
+
+
+# --- sức khoẻ miner (FLOP_DIRECT_HEALTH) -----------------------------------------------------------
+
+def _hch(ago, status="PAID"):
+    return {"openedAt": (NOW - ago) * 1000, "paymentStatus": status, "agent": OTHER}
+
+
+def test_miner_health_labels():
+    assert fd.miner_health([], NOW) == ("new", 0, None)
+    assert fd.miner_health([_hch(600), _hch(900), _hch(1200, "REFUNDED")], NOW) == ("ok", 2, NOW - 600)
+    old = fd.HEALTH_STALE_SEC + 60
+    assert fd.miner_health([_hch(300, "LOCKED"), _hch(old)], NOW) == ("stale", 0, NOW - old)
+    assert fd.miner_health([_hch(300, "REFUNDED")], NOW)[0] == "stale"
+    assert fd.miner_health(["junk", {"openedAt": "x"}], NOW)[0] == "new"
+
+
+def _health_fn(table):
+    return lambda miner: table.get(miner, [])
+
+
+def test_paying_miner_is_tried_first(monkeypatch, three_miners):
+    stale = [_hch(fd.HEALTH_STALE_SEC + 600)]
+    table = {MINER: stale, M2: [_hch(600)], M3: [_hch(600), _hch(700), _hch(800)]}
+    cli = MultiCLI()
+    r = step({}, cli, offers_fn=_offers_for(MINER, M2, M3), miner_channels_fn=_health_fn(table))
+    assert r["opened"] == 1 and cli.miners() == [M3]
+
+
+def test_stale_miner_is_probed_at_most_every_probe_window(monkeypatch):
+    table = {MINER: [_hch(fd.HEALTH_STALE_SEC + 600)]}
+    logs, st = [], {}
+    cli = CLI()
+    step(st, cli, miner_channels_fn=_health_fn(table), log=logs.append)
+    assert len(cli.sessions()) == 1 and any("thăm dò" in m for m in logs)       # thăm dò một lần
+    cli2 = CLI()
+    r = step(st, cli2, now=NOW + 1800, miner_channels_fn=_health_fn(table))
+    assert r["outcome"] == "stale" and cli2.sessions() == []
+    cli3 = CLI()
+    step(st, cli3, now=NOW + fd.STALE_PROBE_SEC + 60, miner_channels_fn=_health_fn(table))
+    assert len(cli3.sessions()) == 1
+
+
+def test_new_miner_without_history_is_not_skipped():
+    cli = CLI()
+    assert step({}, cli, miner_channels_fn=lambda m: [])["opened"] == 1
+
+
+def test_health_read_error_or_off_keeps_old_behaviour(monkeypatch):
+    def boom(m):
+        raise RuntimeError("explorer down")
+    cli = CLI()
+    assert step({}, cli, miner_channels_fn=boom)["opened"] == 1
+    monkeypatch.setenv("FLOP_DIRECT_HEALTH", "off")
+    cli2 = CLI()
+    assert step({}, cli2, miner_channels_fn=_health_fn({MINER: [_hch(fd.HEALTH_STALE_SEC + 600)]}))["opened"] == 1
+
+
+def test_repeated_failures_back_off_exponentially():
+    err = (1, "", json.dumps({"ok": False, "code": "SESSION_FAILED", "message": "no answer"}))
+    st, t = {}, NOW
+    waits = []
+    for _ in range(5):
+        step(st, CLI(session=err), now=t)
+        w = mst(st)["wait_until"] - t
+        waits.append(w)
+        t += w + 1
+    assert waits == [3600, 7200, 14400, 28800, 28800]
+    step(st, CLI(), now=t)                                                    # thành công -> hết chuỗi lỗi
+    assert "fail_streak" not in mst(st)

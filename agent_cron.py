@@ -5873,6 +5873,14 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
             d = r.json()
             return d.get("data") if isinstance(d, dict) and isinstance(d.get("data"), list) else []
 
+        def miner_channels(miner):
+            # Kênh gần đây của MỘT miner (mọi agent) — chấm sức khoẻ: miner còn trả tiền cho ai không.
+            r = requests.get(f"{explorer}/api/compute-channels", params={"miner": miner, "limit": "50"},
+                             headers={"User-Agent": UA}, timeout=15)
+            r.raise_for_status()
+            d = r.json()
+            return d.get("data") if isinstance(d, dict) and isinstance(d.get("data"), list) else []
+
         def own_txs(addr):
             # Giao dịch gần đây của ví (explorer): tìm expireForceOpen/timeout đã hoàn kênh lỗi mà explorer xoá (404).
             r = requests.get(f"{explorer}/api/accounts/{addr}/transactions", params={"limit": "50"},
@@ -5980,7 +5988,7 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
             deadline=direct_deadline(), alert=_telegram_send, checkpoint=checkpoint,
             spend_room=lambda: combined_spend_room(state, now),
             booked_fn=(lambda cid: _tm.direct_booked(cid)) if testnet else None, nonce_fn=nonce,
-            rpc_ready_fn=rpc_ready if rpc_url else None, own_txs_fn=own_txs)
+            rpc_ready_fn=rpc_ready if rpc_url else None, own_txs_fn=own_txs, miner_channels_fn=miner_channels)
         direct_kv_persist(state, private_key)
         save_state({flop_direct.KEY: state.get(flop_direct.KEY)})
         global _DIRECT_LAST
