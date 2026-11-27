@@ -810,6 +810,27 @@ def _note_unknown(st: dict, since: int, nonce, escrow, day: str) -> None:
 
 
 _FORGET_RE = re.compile(r"^0x[0-9a-fA-F]{12,64}$")
+# Giao dịch của CHÍNH ví đóng kênh và hoàn escrow về ví: force-open miner không xác nhận thì CLI gọi expireForceOpen.
+# Explorer xoá luôn kênh đó (404) -> trước đây kênh LỖI nằm chờ MISSING_DROP_SEC (48 giờ) và chặn miner suốt thời gian đó.
+_REFUND_CALLS = {"expireforceopen", "timeout"}
+
+
+def refunded_channel_ids(txs) -> set:
+    """Id kênh (chữ thường) mà ví đã đóng-hoàn-tiền THÀNH CÔNG (computeChannel.expireForceOpen / timeout) trong các
+    giao dịch explorer `txs` (/api/accounts/<ví>/transactions: method, section, params, success)."""
+    out = set()
+    for t in txs or []:
+        if not isinstance(t, dict) or t.get("success") is not True:
+            continue
+        if str(t.get("section") or "").lower() != "computechannel":
+            continue
+        if str(t.get("method") or "").lower() not in _REFUND_CALLS:
+            continue
+        params = t.get("params")
+        cid = str(params[0]) if isinstance(params, list) and params else ""
+        if _CHANNEL_RE.match(cid):
+            out.add(cid.lower())
+    return out
 
 
 def forget_channels(g: dict, ms: dict, *, now: int, fetch_channel, log=print) -> list:
@@ -918,7 +939,7 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
              prompts=None, book_fn=None, deny=(), deadline=None, runner=None, alert=None, log=print,
              clock=time.time, offers_fn=None, price_fn=None, miner_cap_fn=None, balance_fn=None,
              indexer_url=None, own_channels_fn=None, checkpoint=None, spend_room=None, booked_fn=None,
-             nonce_fn=None, rpc_ready_fn=None) -> dict:
+             nonce_fn=None, rpc_ready_fn=None, own_txs_fn=None) -> dict:
     """Một nhịp mua trực tiếp: tối đa FLOP_DIRECT_MAX_PER_RUN phiên, xoay vòng các miner. Trả {"outcome", ...};
     KHÔNG ném lỗi. `book_fn(amount, channel_id, model, escrow=)` ghi sổ (None = chạy tập devnet, không ghi).
     `fetch_channel(channel_id)` -> dict explorer | None. `offers_fn(miner, model_hash)` -> các dòng
@@ -941,6 +962,10 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
 
     `rpc_ready_fn()` -> '' khi RPC đủ mới để SDK ký | lý do. Gọi MỘT lần mỗi lượt ngay trước phiên đầu tiên; chưa sẵn
     sàng -> nghỉ chung RPC_BACKOFF_SEC, không chặn miner, không giữ trần ngày, không báo động.
+
+    `own_txs_fn(address)` -> giao dịch gần đây của ví (explorer). Kênh LỖI mà explorer 404: nếu ví đã gọi
+    expireForceOpen/timeout thành công cho kênh đó (miner không xác nhận force-open, CLI tự hoàn) thì coi là ĐÃ HOÀN
+    ngay — gỡ chặn miner, trả phần trần ngày — thay vì chờ MISSING_DROP_SEC.
 
     `nonce_fn(address)` -> nonce ví trên chain | None. Đọc lúc bắt đầu mỗi phiên; khoản giữ "không rõ kết quả" được gỡ
     sớm (NONCE_RELEASE_SEC) khi nonce vẫn y nguyên = chain chứng minh không giao dịch nào của ví đã được ghi.
@@ -1116,6 +1141,18 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
 
     # 1) Đối soát kênh đã mở ở các lượt trước.
     keep = []
+    _refunds = {}
+
+    def refunded_by_wallet(cid):
+        # Đọc giao dịch ví MỘT lần mỗi lượt, chỉ khi có kênh lỗi 404; lỗi đọc -> coi như không biết (giữ như cũ).
+        if "ids" not in _refunds:
+            try:
+                _refunds["ids"] = refunded_channel_ids(own_txs_fn(addr))
+            except Exception as e:
+                log(f"[direct] đọc giao dịch ví lỗi ({type(e).__name__}) — thử lại lượt sau")
+                _refunds["ids"] = set()
+        return str(cid or "").lower() in _refunds["ids"]
+
     for p in pending:
         if p.get("network") and p.get("network") != network:
             # Kênh của mạng khác (chuyển devnet <-> testnet): explorer mạng này luôn 404, cũng không ghi sổ được ở
@@ -1133,6 +1170,10 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
             keep.append(p)
             continue
         kind, amount = classify_channel(info, addr)
+        if kind == "missing" and p.get("error") and own_txs_fn is not None and refunded_by_wallet(p["channel"]):
+            kind = "refunded"                          # force-open hết hạn, ví đã tự lấy lại escrow (explorer xoá kênh)
+            log(f"[direct] kênh lỗi {p['channel'][:12]}… đã được ví hoàn (expireForceOpen) — gỡ chặn miner "
+                f"{str(p.get('miner') or '')[:8]}…")
         if kind == "paid":
             if p.get("network") == network and book_fn and amount > 0:
                 # Settle HỢP TÁC trả hết escrow (99% miner + 1% phí kiểm toán, không về ví) -> ví mất cả escrow.
@@ -1581,6 +1622,7 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
             # thành công -> phiên sau gửi LẠI cùng đề, prompt_hash trùng trên chain (tín hiệu lặp việc).
             g["prompt_idx"] = int(g.get("prompt_idx") or 0) + 1
             if rc is None:
+                log(f"[direct] phiên với miner {m['miner'][:8]}… quá {sess_timeout}s, bị ngắt — không rõ kết quả")
                 st["unknown_until"] = now + UNKNOWN_HOLD_SEC
                 _note_unknown(st, now, pre_nonce, max_flop, day)
                 _mark_orphan(g, now, network, max_flop, **orphan_kw)
@@ -1638,6 +1680,8 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
             ch = str(err.get("channel") or "")
             has_ch = bool(_CHANNEL_RE.match(ch))
             low = msg.lower()
+            log(f"[direct] phiên với miner {m['miner'][:8]}… thất bại (mã {rc}): {msg[:200]}"
+                + (f" — kênh {ch[:12]}…" if has_ch else ""))
             unsupported = "unknown option" in low or "unknown command" in low      # lỗi cú pháp: CLI chưa làm gì
             ambiguous = "outcome unknown" in low or "recovery failed" in low
             # Từ chối RÕ RÀNG trước khi có kênh: JSON ok:false không mơ hồ, lỗi cú pháp, hoặc Docker không khởi động được

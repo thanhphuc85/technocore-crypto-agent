@@ -89,7 +89,7 @@ def step(state, cli, explorer=None, book=True, network="testnet", **kw):
     return fd.run_step(state, agent_key=KEY, now=kw.pop("now", NOW), prompt=kw.pop("prompt", "What is 2+2?"),
                        network=network, fetch_channel=lambda cid: explorer.get(cid),
                        book_fn=book_fn if book else None, runner=cli, alert=alerts.append,
-                       log=lambda m: None, offers_fn=offers_fn, **kw)
+                       log=kw.pop("log", lambda m: None), offers_fn=offers_fn, **kw)
 
 
 # --- cấu hình & chốt chặn -------------------------------------------------------------------
@@ -2722,3 +2722,54 @@ def test_forget_ignores_short_prefixes_and_healthy_channels(monkeypatch):
     cli = MultiCLI()
     step(st, cli, explorer={})
     assert any(p.get("channel") == ghost for p in st[fd.KEY]["pending"]) and MINER not in cli.miners()
+
+
+# --- force-open hết hạn: explorer 404 nhưng ví đã expireForceOpen -------------------------------
+
+def _expire_tx(cid, method="expireForceOpen", success=True, section="computeChannel"):
+    return {"method": method, "section": section, "sender": ADDR, "params": [cid], "success": success}
+
+
+def test_refunded_channel_ids_only_successful_own_refund_calls():
+    txs = [_expire_tx(CH), _expire_tx(CH2, success=False), _expire_tx("0x" + "ee" * 32, method="forceOpen"),
+           _expire_tx("0x" + "ff" * 32, method="timeout"), _expire_tx("0x12", method="timeout"),
+           _expire_tx("0x" + "11" * 32, section="balances"), "junk", {"method": "timeout", "success": True}]
+    assert fd.refunded_channel_ids(txs) == {CH, "0x" + "ff" * 32}
+    assert fd.refunded_channel_ids(None) == set()
+
+
+def _failed_ack(st, logs=None):
+    err = json.dumps({"ok": False, "message": "miner acknowledgement timed out", "channel": CH2})
+    step(st, CLI(session=(1, "", err)), log=(logs.append if logs is not None else (lambda m: None)))
+    st[fd.KEY]["miners"][fd._mkey(MINER)]["wait_until"] = 0        # bỏ nghỉ 1 giờ: chỉ xét chặn do kênh lỗi
+    return st
+
+
+def test_expired_force_open_frees_the_miner_next_run():
+    logs = []
+    st = _failed_ack({}, logs)
+    assert any("thất bại" in m and "acknowledgement" in m and CH2[:12] in m.lower() for m in logs)
+    held = st[fd.KEY]["day"]["escrow"]
+    assert held > 0
+    cli = CLI()
+    r = step(st, cli, now=NOW + 900, own_txs_fn=lambda a: [_expire_tx(CH2)])
+    assert r["opened"] == 1 and len(cli.sessions()) == 1          # miner được dùng lại ngay, không chờ 48 giờ
+    assert not any(p.get("error") for p in st[fd.KEY]["pending"])
+    assert st[fd.KEY]["stats"]["refunded"] == 1
+
+
+def test_errored_channel_without_refund_tx_still_blocks():
+    st = _failed_ack({})
+    cli = CLI()
+    r = step(st, cli, now=NOW + 900, own_txs_fn=lambda a: [_expire_tx(CH2, success=False)])
+    assert r["outcome"] == "pending" and cli.sessions() == []
+
+
+def test_wallet_tx_read_error_keeps_the_block():
+    st = _failed_ack({})
+
+    def boom(a):
+        raise RuntimeError("explorer down")
+    cli = CLI()
+    r = step(st, cli, now=NOW + 900, own_txs_fn=boom)
+    assert r["outcome"] == "pending" and cli.sessions() == []
