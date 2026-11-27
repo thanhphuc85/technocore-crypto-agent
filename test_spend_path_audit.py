@@ -311,7 +311,7 @@ def _pending(amount="30"):
 
 def _chain_read(raw, at=NOW):
     """Số chi đứng tên ví trên explorer testnet, kèm mốc đọc (số không có mốc bị coi là cũ)."""
-    h = "explorer.testnet.flop.network"
+    h = "testnet.flopscan.io"
     return {"attr_spent_raw": {h: raw}, "attr_spent_at": {h: at}}
 
 
@@ -350,7 +350,7 @@ def test_small_unconfirmed_amount_does_not_hold_until_a_foreign_channel_is_seen(
 
 def test_stale_explorer_reading_is_not_evidence():
     _pending()
-    host = "explorer.testnet.flop.network"
+    host = "testnet.flopscan.io"
     st = {flop_radar.KEY: {"attr_spent_raw": {host: 5 * 10 ** 18}, "attr_spent_at": {host: NOW - 7 * 3600}}}
     assert ac.onchain_spent(st, NOW) is None and ac.attribution_hold(st, NOW)
 
@@ -386,8 +386,8 @@ def test_radar_records_wallet_balance_and_reading_time():
             return json.dumps({"totalSpentRaw": "0"})
         return None
     r = {}
-    flop_radar.check_attribution(r, fetch, wallet=wallet, explorers=("https://explorer.testnet.flop.network",))
-    h = "explorer.testnet.flop.network"
+    flop_radar.check_attribution(r, fetch, wallet=wallet, explorers=("https://testnet.flopscan.io",))
+    h = "testnet.flopscan.io"
     assert r["attr_balance_raw"][h] == 25 * 10 ** 18 and r["attr_spent_at"][h] > 0
     assert ac.chain_balance({flop_radar.KEY: r}, r["attr_balance_at"][h]) == 25
 
@@ -554,7 +554,7 @@ def test_gate_sees_receipts_from_the_previous_run(monkeypatch, telegram):
 
 def test_named_testnet_uses_the_testnet_explorer(monkeypatch):
     monkeypatch.setenv("FLOP_GATEWAY_NETWORK", "flop-testnet-1")
-    assert ac._explorer_base("flop-testnet-1") == "https://explorer.testnet.flop.network"
+    assert ac._explorer_base("flop-testnet-1") == "https://testnet.flopscan.io"
     _pending()
     st = {flop_radar.KEY: _chain_read(30 * 10 ** 18)}
     assert ac.onchain_spent(st, NOW) == 30
@@ -563,7 +563,7 @@ def test_named_testnet_uses_the_testnet_explorer(monkeypatch):
 def test_chain_reading_without_a_read_time_is_stale_not_fresh():
     # Trước đây số không có mốc đọc được coi là vừa đọc -> xác nhận "đứng tên ví" bằng số không rõ tuổi.
     _pending()
-    st = {flop_radar.KEY: {"attr_spent_raw": {"explorer.testnet.flop.network": 30 * 10 ** 18}}}
+    st = {flop_radar.KEY: {"attr_spent_raw": {"testnet.flopscan.io": 30 * 10 ** 18}}}
     assert ac.onchain_spent(st, NOW) is None
     assert ac.gateway_attribution_step(st, NOW) == "UNVERIFIED"
     assert tm.gateway_attribution()["attributed"] == 0
@@ -590,7 +590,7 @@ def test_hydrate_keeps_the_ledger_with_more_confirmed_spend():
 
 
 def test_stale_chain_balance_is_ignored():
-    host = "explorer.testnet.flop.network"
+    host = "testnet.flopscan.io"
     r = {"attr_balance_raw": {host: 25 * 10 ** 18}, "attr_balance_at": {host: NOW - 7 * 3600}}
     assert ac.chain_balance({flop_radar.KEY: r}, NOW) is None
     r["attr_balance_at"][host] = NOW - 60
@@ -1085,7 +1085,7 @@ def test_testnet_with_its_own_name_can_be_declared(monkeypatch, telegram):
     assert ac.gateway_session_step(fresh(), KEY, NOW)[0].endswith("gateway/network_mismatch")
     monkeypatch.setenv("FLOP_TESTNET_NETWORK_NAME", "Aurora-1")
     assert ac.gateway_session_step(fresh("aurora-1"), KEY, NOW)[0].endswith("gateway/spent") and srv.chats
-    assert ac._explorer_base("aurora-1") == "https://explorer.testnet.flop.network"
+    assert ac._explorer_base("aurora-1") == "https://testnet.flopscan.io"
 
 
 def test_declared_testnet_name_cannot_be_a_devnet(monkeypatch):

@@ -68,7 +68,7 @@ YP_ALERT_LINES = 5                   # số commit liệt kê trong một tin
 YP_FILES_SHOWN = 8                   # số file đổi liệt kê
 DEVNET_STATUS_URL = "https://docs.flop.network/docs/network-devnet"
 BASE_DEVNET_STATUS = "development"
-EXPLORERS = ("https://explorer.devnet.flop.network", "https://explorer.testnet.flop.network")
+EXPLORERS = ("https://explorer.devnet.flop.network", "https://testnet.flopscan.io")
 # CONTRIBUTOR = đã có commit trong repo. Yellowpaper chỉ do người của FLOP commit (2026-10-28: duy
 # nhất `sv`, người đồng bộ bản spec — GitHub hiện là CONTRIBUTOR, không phải MEMBER).
 MAINTAINER_ROLES = frozenset(("OWNER", "MEMBER", "COLLABORATOR", "CONTRIBUTOR"))
