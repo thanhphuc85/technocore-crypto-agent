@@ -2471,3 +2471,96 @@ def test_agent_ignores_a_non_live_explorer_balance(monkeypatch):
     monkeypatch.setattr(ac, "kv_set", lambda *a, **k: True)
     monkeypatch.setattr(ac, "_telegram_send", lambda m: True)
     assert ac.direct_session_step({}, KEY, NOW) == "opened"
+
+
+# --- khoản giữ "không rõ kết quả" gỡ sớm theo nonce ví (testnet 27/11) ---------------------------------------------
+
+_UNKNOWN = (1, "", json.dumps({"ok": False, "code": "SUBMISSION_UNKNOWN",
+                               "message": "open submission outcome unknown; retain the original intent and reconcile "
+                                          "before retrying"}))
+
+
+def _force(monkeypatch):
+    monkeypatch.setenv("FLOP_DIRECT_VIA", "force")
+    monkeypatch.setenv("FLOP_DIRECT_ALLOW_FORCE", "on")
+    monkeypatch.setenv("FLOP_DIRECT_MAX_FLOP", "0.5")
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_DAY", "9")
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_RUN", "3")
+
+
+def test_outcome_unknown_stops_the_run_and_holds_only_that_miner(monkeypatch, three_miners):
+    _force(monkeypatch)
+    first = fd.config()[0]["miners"][0]["miner"]
+    cli, st = MultiCLI(by_miner={first: _UNKNOWN}), {}
+    r = step(st, cli, nonce_fn=lambda a: 4)
+    assert r["outcome"] == "unknown_outcome" and cli.miners() == [first]     # không thử miner kế: lỗi RPC/chain chung
+    h = mst(st, first)
+    assert h["unknown_until"] == NOW + fd.UNKNOWN_HOLD_SEC and h["unknown_nonce"] == 4
+    assert h["unknown_escrow"] == "0.5" and st[fd.KEY]["day"]["escrow"] == 0.5
+    others = [k for k in st[fd.KEY].get("miners", {}) if k != fd._mkey(first)]
+    assert all(not st[fd.KEY]["miners"][k].get("unknown_until") for k in others)
+
+
+def test_unchanged_nonce_releases_the_hold_and_the_day_escrow(monkeypatch, three_miners):
+    _force(monkeypatch)
+    first = fd.config()[0]["miners"][0]["miner"]
+    st = {}
+    step(st, MultiCLI(by_miner={first: _UNKNOWN}), nonce_fn=lambda a: 4)
+    assert st[fd.KEY]["unknown_escrow"]
+    cli = MultiCLI()                                       # chưa đủ NONCE_RELEASE_SEC: vẫn giữ miner đó
+    step(st, cli, nonce_fn=lambda a: 4, now=NOW + 300)
+    assert first not in cli.miners() and mst(st, first).get("unknown_until")
+    logs = []
+    cli = MultiCLI()
+    before = st[fd.KEY]["day"]["escrow"]
+    r = fd.run_step(st, agent_key=KEY, now=NOW + fd.NONCE_RELEASE_SEC + 10, prompt="What is 2+2?", network="testnet",
+                    fetch_channel=lambda cid: None, runner=cli, alert=lambda m: None, log=logs.append,
+                    nonce_fn=lambda a: 4)
+    assert not mst(st, first).get("unknown_until") and "unknown_nonce" not in mst(st, first)
+    assert not any(len(h) >= 4 and fd._mkey(h[3]) == fd._mkey(first) for h in st[fd.KEY].get("unknown_escrow") or [])
+    assert any("gỡ khoản giữ" in x for x in logs) and r["opened"] >= 1
+    assert first in cli.miners()
+    # trần ngày: 0.5 của phiên không gửi được đã trả lại, cộng phần của các phiên mới mở
+    assert st[fd.KEY]["day"]["escrow"] == pytest.approx(before - 0.5 + 0.5 * r["opened"])
+
+
+@pytest.mark.parametrize("later", [5, None])
+def test_advanced_or_unreadable_nonce_keeps_the_hold(monkeypatch, three_miners, later):
+    _force(monkeypatch)
+    first = fd.config()[0]["miners"][0]["miner"]
+    st = {}
+    step(st, MultiCLI(by_miner={first: _UNKNOWN}), nonce_fn=lambda a: 4)
+    cli = MultiCLI()
+    step(st, cli, nonce_fn=lambda a: later, now=NOW + fd.NONCE_RELEASE_SEC + 10)
+    assert first not in cli.miners() and mst(st, first)["unknown_until"] == NOW + fd.UNKNOWN_HOLD_SEC
+    assert st[fd.KEY]["unknown_escrow"]
+
+
+def test_no_nonce_reader_keeps_the_old_six_hour_hold(monkeypatch, three_miners):
+    _force(monkeypatch)
+    first = fd.config()[0]["miners"][0]["miner"]
+    st = {}
+    step(st, MultiCLI(by_miner={first: _UNKNOWN}))
+    assert "unknown_nonce" not in mst(st, first)
+    cli = MultiCLI()
+    step(st, cli, now=NOW + fd.NONCE_RELEASE_SEC + 10)
+    assert first not in cli.miners()
+
+
+def test_an_interrupted_attempt_is_released_by_nonce_too(monkeypatch):
+    _force(monkeypatch)
+    st = {fd.KEY: {"attempt": {"ts": NOW, "network": "testnet", "miner": MINER, "escrow": "0.5", "nonce": 7},
+                   "day": {"day": __import__("time").strftime("%Y-%m-%d", __import__("time").gmtime(NOW)),
+                           "escrow": 0.5}}}
+    cli = MultiCLI()
+    step(st, cli, nonce_fn=lambda a: 7, now=NOW + 60)       # lượt sau ngay: giữ (chưa đủ thời gian)
+    assert MINER not in cli.miners() and mst(st)["unknown_nonce"] == 7
+    cli = MultiCLI()
+    step(st, cli, nonce_fn=lambda a: 7, now=NOW + fd.NONCE_RELEASE_SEC + 5)
+    assert cli.miners() and set(cli.miners()) == {MINER} and not mst(st).get("unknown_until")
+
+
+def test_hold_nonce_survives_the_kv_backup():
+    g = {"miners": {"k": {"unknown_until": 9, "unknown_nonce": 4, "unknown_since": 1, "unknown_escrow": "0.5",
+                          "unknown_day": "2026-11-27"}}}
+    assert fd.durable_view(g)["miners"]["k"]["unknown_nonce"] == 4

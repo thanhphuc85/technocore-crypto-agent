@@ -5921,6 +5921,27 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
             except ValueError:
                 return None
 
+        rpc_url = direct_rpc_url(network)
+
+        def nonce(addr):
+            # Nonce TIẾP THEO của ví (system_accountNextIndex: tính cả giao dịch còn trong pool) — để gỡ sớm khoản giữ
+            # "không rõ kết quả" khi chain chứng minh không gì được gửi. Không có RPC thì explorer (chỉ khi số đọc sống).
+            if rpc_url:
+                r = requests.post(rpc_url, json={"jsonrpc": "2.0", "id": 1, "method": "system_accountNextIndex",
+                                                 "params": [addr]},
+                                  headers={"User-Agent": UA, "Content-Type": "application/json"}, timeout=15)
+                r.raise_for_status()
+                v = (r.json() or {}).get("result")
+                return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else None
+            r = requests.get(f"{explorer}/api/accounts/{addr}", headers={"User-Agent": UA}, timeout=15)
+            if r.status_code != 200:
+                return None
+            d = r.json()
+            if not isinstance(d, dict) or d.get("liveBalance") is not True:
+                return None
+            v = d.get("nonce")
+            return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else None
+
         def checkpoint():
             # Trước MỖI phiên (mốc phiên đang chạy + trần ngày) và sau mỗi phiên (kênh mới): xuống state.json VÀ KV.
             # Job bị giết giữa phiên thì cache có thể không kịp lưu — bản KV vẫn còn mốc để lượt sau đối soát.
@@ -5935,7 +5956,7 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
             deny=direct_deny_list(PROACTIVE_DENY_DIDS),
             deadline=direct_deadline(), alert=_telegram_send, checkpoint=checkpoint,
             spend_room=lambda: combined_spend_room(state, now),
-            booked_fn=(lambda cid: _tm.direct_booked(cid)) if testnet else None)
+            booked_fn=(lambda cid: _tm.direct_booked(cid)) if testnet else None, nonce_fn=nonce)
         direct_kv_persist(state, private_key)
         save_state({flop_direct.KEY: state.get(flop_direct.KEY)})
         global _DIRECT_LAST
@@ -5991,6 +6012,15 @@ _RUN_STARTED = None                  # main() đặt; ngoài main (thư viện/t
 def _mempool_blocked() -> bool:
     import token_manager
     return token_manager.testnet_enabled() and not MEMPOOL_TESTNET_ALLOWED
+
+
+def direct_rpc_url(network: str) -> str:
+    """RPC HTTP của mạng mua trực tiếp (đọc nonce ví). FLOP_DIRECT_RPC_URL (https) nếu đặt; testnet công khai mặc định
+    https://testnet.flop.network/ (docs.flop.network/networks/testnet); mạng khác '' (dùng explorer)."""
+    v = os.environ.get("FLOP_DIRECT_RPC_URL", "").strip()
+    if v.startswith("https://"):
+        return v
+    return "https://testnet.flop.network/" if network == "testnet" else ""
 
 
 def direct_network(testnet: bool) -> str:
