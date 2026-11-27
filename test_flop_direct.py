@@ -2564,3 +2564,45 @@ def test_hold_nonce_survives_the_kv_backup():
     g = {"miners": {"k": {"unknown_until": 9, "unknown_nonce": 4, "unknown_since": 1, "unknown_escrow": "0.5",
                           "unknown_day": "2026-11-27"}}}
     assert fd.durable_view(g)["miners"]["k"]["unknown_nonce"] == 4
+
+
+# --- FLOP_DIRECT_FORGET: operator bỏ kênh lỗi "ma" (explorer 404) --------------------------------------------------
+
+def _ghost_state(day_escrow=1.02):
+    import time as _t
+    ts = NOW - 2700
+    ghost = "0x60fbb0a36138ef4e5dfd7e8bd538316981bfdbdea706a9f16f3a51b03d8586c9"
+    return ghost, {fd.KEY: {
+        "day": {"day": _t.strftime("%Y-%m-%d", _t.gmtime(NOW)), "escrow": day_escrow},
+        "miners": {fd._mkey(MINER): {"unknown_until": ts + fd.UNKNOWN_HOLD_SEC, "cap": 50.0}},
+        "pending": [{"channel": ghost, "ts": ts, "network": "testnet", "miner": MINER, "max_flop": "0.5",
+                     "error": "open submission outcome unknown; retain the original intent "}],
+        "unknown_escrow": [[ts, "testnet", "0.5", MINER, ts - 60, ts + 840]], "orphan_since": ts, "orphan_last": ts}}
+
+
+def test_forget_drops_a_ghost_channel_and_unblocks_its_miner(monkeypatch):
+    ghost, st = _ghost_state()
+    monkeypatch.setenv("FLOP_DIRECT_FORGET", ghost[:14] + ", 0xzz")
+    cli = MultiCLI()
+    r = step(st, cli, explorer={})                      # explorer: kênh không có (404 -> None)
+    assert not any(p.get("channel") == ghost for p in st[fd.KEY]["pending"])
+    assert MINER in cli.miners() and r.get("forgotten")
+    assert not st[fd.KEY].get("unknown_escrow")
+    assert st[fd.KEY]["day"]["escrow"] == pytest.approx(1.02 - 0.5 + 0.01 * r["opened"], abs=0.05)
+
+
+def test_forget_keeps_a_channel_the_explorer_knows(monkeypatch):
+    ghost, st = _ghost_state()
+    monkeypatch.setenv("FLOP_DIRECT_FORGET", ghost)
+    info = {"agent": ADDR, "status": "open", "paymentStatus": "LOCKED", "observationHead": "finalized"}
+    cli = MultiCLI()
+    step(st, cli, explorer={ghost: info})
+    assert any(p.get("channel") == ghost for p in st[fd.KEY]["pending"]) and MINER not in cli.miners()
+
+
+def test_forget_ignores_short_prefixes_and_healthy_channels(monkeypatch):
+    ghost, st = _ghost_state()
+    monkeypatch.setenv("FLOP_DIRECT_FORGET", "0x60fb")          # < 12 hex: bỏ qua
+    cli = MultiCLI()
+    step(st, cli, explorer={})
+    assert any(p.get("channel") == ghost for p in st[fd.KEY]["pending"]) and MINER not in cli.miners()

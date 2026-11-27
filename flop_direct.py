@@ -759,6 +759,64 @@ def _note_unknown(st: dict, since: int, nonce, escrow, day: str) -> None:
     st["unknown_day"] = day
 
 
+_FORGET_RE = re.compile(r"^0x[0-9a-fA-F]{12,64}$")
+
+
+def forget_channels(g: dict, ms: dict, *, now: int, fetch_channel, log=print) -> list:
+    """Operator xác nhận (FLOP_DIRECT_FORGET = các id/tiền tố id kênh, >= 12 hex, ngăn bởi dấu phẩy/khoảng trắng) rằng
+    những kênh LỖI đang chờ chưa từng được mở — vd. "open submission outcome unknown" trước khi có gỡ-theo-nonce: kênh
+    lỗi chặn miner tới MISSING_DROP_SEC (48 giờ). Chỉ bỏ kênh vừa (a) có cờ lỗi, vừa (b) explorer KHÔNG có (404): kênh
+    thật thì giữ nguyên dù operator ghi nhầm. Bỏ kênh = hết chặn miner đó (cả khoản giữ 6 giờ của cùng phiên), bỏ khoản
+    giữ escrow mồ côi của phiên, trả lại phần trần ngày nếu cùng ngày UTC. Trả danh sách id đã bỏ."""
+    raw = _env("FLOP_DIRECT_FORGET")
+    if not raw:
+        return []
+    prefixes = [x.lower() for x in re.split(r"[\s,;]+", raw) if _FORGET_RE.match(x)]
+    if not prefixes:
+        return []
+    day = time.strftime("%Y-%m-%d", time.gmtime(now))
+    keep, gone = [], []
+    for p in g.get("pending") or []:
+        cid = str(p.get("channel") or "").lower() if isinstance(p, dict) else ""
+        if not (cid and p.get("error") and any(cid.startswith(x) for x in prefixes)):
+            keep.append(p)
+            continue
+        try:
+            info = fetch_channel(cid)
+        except Exception:
+            keep.append(p)                              # không đọc được explorer: không bỏ
+            continue
+        if info is not None:
+            keep.append(p)                              # kênh CÓ trên explorer: không phải kênh ma
+            continue
+        gone.append(cid)
+        ts = int(p.get("ts") or 0)
+        k = _mkey(p.get("miner") or "") if p.get("miner") else None
+        st = ms.get(k) if k else None
+        if isinstance(st, dict) and int(st.get("unknown_until") or 0) <= ts + UNKNOWN_HOLD_SEC + 120:
+            for f in ("unknown_until", "unknown_nonce", "unknown_since", "unknown_escrow", "unknown_day"):
+                st.pop(f, None)
+        g["unknown_escrow"] = [h for h in (g.get("unknown_escrow") or [])
+                               if not (_hold_ok(h) and abs(int(h[0] or 0) - ts) <= 5 and len(h) >= 4
+                                       and h[3] and k and _mkey(h[3]) == k)]
+        ds = g.get("day") if isinstance(g.get("day"), dict) else None
+        try:
+            esc = float(p.get("max_flop") or 0)
+        except (TypeError, ValueError):
+            esc = 0.0
+        if ds and ds.get("day") == day == time.strftime("%Y-%m-%d", time.gmtime(ts)) and esc > 0:
+            g["day"] = {"day": day, "escrow": round(max(0.0, float(ds.get("escrow") or 0) - esc), 9)}
+        _mark_done(g, cid)
+        log(f"[direct] bỏ kênh lỗi {cid[:14]}… (FLOP_DIRECT_FORGET, explorer không có) — gỡ chặn miner "
+            f"{str(p.get('miner') or '')[:8]}…")
+    if gone:
+        g["pending"] = keep
+        if not g.get("unknown_escrow"):
+            g.pop("orphan_since", None)
+            g.pop("orphan_last", None)
+    return gone
+
+
 def release_unknown_holds(g: dict, ms: dict, *, now: int, addr: str, nonce_fn, log=print) -> int:
     """Gỡ khoản giữ "không rõ kết quả" của các miner khi chain CHỨNG MINH phiên đó không gửi được gì: đã qua
     NONCE_RELEASE_SEC và nonce ví hiện tại == nonce lúc bắt đầu phiên. Gỡ: hết chặn miner, bỏ khoản giữ escrow mồ côi
@@ -1141,6 +1199,9 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
         return ms.setdefault(_mkey(m["miner"]), {})
 
 
+    if forget_channels(g, ms, now=now, fetch_channel=fetch_channel, log=log):
+        g["miners"] = ms
+        out["forgotten"] = True
     if release_unknown_holds(g, ms, now=now, addr=addr, nonce_fn=nonce_fn, log=log):
         g["miners"] = ms
 
