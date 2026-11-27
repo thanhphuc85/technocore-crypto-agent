@@ -81,6 +81,15 @@ DEFAULT_TIMEOUT_SEC = 600          # CLI tự chờ hạn on-chain rồi thu h�
 DEFAULT_FORCE_MAX_DURATION_SEC = 600
 MIN_MAX_DURATION_SEC = 300
 ERROR_BACKOFF_SEC = 3600
+# Lỗi phiên LIÊN TIẾP với cùng miner (vd. không xác nhận force-open): nghỉ tăng gấp đôi 1h -> 2h -> 4h -> 8h (trần).
+# Testnet 27/11: m9/m14 ngừng phục vụ từ 03:30Z mà cứ hết 1 giờ lại bị thử, mỗi lần ~0.015 FLOP phí + ~11 phút.
+ERROR_BACKOFF_MAX_SEC = 8 * 3600
+# SỨC KHOẺ MINER (FLOP_DIRECT_HEALTH, mặc định bật): đọc kênh gần đây của miner trên explorer (mọi agent, không tốn phí).
+# Miner từng có kênh PAID nhưng kênh PAID mới nhất đã quá HEALTH_STALE_SEC = "ngừng trả" -> chỉ thử thăm dò mỗi
+# STALE_PROBE_SEC một lần (miner hồi lại thì tự dùng lại khi nó trả tiền cho ai đó). Miner đang trả được ưu tiên trước
+# (nhiều kênh PAID trong cửa sổ hơn = trước), miner chưa có lịch sử xếp sau, miner ngừng trả xếp cuối.
+HEALTH_STALE_SEC = 3 * 3600
+STALE_PROBE_SEC = 3 * 3600
 # CLI từ chối RÕ RÀNG vì không tới được RPC chain (vd. "RPC unreachable: connection to wss://... timed out"): lỗi của
 # mạng chung, không phải của miner -> nghỉ CHUNG ngắn rồi thử lại, không chặn miner 1 giờ. Testnet 27/11: RPC quá tải
 # (trả lời 4-10 s, sát ngưỡng 10 s của CLI) khiến cả 2 miner bị chặn 1 giờ mỗi lần chập chờn.
@@ -639,7 +648,7 @@ def pace_limit(cfg: dict, now: int, salt: str = "") -> tuple[float, bool]:
 _DURABLE_TOP = ("day", "unknown_until", "wait_until", "wait_why", "prompt_idx", "miner_idx", "gnpt", "stats",
                 "last_attempt", "orphan_since", "orphan_last", "done", "unknown_escrow", "attempt", "rev")
 _DURABLE_MINER = ("unknown_until", "wait_until", "wait_why", "cap", "sessions", "unknown_nonce", "unknown_since",
-                  "unknown_escrow", "unknown_day")
+                  "unknown_escrow", "unknown_day", "fail_streak", "probe_at")
 _PENDING_CORE = ("channel", "ts", "network", "miner", "error", "alerted", "force", "fin_tries", "fin_at", "fin_tx",
                  "fin_alerted", "max_flop")
 _PENDING_LEARN = ("model", "model_hash", "ptok", "completion_tokens")
@@ -797,6 +806,31 @@ def _mkey(miner: str) -> str:
     return pk.hex() if pk else str(miner)
 
 
+def miner_health(rows, now: int) -> tuple:
+    """(nhãn, số kênh PAID trong HEALTH_STALE_SEC, giờ PAID mới nhất | None) từ các kênh explorer của MỘT miner.
+    "ok" = có kênh PAID mở trong cửa sổ; "stale" = có kênh nhưng PAID mới nhất (nếu có) cũ hơn cửa sổ; "new" = chưa
+    có kênh nào (miner mới / explorer chưa có dữ liệu: không đủ bằng chứng để bỏ qua)."""
+    paid, seen = [], False
+    for r in rows or []:
+        if not isinstance(r, dict):
+            continue
+        try:
+            t = int(r.get("openedAt")) // 1000
+        except (TypeError, ValueError):
+            continue
+        seen = True
+        if str(r.get("paymentStatus") or "").upper() == "PAID":
+            paid.append(t)
+    if not seen:
+        return "new", 0, None
+    recent = [t for t in paid if now - t <= HEALTH_STALE_SEC]
+    return ("ok" if recent else "stale"), len(recent), (max(paid) if paid else None)
+
+
+def _health_on() -> bool:
+    return _env("FLOP_DIRECT_HEALTH").lower() not in ("off", "0", "false", "no")
+
+
 def _note_unknown(st: dict, since: int, nonce, escrow, day: str) -> None:
     """Ghi kèm khoản giữ "không rõ kết quả" của một miner: nonce ví TRƯỚC phiên (None = không đọc được -> không gỡ
     sớm), giờ giữ (= ts của khoản giữ escrow trong `unknown_escrow`), escrow và ngày UTC đã cộng vào trần ngày."""
@@ -939,7 +973,7 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
              prompts=None, book_fn=None, deny=(), deadline=None, runner=None, alert=None, log=print,
              clock=time.time, offers_fn=None, price_fn=None, miner_cap_fn=None, balance_fn=None,
              indexer_url=None, own_channels_fn=None, checkpoint=None, spend_room=None, booked_fn=None,
-             nonce_fn=None, rpc_ready_fn=None, own_txs_fn=None) -> dict:
+             nonce_fn=None, rpc_ready_fn=None, own_txs_fn=None, miner_channels_fn=None) -> dict:
     """Một nhịp mua trực tiếp: tối đa FLOP_DIRECT_MAX_PER_RUN phiên, xoay vòng các miner. Trả {"outcome", ...};
     KHÔNG ném lỗi. `book_fn(amount, channel_id, model, escrow=)` ghi sổ (None = chạy tập devnet, không ghi).
     `fetch_channel(channel_id)` -> dict explorer | None. `offers_fn(miner, model_hash)` -> các dòng
@@ -966,6 +1000,10 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
     `own_txs_fn(address)` -> giao dịch gần đây của ví (explorer). Kênh LỖI mà explorer 404: nếu ví đã gọi
     expireForceOpen/timeout thành công cho kênh đó (miner không xác nhận force-open, CLI tự hoàn) thì coi là ĐÃ HOÀN
     ngay — gỡ chặn miner, trả phần trần ngày — thay vì chờ MISSING_DROP_SEC.
+
+    `miner_channels_fn(miner)` -> kênh gần đây của miner trên explorer (mọi agent). Dùng chấm SỨC KHOẺ miner
+    (FLOP_DIRECT_HEALTH): miner đang trả tiền thử trước, miner ngừng trả chỉ thăm dò mỗi STALE_PROBE_SEC. Lỗi đọc ->
+    không đánh giá (giữ xoay vòng như cũ).
 
     `nonce_fn(address)` -> nonce ví trên chain | None. Đọc lúc bắt đầu mỗi phiên; khoản giữ "không rõ kết quả" được gỡ
     sớm (NONCE_RELEASE_SEC) khi nonce vẫn y nguyên = chain chứng minh không giao dịch nào của ví đã được ghi.
@@ -1311,6 +1349,22 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
         return done("pending", reason=(f"{len(waiting_index)} kênh chờ explorer ghi nhận (>= FLOP_DIRECT_MAX_PENDING) "
                                        "— không mở thêm"))
 
+    _health = {}
+
+    def health(m):
+        """("ok"|"stale"|"new"|"unknown", số PAID gần đây, giờ PAID mới nhất) — đọc explorer MỘT lần mỗi miner mỗi lượt."""
+        k = _mkey(m["miner"])
+        if k not in _health:
+            if miner_channels_fn is None or not _health_on():
+                _health[k] = ("unknown", 0, None)
+            else:
+                try:
+                    _health[k] = miner_health(miner_channels_fn(m["miner"]), now)
+                except Exception as e:
+                    log(f"[direct] đọc kênh của miner {m['miner'][:8]}… lỗi ({type(e).__name__}) — không chấm sức khoẻ")
+                    _health[k] = ("unknown", 0, None)
+        return _health[k]
+
     def blocked(m):
         """Lý do miner này không dùng được ở lượt này, hoặc ''."""
         st = mstate(m)
@@ -1320,6 +1374,9 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
             return "pending"
         if int(st.get("wait_until") or 0) > now:
             return "backoff"
+        h = health(m)
+        if h[0] == "stale" and now - int(st.get("probe_at") or 0) < STALE_PROBE_SEC:
+            return "stale"
         return ""
 
     day = time.strftime("%Y-%m-%d", time.gmtime(now))
@@ -1380,6 +1437,12 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
     last = ("idle", "")                                               # (kết quả, lý do) của lần thử cuối
     start = int(g.get("miner_idx") or 0)
     tried = 0
+    # Thứ tự thử: xoay vòng như cũ, rồi xếp ỔN ĐỊNH theo sức khoẻ — đang trả (nhiều PAID trước) > chưa rõ/mới > ngừng trả.
+    # Chỉ đọc explorer khi còn ít nhất 2 miner (một miner thì thứ tự không đổi; bỏ qua do "stale" vẫn xét trong blocked).
+    rr = [miners[(start + j) % len(miners)] for j in range(len(miners))]
+    if len(rr) > 1 and miner_channels_fn is not None and _health_on():
+        _rank = {"ok": 0, "unknown": 1, "new": 1, "stale": 2}
+        rr.sort(key=lambda m: (_rank.get(health(m)[0], 1), -health(m)[1]))
     dirty = False                                                     # có kết quả phiên chưa lưu xuống đĩa
 
     def save():
@@ -1403,7 +1466,7 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
                 break
             pick = None
             for i in range(len(miners)):
-                m = miners[(start + tried + i) % len(miners)]
+                m = rr[(tried + i) % len(rr)]
                 why = blocked(m)
                 if not why:
                     pick = m
@@ -1413,6 +1476,11 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
             if pick is None:
                 break
             m, st = pick, mstate(pick)
+            hp = health(m)
+            if hp[0] == "stale":
+                st["probe_at"] = now                   # thăm dò miner ngừng trả: tối đa một lần mỗi STALE_PROBE_SEC
+                last_paid = time.strftime("%d/%m %H:%MZ", time.gmtime(hp[2])) if hp[2] else "chưa từng"
+                log(f"[direct] thăm dò miner {m['miner'][:8]}… (không trả tiền cho ai từ {last_paid})")
             # Escrow: cố định (FLOP_DIRECT_MAX_FLOP) hoặc theo offer miner công bố. Chế độ offer mà miner không có
             # offer -> không gọi CLI (khỏi kéo image + mở kết nối chain chỉ để nhận "no live signed offer").
             max_flop, tokens, plan = cfg["max_flop"], cfg["max_tokens"], None
@@ -1671,6 +1739,7 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
                 out["opened"] += 1
                 out["sessions"].append({"miner": m["miner"], "channel": ch, "escrow": max_flop, "max_tokens": tokens})
                 st["sessions"] = int(st.get("sessions") or 0) + 1
+                st.pop("fail_streak", None)
                 log(f"[direct] phiên với miner {m['miner'][:8]}… xong, kênh {ch[:12]}… "
                     f"({res.get('completion_tokens') or '?'} token, escrow {max_flop}) — chờ explorer finalized để ghi sổ")
                 last = ("opened", "")
@@ -1722,7 +1791,12 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
                     f"{m['miner'][:8]}…")
                 last = ("rpc_down", msg)
                 break                                  # miner kế cũng dùng cùng RPC: thử lại cả lượt sau
-            st.update(wait_until=now + ERROR_BACKOFF_SEC, wait_why=str(err.get("code") or "session failed")[:60])
+            streak = int(st.get("fail_streak") or 0) + 1
+            st["fail_streak"] = streak
+            wait = min(ERROR_BACKOFF_MAX_SEC, ERROR_BACKOFF_SEC * 2 ** min(streak - 1, 8))
+            st.update(wait_until=now + wait, wait_why=str(err.get("code") or "session failed")[:60])
+            if streak > 1:
+                log(f"[direct] miner {m['miner'][:8]}… lỗi {streak} lần liền — nghỉ {wait // 3600}h")
             last = ("no_offer" if "no live signed offer" in msg.lower() else "error", msg)
     finally:
         if work:
