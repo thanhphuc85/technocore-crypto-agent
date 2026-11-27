@@ -1603,12 +1603,15 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
     last = ("idle", "")                                               # (kết quả, lý do) của lần thử cuối
     start = int(g.get("miner_idx") or 0)
     tried = 0
-    # Thứ tự thử: xoay vòng như cũ, rồi xếp ỔN ĐỊNH theo sức khoẻ — đang trả (nhiều PAID trước) > chưa rõ/mới > ngừng trả.
+    # Thứ tự thử: xoay vòng như cũ, rồi xếp ỔN ĐỊNH theo sức khoẻ — đang trả > chưa rõ/mới > ngừng trả; trong nhóm "đang
+    # trả", miner có kênh PAID GẦN NHẤT đứng trước. Xếp theo SỐ kênh PAID trong 3 giờ (trước đây) để miner chạy nhiều mà
+    # vừa hỏng đứng đầu suốt 3 giờ (27/11: 5FJ34C7r 21 PAID, chết từ 17:30Z, vẫn được thử trước 5FZAzdnV đang trả đều);
+    # thất bại force-open của chính ví không hiện trên explorer nên luật "đang hỏng" không bắt được trường hợp này.
     # Chỉ đọc explorer khi còn ít nhất 2 miner (một miner thì thứ tự không đổi; bỏ qua do "stale" vẫn xét trong blocked).
     rr = [miners[(start + j) % len(miners)] for j in range(len(miners))]
     if len(rr) > 1 and miner_channels_fn is not None and _health_on():
         _rank = {"ok": 0, "unknown": 1, "new": 1, "stale": 2}
-        rr.sort(key=lambda m: (_rank.get(health(m)[0], 1), -health(m)[1]))
+        rr.sort(key=lambda m: (_rank.get(health(m)[0], 1), -(health(m)[2] or 0), -health(m)[1]))
     dirty = False                                                     # có kết quả phiên chưa lưu xuống đĩa
 
     def save():
