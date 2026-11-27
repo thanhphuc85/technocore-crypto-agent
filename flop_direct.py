@@ -81,6 +81,11 @@ DEFAULT_TIMEOUT_SEC = 600          # CLI tự chờ hạn on-chain rồi thu h�
 DEFAULT_FORCE_MAX_DURATION_SEC = 600
 MIN_MAX_DURATION_SEC = 300
 ERROR_BACKOFF_SEC = 3600
+# CLI từ chối RÕ RÀNG vì không tới được RPC chain (vd. "RPC unreachable: connection to wss://... timed out"): lỗi của
+# mạng chung, không phải của miner -> nghỉ CHUNG ngắn rồi thử lại, không chặn miner 1 giờ. Testnet 27/11: RPC quá tải
+# (trả lời 4-10 s, sát ngưỡng 10 s của CLI) khiến cả 2 miner bị chặn 1 giờ mỗi lần chập chờn.
+RPC_BACKOFF_SEC = 600
+_RPC_DOWN_MARKERS = ("rpc unreachable", "could not connect to wss://", "could not connect to ws://")
 UNKNOWN_HOLD_SEC = 6 * 3600        # không rõ kết quả (CLI bị ngắt): không mở kênh mới chừng này
 # Gỡ SỚM khoản giữ "không rõ kết quả" khi CHAIN chứng minh không có giao dịch nào của ví được ghi: nonce ví (đọc lúc
 # bắt đầu phiên) vẫn y nguyên sau chừng này giây. Giao dịch mortal hết hạn sau vài chục-vài trăm block (block 1 s);
@@ -1606,6 +1611,12 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
                           f"ví {addr[:8]}… trên explorer.")
                 last = ("unknown_outcome", msg)
                 break                                  # "outcome unknown" thường do RPC/chain: miner kế cũng sẽ gặp
+            if refused and not has_ch and any(x in low for x in _RPC_DOWN_MARKERS):
+                g.update(wait_until=now + RPC_BACKOFF_SEC, wait_why="rpc unreachable")
+                log(f"[direct] RPC chain không tới được — nghỉ chung {RPC_BACKOFF_SEC // 60} phút, không chặn miner "
+                    f"{m['miner'][:8]}…")
+                last = ("rpc_down", msg)
+                break                                  # miner kế cũng dùng cùng RPC: thử lại cả lượt sau
             st.update(wait_until=now + ERROR_BACKOFF_SEC, wait_why=str(err.get("code") or "session failed")[:60])
             last = ("no_offer" if "no live signed offer" in msg.lower() else "error", msg)
     finally:

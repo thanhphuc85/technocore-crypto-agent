@@ -332,6 +332,33 @@ def test_failure_with_a_channel_is_tracked_until_resolved():
     assert mst(st)["wait_until"] == NOW + fd.ERROR_BACKOFF_SEC
 
 
+def test_rpc_unreachable_backs_off_globally_and_briefly_without_blocking_the_miner():
+    err = json.dumps({"ok": False, "code": "RPC_UNREACHABLE",
+                      "message": "RPC unreachable: could not connect to wss://testnet.flop.network: RPC unreachable: "
+                                 "connection to wss://testnet.flop.network timed out after 10 seconds"})
+    st = {}
+    r = step(st, CLI(session=(1, "", err)))
+    assert r["outcome"] == "rpc_down"
+    assert not mst(st).get("wait_until") and not mst(st).get("unknown_until")
+    assert st[fd.KEY]["wait_until"] == NOW + fd.RPC_BACKOFF_SEC and fd.RPC_BACKOFF_SEC < fd.ERROR_BACKOFF_SEC
+    assert not st[fd.KEY].get("pending") and not st[fd.KEY].get("unknown_escrow")
+    assert float(st[fd.KEY]["day"]["escrow"]) == 0                     # từ chối rõ: trả lại trần ngày
+    cli = CLI()
+    assert step(st, cli, now=NOW + 60)["outcome"] == "backoff" and cli.calls == []
+    assert step(st, CLI(), now=NOW + fd.RPC_BACKOFF_SEC + 1)["outcome"] == "opened"
+
+
+def test_rpc_unreachable_stops_the_run_before_other_miners(monkeypatch, three_miners):
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_RUN", "3")
+    err = json.dumps({"ok": False, "code": "RPC_UNREACHABLE", "message": "RPC unreachable: could not connect to "
+                                                                       "wss://testnet.flop.network"})
+    cli, st = MultiCLI(by_miner={k: (1, "", err) for k in (MINER, M2, M3)}), {}
+    r = step(st, cli, offers_fn=_offers_for(MINER, M2, M3))
+    assert r["outcome"] == "rpc_down" and len(cli.miners()) == 1
+    ms = st[fd.KEY]["miners"]
+    assert all(not (ms.get(fd._mkey(k)) or {}).get("wait_until") for k in (MINER, M2, M3))
+
+
 def test_no_offer_backs_off_without_a_channel():
     err = json.dumps({"ok": False, "code": "SESSION_FAILED",
                       "message": "no live signed offer for the named miner and model within maxFlop", "channel": None})
