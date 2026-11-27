@@ -535,6 +535,33 @@ _CHILD_ENV_KEEP = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "LANGUAGE", "TZ", 
 _CHILD_ENV_PREFIXES = ("LC_", "DOCKER_", "XDG_")
 
 
+_HEX64 = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+def actions_mask(*values) -> None:
+    """Đăng ký che giá trị trong log GitHub Actions (`::add-mask::`). Chỉ khi GITHUB_ACTIONS=true — chạy cục bộ thì
+    KHÔNG in gì (in ra console là lộ). Bỏ giá trị rỗng/ngắn/nhiều dòng (lệnh add-mask chỉ nhận một dòng)."""
+    if os.environ.get("GITHUB_ACTIONS", "").lower() != "true":
+        return
+    for v in values:
+        v = str(v or "").strip()
+        if len(v) >= 8 and not any(c in v for c in "\r\n"):
+            print(f"::add-mask::{v}", flush=True)
+
+
+def seed_variants(raw: str) -> list:
+    """Mọi dạng chữ của một seed hex 32 byte mà code có thể tạo ra (chữ thường/HOA, có/không 0x): lớp che log của
+    GitHub so khớp ĐÚNG chuỗi, secret lưu chữ HOA thì "0x" + hex chữ thường do agent tự dựng sẽ không được che."""
+    v = str(raw or "").strip()
+    h = v[2:] if v[:2].lower() == "0x" else v
+    if not _HEX64.match(h):
+        return [v] if v else []
+    out = []
+    for x in (h, h.lower(), h.upper()):
+        out += [x, "0x" + x, "0X" + x]
+    return list(dict.fromkeys(out))
+
+
 def _child_env(env_extra) -> dict:
     keep = {k: v for k, v in os.environ.items()
             if k.upper() in _CHILD_ENV_KEEP or k in _CHILD_ENV_KEEP or k.upper().startswith(_CHILD_ENV_PREFIXES)}
@@ -733,6 +760,7 @@ def finalize_channels(channels, *, wkey, addr: str, network: str, runner, log=pr
     work = tempfile.mkdtemp(prefix="flop-direct-fin-")
     try:
         password = secrets.token_hex(24)
+        actions_mask(password)
         base, ks = cli_command(work, [SECRET_ENV, PASSWORD_ENV], name=f"flop-direct-{secrets.token_hex(6)}")
         rc, so, se = runner(base + ["--output", "agent", "keys", "import", "--secret-env", SECRET_ENV,
                                     "--out", ks, "--password-env", PASSWORD_ENV, "--type", "ed25519"],
@@ -1758,6 +1786,7 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
             if work is None:
                 work = tempfile.mkdtemp(prefix="flop-direct-")
                 password = secrets.token_hex(24)
+                actions_mask(password)
                 base, ks = cli_command(work, [SECRET_ENV, PASSWORD_ENV], name=f"flop-direct-{secrets.token_hex(6)}")
                 rc, so, se = runner(base + ["--output", "agent", "keys", "import", "--secret-env", SECRET_ENV,
                                             "--out", ks, "--password-env", PASSWORD_ENV, "--type", "ed25519"],

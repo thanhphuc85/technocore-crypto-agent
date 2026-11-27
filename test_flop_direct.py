@@ -2971,3 +2971,45 @@ def test_legacy_errored_channel_without_hold_mark_still_releases_its_session_hol
     cli = CLI()
     step(st, cli, explorer={CH2: refunded}, now=NOW + 900)
     assert "unknown_until" not in mst(st) and len(cli.sessions()) == 1
+
+
+# --- che seed trong log GitHub Actions ------------------------------------------------------------------------
+
+def test_seed_variants_cover_every_case_and_prefix():
+    h = "ab" * 31 + "Cd"
+    v = fd.seed_variants(h)
+    for x in (h, h.lower(), h.upper(), "0x" + h.lower(), "0x" + h.upper(), "0X" + h.lower()):
+        assert x in v
+    assert set(fd.seed_variants("0X" + h.upper())) >= {h.lower(), h.upper(), "0x" + h.lower()}  # mọi cách viết
+    assert fd.seed_variants("") == [] and fd.seed_variants("not-hex-secret") == ["not-hex-secret"]
+
+
+def test_actions_mask_prints_only_inside_github_actions(monkeypatch, capsys):
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    fd.actions_mask("supersecretvalue")
+    assert capsys.readouterr().out == ""                                          # cục bộ: in ra là lộ
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    fd.actions_mask("supersecretvalue", "", "short", "two" + chr(10) + "lines-secret")
+    assert capsys.readouterr().out.splitlines() == ["::add-mask::supersecretvalue"]
+
+
+def test_main_masks_seed_variants_before_anything_else(monkeypatch, capsys):
+    import agent_cron as ac
+    seed = "0F" * 32
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("AGENT_PRIVATE_KEY", seed)
+    monkeypatch.setenv("FLOP_WALLET_SEED_HEX", "")
+    ac.mask_seed_secrets()
+    masked = {l.split("::add-mask::", 1)[1] for l in capsys.readouterr().out.splitlines()}
+    assert {"0x" + seed.lower(), seed.lower(), seed, "0x" + seed} <= masked
+    src = open(ac.__file__, encoding="utf-8").read()
+    body = src[src.index("def main():"):]
+    assert body.index("mask_seed_secrets()") < body.index("print(")
+
+
+def test_keystore_password_is_masked(monkeypatch, capsys):
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    cli = CLI()
+    step({}, cli)
+    pw = cli.calls[0]["env"][fd.PASSWORD_ENV]
+    assert f"::add-mask::{pw}" in capsys.readouterr().out
