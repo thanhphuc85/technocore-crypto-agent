@@ -1,0 +1,20 @@
+name: rpc-probe
+
+# Chạy tay: thử kết nối RPC testnet FLOP từ IP runner GitHub (HTTP + websocket, ngưỡng 10 s như CLI).
+# Không checkout secret, không dùng seed; chỉ đọc mã repo.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5 (pinned to full SHA)
+        with:
+          persist-credentials: false
+      - name: Probe testnet RPC
+        run: python3 tools/rpc_probe.py
