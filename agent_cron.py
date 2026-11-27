@@ -6100,9 +6100,18 @@ def run_deadline() -> float:
     return _RUN_STARTED + _env_float("FLOP_RUN_BUDGET_SEC", 900)
 
 
+def mask_seed_secrets() -> None:
+    """Đăng ký che (GitHub Actions) MỌI dạng chữ của các seed: secret chỉ được che đúng chuỗi đã lưu, còn code tự dựng
+    "0x" + hex chữ thường để đưa cho CLI. Gọi đầu tiên trong main(), trước bất kỳ dòng in nào."""
+    import flop_direct as _fd
+    for name in ("AGENT_PRIVATE_KEY", "FLOP_WALLET_SEED_HEX"):
+        _fd.actions_mask(*_fd.seed_variants(os.environ.get(name, "")))
+
+
 def main():
     global _RUN_STARTED
     _RUN_STARTED = time.time()
+    mask_seed_secrets()
     private_key = load_private_key()
     did = did_of(private_key)
     print(f"[agent] DID: {did}")
