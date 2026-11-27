@@ -2796,10 +2796,19 @@ def _health_fn(table):
 
 def test_paying_miner_is_tried_first(monkeypatch, three_miners):
     stale = [_hch(fd.HEALTH_STALE_SEC + 600)]
-    table = {MINER: stale, M2: [_hch(600)], M3: [_hch(600), _hch(700), _hch(800)]}
+    table = {MINER: stale, M2: [_hch(900)], M3: [_hch(300), _hch(700), _hch(800)]}
     cli = MultiCLI()
     r = step({}, cli, offers_fn=_offers_for(MINER, M2, M3), miner_channels_fn=_health_fn(table))
     assert r["opened"] == 1 and cli.miners() == [M3]
+
+
+def test_most_recently_paying_miner_beats_a_busier_one_that_just_stopped(monkeypatch, three_miners):
+    # M2: nhiều PAID nhưng PAID cuối đã 2 giờ trước (vừa hỏng); M3: ít PAID nhưng vừa trả 5 phút trước.
+    busy_dead = [_hch(7200 + 60 * i) for i in range(20)]
+    table = {MINER: [_hch(fd.HEALTH_STALE_SEC + 600)], M2: busy_dead, M3: [_hch(300), _hch(900)]}
+    cli = MultiCLI()
+    step({}, cli, offers_fn=_offers_for(MINER, M2, M3), miner_channels_fn=_health_fn(table))
+    assert cli.miners() == [M3]
 
 
 def test_stale_miner_is_probed_at_most_every_probe_window(monkeypatch):
