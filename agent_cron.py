@@ -3782,7 +3782,7 @@ def _claim_http_post(url, body):
 
 def _claim_wallet_txs(addr):
     # Giao dịch gần đây của ví (explorer testnet): tìm khoản faucet đã chuyển dù POST trả lỗi.
-    r = requests.get(f"{_explorer_base('testnet')}/api/accounts/{addr}/transactions", params={"limit": "50"},
+    r = _explorer_get(f"{_explorer_base('testnet')}/api/accounts/{addr}/transactions", params={"limit": "50"},
                      headers={"User-Agent": UA}, timeout=15)
     r.raise_for_status()
     d = r.json()
@@ -4827,6 +4827,34 @@ def _attrib_net() -> str:
     return _explorer_net(os.environ.get("FLOP_GATEWAY_NETWORK", ""))
 
 
+# Explorer testnet trả 503 "Era-T reader unavailable" ~50% số lần (27/11, không kèm Retry-After): đọc hụt làm bỏ
+# chấm sức khoẻ miner / đọc số dư / đối soát kênh của cả lượt. Thử lại lỗi 5xx và lỗi mạng vài lần, cách nhau ngắn.
+EXPLORER_TRIES = 3
+EXPLORER_RETRY_PAUSE = 1.5
+
+
+def _explorer_get(url, **kw):
+    """requests.get cho explorer, thử lại tối đa EXPLORER_TRIES lần khi 5xx / timeout / lỗi kết nối. Trả Response
+    cuối (caller vẫn tự raise_for_status / xử lý 404); hết lượt mà chỉ có lỗi mạng thì ném lỗi đó."""
+    kw.setdefault("headers", {"User-Agent": UA})
+    kw.setdefault("timeout", 15)
+    last = None
+    for i in range(EXPLORER_TRIES):
+        try:
+            r = requests.get(url, **kw)
+        except (requests.Timeout, requests.ConnectionError) as e:
+            last = e
+        else:
+            if r.status_code < 500:
+                return r
+            last = r
+        if i < EXPLORER_TRIES - 1 and EXPLORER_RETRY_PAUSE > 0:
+            time.sleep(EXPLORER_RETRY_PAUSE * (i + 1))
+    if isinstance(last, Exception):
+        raise last
+    return last
+
+
 def _explorer_base(net: str) -> str:
     """Explorer của mạng đang chạy: FLOP_RADAR_EXPLORER_URL nếu đặt, không thì theo tên mạng."""
     if RADAR_EXPLORER.startswith("https://"):
@@ -4850,7 +4878,7 @@ def channel_info(net: str, channel_id: str) -> dict:
     """{miner, agent} của một kênh compute từ explorer (GET công khai, chỉ đọc). `agent` = tài
     khoản ĐỨNG TÊN kênh — thứ Yellowpaper R8.4 tính chi tiêu. Lỗi/không rõ -> {}."""
     try:
-        r = requests.get(f"{_explorer_base(net)}/api/compute-channels/{channel_id}",
+        r = _explorer_get(f"{_explorer_base(net)}/api/compute-channels/{channel_id}",
                          headers={"User-Agent": UA}, timeout=10)
         if r.status_code != 200:
             return {}
@@ -5679,7 +5707,7 @@ def direct_day_floor_from_chain(state: dict, private_key, now: int) -> None:
     addr = flop_gateway.wallet_address(wkey)
     explorer = _explorer_base("testnet" if _tm.testnet_enabled() else "devnet")
     try:
-        r = requests.get(f"{explorer}/api/compute-channels", params={"agent": addr, "limit": "100"},
+        r = _explorer_get(f"{explorer}/api/compute-channels", params={"agent": addr, "limit": "100"},
                          headers={"User-Agent": UA}, timeout=15)
         r.raise_for_status()
         d = r.json()
@@ -5829,7 +5857,7 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
         direct_day_floor_from_chain(state, private_key, now)
 
         def fetch_channel(cid):
-            r = requests.get(f"{explorer}/api/compute-channels/{cid}", headers={"User-Agent": UA}, timeout=15)
+            r = _explorer_get(f"{explorer}/api/compute-channels/{cid}", headers={"User-Agent": UA}, timeout=15)
             if r.status_code == 404:
                 return None                  # kênh force-open chưa được miner xác nhận cũng trả 404
             r.raise_for_status()
@@ -5848,7 +5876,7 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
             # Block mới nhất (explorer /api/stats), đọc MỘT lần mỗi lượt; None nếu không đọc được.
             if "n" not in _head:
                 try:
-                    r = requests.get(f"{explorer}/api/stats", headers={"User-Agent": UA}, timeout=15)
+                    r = _explorer_get(f"{explorer}/api/stats", headers={"User-Agent": UA}, timeout=15)
                     r.raise_for_status()
                     _head["n"] = int(r.json().get("latestBlockNumber"))
                 except Exception:
@@ -5861,7 +5889,7 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
             block = head_block()
             params = {"miner": miner, "limit": "100", **({"model": model_hash} if model_hash else {}),
                       **({"minExpiry": str(block + 1)} if block is not None else {})}
-            r = requests.get(f"{explorer}/api/session-offers", params=params, headers={"User-Agent": UA}, timeout=15)
+            r = _explorer_get(f"{explorer}/api/session-offers", params=params, headers={"User-Agent": UA}, timeout=15)
             r.raise_for_status()
             d = r.json()
             rows = d.get("data") if isinstance(d, dict) and isinstance(d.get("data"), list) else []
@@ -5878,7 +5906,7 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
 
         def own_channels(addr):
             # Kênh gần đây đứng tên ví mình (explorer ?agent=) — tìm kênh mồ côi khi CLI bị ngắt không báo id.
-            r = requests.get(f"{explorer}/api/compute-channels", params={"agent": addr, "limit": "100"},
+            r = _explorer_get(f"{explorer}/api/compute-channels", params={"agent": addr, "limit": "100"},
                              headers={"User-Agent": UA}, timeout=15)
             r.raise_for_status()
             d = r.json()
@@ -5886,7 +5914,7 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
 
         def miner_channels(miner):
             # Kênh gần đây của MỘT miner (mọi agent) — chấm sức khoẻ: miner còn trả tiền cho ai không.
-            r = requests.get(f"{explorer}/api/compute-channels", params={"miner": miner, "limit": "50"},
+            r = _explorer_get(f"{explorer}/api/compute-channels", params={"miner": miner, "limit": "50"},
                              headers={"User-Agent": UA}, timeout=15)
             r.raise_for_status()
             d = r.json()
@@ -5894,7 +5922,7 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
 
         def own_txs(addr):
             # Giao dịch gần đây của ví (explorer): tìm expireForceOpen/timeout đã hoàn kênh lỗi mà explorer xoá (404).
-            r = requests.get(f"{explorer}/api/accounts/{addr}/transactions", params={"limit": "50"},
+            r = _explorer_get(f"{explorer}/api/accounts/{addr}/transactions", params={"limit": "50"},
                              headers={"User-Agent": UA}, timeout=15)
             r.raise_for_status()
             d = r.json()
@@ -5907,7 +5935,7 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
         def price(model_hash):
             # Giá công bố của model (registry: epochPricePerGflop, raw/GFLOP) -> FLOP mỗi GFLOP; None nếu không thấy.
             if "_all" not in _prices:
-                r = requests.get(f"{explorer}/api/models", params={"limit": "200"}, headers={"User-Agent": UA}, timeout=15)
+                r = _explorer_get(f"{explorer}/api/models", params={"limit": "200"}, headers={"User-Agent": UA}, timeout=15)
                 r.raise_for_status()
                 _prices["_all"] = {str(m.get("modelHash") or "").lower(): m.get("epochPricePerGflop")
                                    for m in (r.json().get("models") or []) if isinstance(m, dict)}
@@ -5921,7 +5949,7 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
         def miner_cap(miner):
             # Công suất hiệu chuẩn của miner (GFLOP/s) theo các kênh GẦN ĐÂY của nó trên explorer (kênh của ai cũng
             # được: capGflopsPerSec là của miner). Lấy giá trị nhỏ nhất trong vài kênh gần nhất cho an toàn.
-            r = requests.get(f"{explorer}/api/compute-channels", params={"miner": miner, "limit": "5"},
+            r = _explorer_get(f"{explorer}/api/compute-channels", params={"miner": miner, "limit": "5"},
                              headers={"User-Agent": UA}, timeout=15)
             r.raise_for_status()
             caps = []
@@ -5936,7 +5964,7 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
 
         def balance(addr):
             # Số dư khả dụng của ví trên explorer đúng mạng (FLOP); không đọc được -> None (không thu theo số dư).
-            r = requests.get(f"{explorer}/api/accounts/{addr}", headers={"User-Agent": UA}, timeout=15)
+            r = _explorer_get(f"{explorer}/api/accounts/{addr}", headers={"User-Agent": UA}, timeout=15)
             if r.status_code == 404:
                 return None
             r.raise_for_status()
@@ -5975,7 +6003,7 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
                 r.raise_for_status()
                 v = (r.json() or {}).get("result")
                 return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else None
-            r = requests.get(f"{explorer}/api/accounts/{addr}", headers={"User-Agent": UA}, timeout=15)
+            r = _explorer_get(f"{explorer}/api/accounts/{addr}", headers={"User-Agent": UA}, timeout=15)
             if r.status_code != 200:
                 return None
             d = r.json()

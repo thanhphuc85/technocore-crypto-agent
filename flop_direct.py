@@ -90,6 +90,11 @@ ERROR_BACKOFF_MAX_SEC = 8 * 3600
 # (nhiều kênh PAID trong cửa sổ hơn = trước), miner chưa có lịch sử xếp sau, miner ngừng trả xếp cuối.
 HEALTH_STALE_SEC = 3 * 3600
 STALE_PROBE_SEC = 3 * 3600
+# "ĐANG HỎNG": N kênh ĐÃ CÓ KẾT CỤC gần nhất của miner (mọi agent) đều không PAID -> xử như "stale" (chỉ thăm dò) dù
+# còn PAID trong cửa sổ 3 giờ. Testnet 27/11: 5EyqNiBM trả đều tới 19:09Z rồi chỉ còn timedout/REFUNDED, nhưng luật
+# 3 giờ vẫn coi là "ok" tới 22:09Z. Kênh còn mở (LOCKED) chỉ tính là "không PAID" khi đã quá HEALTH_LOCKED_SEC.
+HEALTH_DEGRADED_N = 3
+HEALTH_LOCKED_SEC = 30 * 60
 # CLI từ chối RÕ RÀNG vì không tới được RPC chain (vd. "RPC unreachable: connection to wss://... timed out"): lỗi của
 # mạng chung, không phải của miner -> nghỉ CHUNG ngắn rồi thử lại, không chặn miner 1 giờ. Testnet 27/11: RPC quá tải
 # (trả lời 4-10 s, sát ngưỡng 10 s của CLI) khiến cả 2 miner bị chặn 1 giờ mỗi lần chập chờn.
@@ -903,9 +908,10 @@ def _mkey(miner: str) -> str:
 
 def miner_health(rows, now: int) -> tuple:
     """(nhãn, số kênh PAID trong HEALTH_STALE_SEC, giờ PAID mới nhất | None) từ các kênh explorer của MỘT miner.
-    "ok" = có kênh PAID mở trong cửa sổ; "stale" = có kênh nhưng PAID mới nhất (nếu có) cũ hơn cửa sổ; "new" = chưa
-    có kênh nào (miner mới / explorer chưa có dữ liệu: không đủ bằng chứng để bỏ qua)."""
-    paid, seen = [], False
+    "ok" = có kênh PAID mở trong cửa sổ; "stale" = có kênh nhưng PAID mới nhất (nếu có) cũ hơn cửa sổ, HOẶC
+    HEALTH_DEGRADED_N kênh đã có kết cục gần nhất đều không PAID (đang hỏng); "new" = chưa có kênh nào (miner mới /
+    explorer chưa có dữ liệu: không đủ bằng chứng để bỏ qua)."""
+    paid, seen, decided = [], False, []
     for r in rows or []:
         if not isinstance(r, dict):
             continue
@@ -914,12 +920,21 @@ def miner_health(rows, now: int) -> tuple:
         except (TypeError, ValueError):
             continue
         seen = True
-        if str(r.get("paymentStatus") or "").upper() == "PAID":
+        pay = str(r.get("paymentStatus") or "").upper()
+        if pay == "PAID":
             paid.append(t)
+            decided.append((t, True))
+        elif pay == "REFUNDED" or now - t > HEALTH_LOCKED_SEC:
+            decided.append((t, False))                 # hoàn tiền, hoặc còn khoá quá lâu = miner không phục vụ xong
     if not seen:
         return "new", 0, None
     recent = [t for t in paid if now - t <= HEALTH_STALE_SEC]
-    return ("ok" if recent else "stale"), len(recent), (max(paid) if paid else None)
+    last_paid = max(paid) if paid else None
+    decided.sort(key=lambda x: -x[0])
+    tail = decided[:HEALTH_DEGRADED_N]
+    if len(tail) >= HEALTH_DEGRADED_N and not any(ok for _, ok in tail):
+        return "stale", len(recent), last_paid      # đang hỏng: chỉ thăm dò, dùng lại ngay khi PAID cho ai đó
+    return ("ok" if recent else "stale"), len(recent), last_paid
 
 
 def _health_on() -> bool:
