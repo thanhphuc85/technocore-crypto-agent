@@ -3013,3 +3013,16 @@ def test_keystore_password_is_masked(monkeypatch, capsys):
     step({}, cli)
     pw = cli.calls[0]["env"][fd.PASSWORD_ENV]
     assert f"::add-mask::{pw}" in capsys.readouterr().out
+
+
+def test_miner_with_recent_failures_counts_as_degraded():
+    # Còn PAID trong 3 giờ nhưng 3 kênh có kết cục gần nhất đều hỏng (hoàn tiền / khoá quá lâu) -> chỉ thăm dò.
+    rows = [_hch(fd.HEALTH_LOCKED_SEC + 60, "LOCKED"), _hch(2000, "REFUNDED"), _hch(2400, "REFUNDED"),
+            _hch(3000), _hch(3600)]
+    assert fd.miner_health(rows, NOW)[0] == "stale"
+    # Kênh còn khoá nhưng mới mở (chưa quá HEALTH_LOCKED_SEC) chưa tính là hỏng.
+    fresh = [_hch(300, "LOCKED"), _hch(2000, "REFUNDED"), _hch(2400, "REFUNDED"), _hch(3000)]
+    assert fd.miner_health(fresh, NOW)[0] == "ok"
+    # Có một kênh PAID mới nhất -> hồi lại ngay.
+    back = [_hch(100)] + rows
+    assert fd.miner_health(back, NOW)[0] == "ok"

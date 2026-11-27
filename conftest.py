@@ -51,3 +51,4 @@ def _fresh_direct_rpc(monkeypatch):
     """Mạng thật bị chặn trong test: coi RPC mua trực tiếp là đủ mới (test riêng kiểm phần kiểm tra này)."""
     import agent_cron
     monkeypatch.setattr(agent_cron, "direct_rpc_not_ready", lambda call: "")
+    monkeypatch.setattr(agent_cron, "EXPLORER_RETRY_PAUSE", 0)          # thử lại explorer không ngủ trong test
