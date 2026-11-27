@@ -5923,6 +5923,19 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
 
         rpc_url = direct_rpc_url(network)
 
+        def rpc_call(method, params):
+            r = requests.post(rpc_url, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+                              headers={"User-Agent": UA, "Content-Type": "application/json"}, timeout=20)
+            r.raise_for_status()
+            d = r.json() or {}
+            if "result" not in d:
+                raise ValueError(str(d.get("error"))[:80])
+            return d["result"]
+
+        def rpc_ready():
+            # RPC đồng bộ dở/chậm -> SDK từ chối ký (báo nhầm "outcome unknown"): kiểm trước khi mở phiên.
+            return direct_rpc_not_ready(rpc_call)
+
         def nonce(addr):
             # Nonce TIẾP THEO của ví (system_accountNextIndex: tính cả giao dịch còn trong pool) — để gỡ sớm khoản giữ
             # "không rõ kết quả" khi chain chứng minh không gì được gửi. Không có RPC thì explorer (chỉ khi số đọc sống).
@@ -5956,7 +5969,8 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
             deny=direct_deny_list(PROACTIVE_DENY_DIDS),
             deadline=direct_deadline(), alert=_telegram_send, checkpoint=checkpoint,
             spend_room=lambda: combined_spend_room(state, now),
-            booked_fn=(lambda cid: _tm.direct_booked(cid)) if testnet else None, nonce_fn=nonce)
+            booked_fn=(lambda cid: _tm.direct_booked(cid)) if testnet else None, nonce_fn=nonce,
+            rpc_ready_fn=rpc_ready if rpc_url else None)
         direct_kv_persist(state, private_key)
         save_state({flop_direct.KEY: state.get(flop_direct.KEY)})
         global _DIRECT_LAST
@@ -6012,6 +6026,12 @@ _RUN_STARTED = None                  # main() đặt; ngoài main (thư viện/t
 def _mempool_blocked() -> bool:
     import token_manager
     return token_manager.testnet_enabled() and not MEMPOOL_TESTNET_ALLOWED
+
+
+def direct_rpc_not_ready(call) -> str:
+    """'' nếu RPC mua trực tiếp đủ mới để SDK ký lệnh chi, ngược lại là lý do (flop_direct.rpc_not_ready_reason)."""
+    import flop_direct
+    return flop_direct.rpc_not_ready_reason(call, lambda: time.time() * 1000)
 
 
 def direct_rpc_url(network: str) -> str:

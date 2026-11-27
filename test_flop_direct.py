@@ -373,6 +373,50 @@ def test_cli_gets_a_longer_rpc_connect_bound(monkeypatch):
     assert fd.rpc_timeout_ms() == fd.DEFAULT_RPC_TIMEOUT_MS
 
 
+def _rpc(ts_ms, syncing=False, fail=None):
+    def call(method, params):
+        if fail == method:
+            raise ConnectionError("down")
+        if method == "chain_getFinalizedHead":
+            return "0x" + "ab" * 32
+        if method == "state_getStorage":
+            assert params[0] == fd._TIMESTAMP_NOW_KEY and params[1] == "0x" + "ab" * 32
+            return "0x" + int(ts_ms).to_bytes(8, "little").hex()
+        if method == "system_health":
+            return {"isSyncing": syncing, "peers": 16}
+        raise AssertionError(method)
+    return call
+
+
+def test_rpc_freshness_matches_the_sdk_sign_bound():
+    now = 1_800_000_000_000
+    assert fd.rpc_not_ready_reason(_rpc(now - 6_000), lambda: now) == ""
+    why = fd.rpc_not_ready_reason(_rpc(now - 3_686_000, syncing=True), lambda: now)
+    assert "3686s" in why and "đồng bộ" in why
+    assert fd.rpc_not_ready_reason(_rpc(now + 60_000), lambda: now)           # đồng hồ lệch về tương lai cũng từ chối
+    assert "không đọc được" in fd.rpc_not_ready_reason(_rpc(now, fail="state_getStorage"), lambda: now)
+
+
+def test_stale_rpc_skips_the_session_without_holds_or_alerts():
+    st, alerts, cli = {}, [], CLI()
+    r = step(st, cli, alerts=alerts, rpc_ready_fn=lambda: "block finalized của RPC lệch 3686s")
+    assert r["outcome"] == "rpc_down" and cli.sessions() == [] and alerts == []
+    g = st[fd.KEY]
+    assert g["wait_until"] == NOW + fd.RPC_BACKOFF_SEC
+    assert not mst(st).get("unknown_until") and not mst(st).get("wait_until")
+    assert float((g.get("day") or {}).get("escrow") or 0) == 0 and not g.get("pending")
+    calls = []
+    r = step(st, CLI(), now=NOW + fd.RPC_BACKOFF_SEC + 1, rpc_ready_fn=lambda: calls.append(1) or "")
+    assert r["outcome"] == "opened" and calls == [1]
+
+
+def test_rpc_check_error_is_treated_as_not_ready():
+    def boom():
+        raise TimeoutError
+    st, cli = {}, CLI()
+    assert step(st, cli, rpc_ready_fn=boom)["outcome"] == "rpc_down" and cli.sessions() == []
+
+
 def test_no_offer_backs_off_without_a_channel():
     err = json.dumps({"ok": False, "code": "SESSION_FAILED",
                       "message": "no live signed offer for the named miner and model within maxFlop", "channel": None})
@@ -584,6 +628,36 @@ def test_agent_step_wires_explorer_prompts_and_booking(monkeypatch):
     assert any(u.endswith(f"/api/compute-channels/{CH}") and "testnet.flopscan.io" in u for u in seen)
     assert any("/api/session-offers?" in u and f"miner={MINER}" in u for u in seen)
     assert tm.load_ledger()["session_cumulative"]["FLOP"] == "0.021"
+
+
+def test_agent_step_skips_sessions_while_the_rpc_is_stale(monkeypatch):
+    monkeypatch.setenv("FLOP_GATEWAY_PROMPTS", "q1|q2")
+    cli = CLI()
+    monkeypatch.setattr(fd, "_run", cli)
+    monkeypatch.setattr(ac, "kv_set", lambda *a, **k: True)
+    monkeypatch.setattr(ac, "_telegram_send", lambda m: True)
+    seen = []
+
+    def stale(call):
+        seen.append(call)
+        return "block finalized của RPC lệch 3686s"
+
+    monkeypatch.setattr(ac, "direct_rpc_not_ready", stale)
+
+    class _R:
+        status_code = 200
+
+        def json(self):
+            return {"data": [offer()], "pagination": {"total": 1}}
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(ac.requests, "get", lambda url, **k: _R())
+    st = {}
+    status = ac.direct_session_step(st, KEY, NOW)
+    assert status.startswith("rpc_down") and cli.sessions() == [] and len(seen) == 1
+    assert st[fd.KEY]["wait_until"] == NOW + fd.RPC_BACKOFF_SEC
 
 
 def test_agent_step_is_off_by_default(monkeypatch):

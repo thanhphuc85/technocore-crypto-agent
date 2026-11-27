@@ -44,3 +44,10 @@ def _isolated_state_files(monkeypatch, tmp_path):
     # Provider LLM bị đánh dấu hỏng (401/402) trong một test không được rò sang test sau.
     monkeypatch.setattr(agent_cron, "_llm_dead", {})
     monkeypatch.setattr(agent_cron, "_llm_paid", {})
+
+
+@pytest.fixture(autouse=True)
+def _fresh_direct_rpc(monkeypatch):
+    """Mạng thật bị chặn trong test: coi RPC mua trực tiếp là đủ mới (test riêng kiểm phần kiểm tra này)."""
+    import agent_cron
+    monkeypatch.setattr(agent_cron, "direct_rpc_not_ready", lambda call: "")
