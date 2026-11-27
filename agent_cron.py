@@ -1210,6 +1210,7 @@ TESTNET_RADAR = os.environ.get("FLOP_TESTNET_RADAR", "").strip().lower() not in 
 TESTNET_RADAR_H = max(0.25, _env_float("FLOP_TESTNET_RADAR_HOURS", 1))
 # Explorer thêm cho radar "đứng tên ai" (vd host explorer testnet nếu khác mặc định trong flop_radar).
 RADAR_EXPLORER = os.environ.get("FLOP_RADAR_EXPLORER_URL", "").strip().rstrip("/")
+TESTNET_EXPLORER = "https://testnet.flopscan.io"
 
 
 def _github_headers(url: str) -> dict:
@@ -4819,7 +4820,12 @@ def _explorer_base(net: str) -> str:
     """Explorer của mạng đang chạy: FLOP_RADAR_EXPLORER_URL nếu đặt, không thì theo tên mạng."""
     if RADAR_EXPLORER.startswith("https://"):
         return RADAR_EXPLORER
-    return f"https://explorer.{_explorer_net(net)}.flop.network"
+    name = _explorer_net(net)
+    if name == "testnet":
+        # Testnet công khai (24/11) dùng FLOPScan (docs.flop.network/networks/testnet); explorer.testnet.flop.network
+        # không phân giải. API cùng dạng explorer devnet (/api/compute-channels, /api/accounts, /api/stats).
+        return TESTNET_EXPLORER
+    return f"https://explorer.{name}.flop.network"
 
 
 def _first_str(d: dict, keys) -> str:
@@ -5805,7 +5811,7 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
     import token_manager as _tm
     try:
         testnet = _tm.testnet_enabled()
-        network = "testnet" if testnet else "devnet"
+        network = direct_network(testnet)
         prompts = _gateway_prompts(now, "")          # mỗi phiên một đề (flop_direct xoay theo prompt_idx)
         explorer = _explorer_base(network)
         direct_kv_hydrate(state, private_key)
@@ -5934,7 +5940,7 @@ def direct_session_step(state: dict, private_key, now: int) -> str:
         _DIRECT_LAST = (r, network, explorer)
         status = (f"{r.get('outcome')}" + (f"×{r['opened']}" if r.get("opened", 0) > 1 else "")
                   + (f" +{r['booked_flop']:.4g}FLOP" if r.get("booked") else ""))
-        print(f"[direct] {status}" + ("" if testnet else " (devnet tập, không ghi sổ)")
+        print(f"[direct] {status}" + ("" if testnet else f" ({network}, không ghi sổ)")
               + (f" — {str(r['reason'])[:160]}" if r.get("reason") else ""))
         return status
     except Exception as e:
@@ -5983,6 +5989,16 @@ _RUN_STARTED = None                  # main() đặt; ngoài main (thư viện/t
 def _mempool_blocked() -> bool:
     import token_manager
     return token_manager.testnet_enabled() and not MEMPOOL_TESTNET_ALLOWED
+
+
+def direct_network(testnet: bool) -> str:
+    """Mạng của bước MUA TRỰC TIẾP. Mặc định theo TESTNET_ENABLED (testnet | devnet). FLOP_DIRECT_NETWORK=testnet cho mua
+    trực tiếp chạy trên testnet mà KHÔNG bật cả chế độ testnet (sổ, gateway, faucet /fund…): kênh vẫn đứng tên ví agent
+    trên chain, chỉ là không ghi sổ cục bộ (book_fn chỉ có khi TESTNET_ENABLED). Giá trị lạ -> bỏ qua."""
+    v = os.environ.get("FLOP_DIRECT_NETWORK", "").strip().lower()
+    if v in ("testnet", "devnet"):
+        return v
+    return "testnet" if testnet else "devnet"
 
 
 def direct_deadline() -> float:

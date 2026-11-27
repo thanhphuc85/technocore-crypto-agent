@@ -131,7 +131,7 @@ def test_fuzz(monkeypatch, tmp_path, seed, capsys):
 
     def get(url, params=None, **k):
         params = params or {}
-        if chain["down"] and "explorer" in url:
+        if chain["down"] and ("explorer" in url or "flopscan" in url):
             return R({"error": "bad gateway"}, 502)
         if url.endswith(f"/api/accounts/{addr}/inference-spend"):
             return R({"address": addr, "totalSpentRaw": str(chain["spent"])})
