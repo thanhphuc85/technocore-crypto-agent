@@ -42,8 +42,12 @@ KEY = "flop_direct"
 # releases.json (2026-11-22): cli.image — bản >= 0.1.172 có `session run`. v0.1.418 = SDK 0.7.2, nhận runtime devnet
 # 1014020/1014027/1014029; v0.1.321 (SDK 0.5.2) bị runtime đó từ chối (flop-labs/network#238). Đã đối chiếu mã CLI hai bản:
 # mọi tham số agent dùng (keys import, session run, channel finalize, --output agent) và JSON trả về không đổi.
-DEFAULT_IMAGE = ("ghcr.io/flop-labs/flop-core/cli:v0.1.418"
-                 "@sha256:fd97fab267e47bc69c40a014e562a69480cae7328dd0f139267ef940826fe223")
+# 2026-11-27: v0.1.514 = @flop-labs/cli 0.10.2 + SDK 0.13.1 (đọc app/package.json trong layer ghcr), nhận runtime testnet
+# 1014039 và có `session run --max-duration`. v0.1.505 (releases.json lúc đó) chỉ có CLI 0.9.1: không có --max-duration, kênh
+# mặc định 120 block -> settle hỏng (AttestationStale, flop-labs/network#1338) nên bị bỏ qua. Các tham số agent dùng
+# (keys import --secret-env/--out/--password-env/--type, --output agent, session run, channel finalize) vẫn còn.
+DEFAULT_IMAGE = ("ghcr.io/flop-labs/flop-core/cli:v0.1.514"
+                 "@sha256:e14e2208df0754957d6732894bf3e7ed79c24d6729e9723813bb5b60ac397318")
 # ESCROW LÀ CHI PHÍ: SDK (compute-channel/session-estimate) ghi "A cooperative spot settle pays the whole escrow
 # to the miner (D-0403), so the escrow is the cost, not a ceiling". Không đặt FLOP_DIRECT_MAX_FLOP -> escrow =
 # minEscrow của offer miner công bố (mức thấp nhất miner nhận), kẹp dưới FLOP_DIRECT_ESCROW_CAP.
@@ -71,6 +75,11 @@ DEFAULT_MAX_PER_DAY = 25.0         # FLOP escrow tối đa mỗi ngày UTC
 DEFAULT_PACE_WINDOW_H = 20
 DEFAULT_PACE_JITTER_PCT = 20
 DEFAULT_TIMEOUT_SEC = 600          # CLI tự chờ hạn on-chain rồi thu hồi khi miner không xác nhận
+# Thời hạn kênh (giây = block) truyền cho CLI qua --max-duration. Đường force (không có offer) luôn truyền — CLI 0.10.x mặc
+# định 1200 s, dài hơn ngân sách bước direct (FLOP_DIRECT_RUN_BUDGET_SEC <= 1080) nên CLI sẽ bị giết trước hạn kênh. Testnet
+# 26/11: ack -> settle mất 116-189 block, kênh 120 block hỏng hết (flop-labs/network#1338) -> 600 còn dư ~3 lần.
+DEFAULT_FORCE_MAX_DURATION_SEC = 600
+MIN_MAX_DURATION_SEC = 300
 ERROR_BACKOFF_SEC = 3600
 UNKNOWN_HOLD_SEC = 6 * 3600        # không rõ kết quả (CLI bị ngắt): không mở kênh mới chừng này
 UNSUPPORTED_BACKOFF_SEC = 24 * 3600
@@ -213,6 +222,18 @@ def config() -> tuple:
         # auto rơi về force khi không có offer: cùng rủi ro khoá ẩn on-chain.
         errs.append(f"FLOP_DIRECT_VIA={via} có thể mở kênh cưỡng bức (khoá FLOP tới hạn nếu miner không "
                     "xác nhận) — cần FLOP_DIRECT_ALLOW_FORCE=on")
+    raw_md = _env("FLOP_DIRECT_MAX_DURATION_SEC")
+    max_duration = None
+    if raw_md:
+        try:
+            max_duration = int(raw_md)
+            if max_duration < MIN_MAX_DURATION_SEC:
+                raise ValueError
+        except ValueError:
+            errs.append(f"FLOP_DIRECT_MAX_DURATION_SEC phải là số nguyên >= {MIN_MAX_DURATION_SEC} (nhận {raw_md!r})")
+            max_duration = None
+    if max_duration is None and via == "force":
+        max_duration = DEFAULT_FORCE_MAX_DURATION_SEC
     try:
         max_tokens = int(_env("FLOP_DIRECT_MAX_TOKENS") or 1024)
         if max_tokens <= 0:
@@ -250,7 +271,7 @@ def config() -> tuple:
            "default_cap": max(0.1, _num("FLOP_DIRECT_DEFAULT_CAP_GFS", DEFAULT_CAP_GFS)),
            "max_flop": format(max_flop, "f") if max_flop is not None else None,
            "escrow_cap": escrow_cap,
-           "max_tokens": max_tokens, "via": via,
+           "max_tokens": max_tokens, "via": via, "max_duration": max_duration,
            "per_run": max(1, int(_num("FLOP_DIRECT_MAX_PER_RUN", DEFAULT_MAX_PER_RUN))),
            "max_pending": max(1, int(_num("FLOP_DIRECT_MAX_PENDING", DEFAULT_MAX_PENDING))),
            "per_day": _num("FLOP_DIRECT_MAX_PER_DAY", DEFAULT_MAX_PER_DAY),
@@ -1166,6 +1187,9 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
             max_flop, tokens, plan = cfg["max_flop"], cfg["max_tokens"], None
             sess_timeout = cfg["timeout"]
             prompt_i = plist[int(g.get("prompt_idx") or 0) % len(plist)]
+            if cfg.get("max_duration"):
+                # CLI phải sống quá thời hạn kênh: SDK chỉ thu hồi escrow của kênh hỏng SAU openedAt + maxDuration.
+                sess_timeout = max(sess_timeout, int(cfg["max_duration"]) + MAXDUR_MARGIN_SEC)
             if offers_fn is not None and (max_flop is None or cfg["via"] == "offer"):
                 k = _mkey(m["miner"])
                 if k not in offer_cache:
@@ -1184,7 +1208,7 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
                     last = ("no_offer", why)
                     continue
                 if info["max_duration"]:
-                    sess_timeout = max(cfg["timeout"], int(info["max_duration"]) + MAXDUR_MARGIN_SEC)
+                    sess_timeout = max(sess_timeout, int(info["max_duration"]) + MAXDUR_MARGIN_SEC)
                 esc = _flop_str(info["min_escrow"])
                 if max_flop is None:
                     # Định cỡ theo việc thật: GFLOP/token (đã học, hoặc suy từ cỡ model), công suất miner, giá.
@@ -1326,7 +1350,10 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
             cmd = base + ["--network", network, "--keystore", ks, "--password-env", PASSWORD_ENV,
                           "--output", "agent", "session", "run", "--miner", m["miner"], "--model", m["model"],
                           "--endpoint", m["endpoint"], "--prompt", prompt_i[:4000], "--max-flop", max_flop,
-                          "--max-tokens", str(tokens), "--via", cfg["via"]]
+                          "--max-tokens", str(tokens)]
+            if cfg.get("max_duration"):
+                cmd += ["--max-duration", str(int(cfg["max_duration"]))]
+            cmd += ["--via", cfg["via"]]
             ds = {"day": day, "escrow": round(float(ds["escrow"]) + per_session, 9)}
             g["day"] = ds
             g["last_attempt"] = now

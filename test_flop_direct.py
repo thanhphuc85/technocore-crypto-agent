@@ -522,7 +522,7 @@ def test_agent_step_wires_explorer_prompts_and_booking(monkeypatch):
     assert "q1" in cli.sessions()[0]["cmd"][cli.sessions()[0]["cmd"].index("--prompt") + 1]
     status = ac.direct_session_step(st, KEY, NOW + 300)
     assert status.startswith("pending") or status.startswith("opened")
-    assert any(u.endswith(f"/api/compute-channels/{CH}") and "explorer.testnet.flop.network" in u for u in seen)
+    assert any(u.endswith(f"/api/compute-channels/{CH}") and "testnet.flopscan.io" in u for u in seen)
     assert any("/api/session-offers?" in u and f"miner={MINER}" in u for u in seen)
     assert tm.load_ledger()["session_cumulative"]["FLOP"] == "0.021"
 
@@ -1198,9 +1198,9 @@ def _dur_offer(seconds, **kw):
 
 def test_cli_gets_the_indexer_url_for_offer_discovery():
     cli = CLI()
-    step({}, cli, indexer_url="https://explorer.testnet.flop.network/")
+    step({}, cli, indexer_url="https://testnet.flopscan.io/")
     run = cli.sessions()[0]
-    assert run["env"]["FLOP_INDEXER_URL"] == "https://explorer.testnet.flop.network"
+    assert run["env"]["FLOP_INDEXER_URL"] == "https://testnet.flopscan.io"
     assert run["cmd"][run["cmd"].index("FLOP_INDEXER_URL") - 1] == "-e"              # chỉ TÊN trên dòng lệnh
     cli2 = CLI()
     step({}, cli2)
@@ -1379,7 +1379,7 @@ def test_agent_filters_expired_offers_and_passes_the_indexer(monkeypatch):
     assert offer_q["minExpiry"] == "5001"
     run = cli.sessions()[0]
     assert Decimal(run["cmd"][run["cmd"].index("--max-flop") + 1]) >= Decimal("0.05")  # không theo offer hết hạn
-    assert run["env"]["FLOP_INDEXER_URL"] == "https://explorer.testnet.flop.network"
+    assert run["env"]["FLOP_INDEXER_URL"] == "https://testnet.flopscan.io"
 
 
 # --- audit vòng 3: settle cưỡng bức, đối soát khi tắt, đổi mạng -----------------------------------------------------
@@ -1600,7 +1600,7 @@ def test_agent_alerts_when_direct_buying_stalls(monkeypatch):
     st = {}
     for i in range(6):
         ac._DIRECT_LAST = ({"outcome": "low_balance", "settled": 0, "reason": "hết FLOP", "balance": 0.2},
-                           "testnet", "https://explorer.testnet.flop.network")
+                           "testnet", "https://testnet.flopscan.io")
         ac.direct_watchdog_step(st, NOW + i * 300)
     assert len(sent) == 1 and "MUA TRỰC TIẾP (testnet)" in sent[0] and ac._DIRECT_LAST is None
     ac.direct_watchdog_step(st, NOW + 9999)                                 # lượt không chạy bước direct: bỏ qua
