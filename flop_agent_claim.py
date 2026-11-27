@@ -36,6 +36,13 @@ REFUSE_MIN = 6 * 3600              # bị từ chối không kèm giờ chờ ->
 NETWORK_RETRY = 900                # lỗi mạng / 5xx -> 15 phút, GIỮ nonce (gửi lại an toàn)
 CLOSED_RETRY = 1800                # faucet đóng / hết tiền -> 30 phút
 MAX_AMOUNT = 1000.0                # làn agent cấp 10; số lớn hơn mức này là đơn vị sai -> không tin
+# Nonce chưa có kết quả cuối (5xx/mạng) giữ tối đa chừng này rồi đổi nonce mới. Testnet 26/11: faucet trả 502 cho
+# mọi lần gửi nhưng VẪN chuyển 10 FLOP lúc 19:25Z -> agent giữ nonce cũ mãi, không biết đã nhận. Đổi nonce an toàn:
+# faucet tự giới hạn 10 FLOP / ví / 24 giờ nên không thể trả hai lần.
+NONCE_MAX_AGE = 6 * 3600
+_TRANSFERS = {"transfer", "transferkeepalive", "transferallowdeath"}
+_BATCHES = {"batch", "batchall", "forcebatch"}
+_PLANCK = 10 ** 18
 
 
 def enabled() -> bool:
@@ -84,13 +91,72 @@ def _new_nonce(rec: dict, now: float) -> str:
     return str(n)
 
 
+def _same_account(a: str, b: str) -> bool:
+    a, b = str(a or ""), str(b or "")
+    if a == b:
+        return bool(a)
+    try:
+        import flop_gateway as fg
+        pa, pb = fg.account_pubkey(a), fg.account_pubkey(b)
+        return pa is not None and pa == pb
+    except Exception:
+        return False
+
+
+def _planck(v):
+    try:
+        return int(str(v).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def incoming_grants(txs, address: str) -> list:
+    """Các khoản FLOP NGƯỜI KHÁC chuyển vào `address` trong giao dịch explorer (/api/accounts/<ví>/transactions):
+    balances.transfer* trực tiếp hoặc nằm trong utility.batch/batchAll (faucet gộp nhiều ví một giao dịch).
+    Trả [{"ts": giây, "amount": FLOP, "tx": hash}]."""
+    out = []
+    for t in txs or []:
+        if not isinstance(t, dict) or t.get("success") is not True or _same_account(t.get("sender"), address):
+            continue
+        try:
+            ts = int(t.get("timestamp")) // 1000
+        except (TypeError, ValueError):
+            continue
+        sec, meth, params = str(t.get("section") or "").lower(), str(t.get("method") or "").lower(), t.get("params")
+        calls = []
+        if sec == "utility" and meth in _BATCHES and isinstance(params, list) and params and isinstance(params[0], list):
+            calls = [c for c in params[0] if isinstance(c, dict)]
+        elif sec == "balances" and meth in _TRANSFERS:
+            calls = [{"section": sec, "method": meth, "args": params}]
+        total = 0
+        for c in calls:
+            if str(c.get("section") or "").lower() != "balances" or str(c.get("method") or "").lower() not in _TRANSFERS:
+                continue
+            a = c.get("args")
+            if isinstance(a, list) and len(a) >= 2:
+                dest, value = a[0], a[1]
+            elif isinstance(a, dict):
+                dest, value = a.get("dest"), a.get("value")
+            else:
+                continue
+            if isinstance(dest, dict):
+                dest = dest.get("Id") or dest.get("id")
+            v = _planck(value)
+            if v and v > 0 and _same_account(dest, address):
+                total += v
+        if total:
+            out.append({"ts": ts, "amount": total / _PLANCK, "tx": str(t.get("hash") or "")[:80]})
+    return out
+
+
 def _trim(rec: dict) -> dict:
     rec["claims"] = list(rec.get("claims") or [])[-10:]
     return rec
 
 
-def run_step(rec, wallet_priv, address: str, now: float, http_get, http_post):
+def run_step(rec, wallet_priv, address: str, now: float, http_get, http_post, grants_fn=None):
     """Một lượt. `http_get(url) -> (status, json|None)`, `http_post(url, body) -> (status, json|None, headers)`.
+    `grants_fn(address)` -> giao dịch explorer gần đây của ví (None = không kiểm on-chain).
     Trả (rec mới, outcome, alert|None). Không ném lỗi mạng ra ngoài; rec luôn có `at` (luật blob bền)."""
     rec = dict(rec) if isinstance(rec, dict) else {}
     now_i = int(now)
@@ -104,6 +170,34 @@ def run_step(rec, wallet_priv, address: str, now: float, http_get, http_post):
         rec["at"] = now_i
         rec["last_outcome"] = outcome
         return _trim(rec), outcome, alert
+
+    # Yêu cầu trước CHƯA có kết quả cuối (5xx/mạng, nonce còn giữ): faucet có thể đã chuyển tiền dù trả lỗi.
+    # Kiểm on-chain: có khoản người khác chuyển vào ví từ lúc tạo nonce (nonce = mili giây lúc tạo) -> coi là đã nhận.
+    pend = str(rec.get("nonce") or "")
+    if pend:
+        try:
+            born = int(pend) // 1000
+        except ValueError:
+            born = None
+        if grants_fn is not None and born is not None:
+            known = {c.get("tx") for c in rec.get("claims") or [] if isinstance(c, dict)}
+            try:
+                gs = incoming_grants(grants_fn(address), address)
+            except Exception:
+                gs = []
+            hit = sorted((g for g in gs if g["ts"] >= born - 120 and g["tx"] and g["tx"] not in known
+                          and 0 < g["amount"] <= MAX_AMOUNT), key=lambda g: g["ts"])
+            if hit:
+                g = hit[0]
+                rec["nonce"] = None
+                rec["last_ok_ts"] = g["ts"]
+                rec.setdefault("claims", []).append({"ts": g["ts"], "amount": g["amount"], "tx": g["tx"],
+                                                     "tier": "onchain"})
+                return done("claimed-onchain", retry=max(60, g["ts"] + DAY + 120 - now_i),
+                            alert=(f"✅ Faucet testnet: phản hồi lỗi nhưng {g['amount']:g} FLOP đã vào ví "
+                                   f"{address[:8]}…{address[-4:]} (tx {g['tx'][:18]}…) — ghi nhận, xin lại sau 24 giờ."))
+        if born is not None and now_i - born > NONCE_MAX_AGE:
+            rec["nonce"] = None                        # quá lâu không có kết quả cuối: nonce mới (faucet chặn trả 2 lần)
 
     try:
         cs, chain = http_get(f"{base}/chain")
