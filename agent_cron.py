@@ -3780,6 +3780,17 @@ def _claim_http_post(url, body):
     return r.status_code, data, dict(r.headers)
 
 
+def _claim_wallet_txs(addr):
+    # Giao dịch gần đây của ví (explorer testnet): tìm khoản faucet đã chuyển dù POST trả lỗi.
+    r = requests.get(f"{_explorer_base('testnet')}/api/accounts/{addr}/transactions", params={"limit": "50"},
+                     headers={"User-Agent": UA}, timeout=15)
+    r.raise_for_status()
+    d = r.json()
+    if isinstance(d, dict):
+        d = d.get("data")
+    return d if isinstance(d, list) else []
+
+
 def testnet_claim_step(state: dict, private_key, now: float = None) -> str:
     """(GATED FLOP_FAUCET_AGENT_CLAIM) Nhận 10 FLOP testnet/ngày qua làn agent của faucet, ký bằng khoá ví (DID).
     Không ghi sổ cái; chỉ lưu lịch sử claim (bền qua KV) và báo Telegram khi nhận / khi bị từ chối lần đầu."""
@@ -3794,7 +3805,7 @@ def testnet_claim_step(state: dict, private_key, now: float = None) -> str:
             return "no-wallet"
         addr = flop_gateway.wallet_address(wk)
         rec, outcome, alert = fac.run_step(state.get(fac.KEY), wk, addr, time.time() if now is None else now,
-                                           _claim_http_get, _claim_http_post)
+                                           _claim_http_get, _claim_http_post, grants_fn=_claim_wallet_txs)
         if outcome == "wait":
             return outcome
         print(f"[claim] faucet testnet: {outcome}")

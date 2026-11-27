@@ -146,3 +146,75 @@ def test_step_is_wired_and_state_is_durable(monkeypatch):
     monkeypatch.setenv("FLOP_FAUCET_AGENT_CLAIM", "on")
     monkeypatch.setenv("FLOP_FAUCET_ENABLED", "on")
     assert ac.faucet_step({}, KEY, "did:key:x") == "agent-claim-lane"      # không gửi đường /fund cũ
+
+
+# --- faucet trả lỗi nhưng đã chuyển tiền (testnet 26/11: 502 mà vẫn có 10 FLOP lúc 19:25Z) ------------------
+
+OTHER = "5CcDr5BcVWGqdyk7EK3S43PPd4E1yTFHPMGjtjqvRLttgXtw"
+TEN = "10,000,000,000,000,000,000"
+
+
+def _batch(ts, dest=ADDR, value=TEN, sender=OTHER, success=True, h="0xfeed"):
+    calls = [{"args": {"dest": {"Id": "5FRACSaeCy7FUT5pojwtfWoKVFjSLDFp1XmGJ7mYk88WUU71"}, "value": TEN},
+              "method": "transferKeepAlive", "section": "balances"},
+             {"args": {"dest": {"Id": dest}, "value": value}, "method": "transferKeepAlive", "section": "balances"}]
+    return {"hash": h, "method": "batchAll", "section": "utility", "sender": sender, "params": [calls],
+            "success": success, "timestamp": str(int(ts * 1000))}
+
+
+def test_incoming_grants_reads_batched_and_direct_transfers_to_us_only():
+    direct = {"hash": "0xd1", "method": "transferKeepAlive", "section": "balances", "sender": OTHER,
+              "params": [{"Id": ADDR}, "2,500,000,000,000,000,000"], "success": True, "timestamp": str(int(NOW * 1000))}
+    own = dict(_batch(NOW), sender=ADDR, hash="0xown")
+    failed = _batch(NOW, success=False, h="0xbad")
+    others = _batch(NOW, dest=OTHER, h="0xoth")
+    gs = fac.incoming_grants([_batch(NOW), direct, own, failed, others, "junk"], ADDR)
+    assert [(g["tx"], g["amount"]) for g in gs] == [("0xfeed", 10.0), ("0xd1", 2.5)]
+
+
+def _retry502():
+    return (502, None, None)
+
+
+def test_502_but_paid_on_chain_is_recorded_and_waits_a_day():
+    sent = []
+    rec, out, _ = fac.run_step({}, KEY, ADDR, NOW, _get(), _post([_retry502()], sent))
+    assert out.startswith("retry:502") and rec["nonce"]
+    paid_at = NOW + 120
+    calls = []
+    rec2, out2, alert = fac.run_step(rec, KEY, ADDR, NOW + 1000, _get(calls=calls), _post([], []),
+                                     grants_fn=lambda a: [_batch(paid_at)])
+    assert out2 == "claimed-onchain" and "10 FLOP" in alert and calls == []
+    assert rec2["nonce"] is None and rec2["last_ok_ts"] == int(paid_at)
+    assert rec2["next_ts"] == int(paid_at) + fac.DAY + 120 and rec2["claims"][-1]["tx"] == "0xfeed"
+    rec3, out3, _ = fac.run_step(rec2, KEY, ADDR, NOW + 2000, _get(), _post([], []),
+                                 grants_fn=lambda a: [_batch(paid_at)])
+    assert out3 == "wait"
+
+
+def test_grant_older_than_the_pending_nonce_or_already_known_is_ignored():
+    sent = []
+    rec, _, _ = fac.run_step({}, KEY, ADDR, NOW, _get(), _post([_retry502()], sent))
+    sent2 = []
+    rec2, out2, _ = fac.run_step(rec, KEY, ADDR, NOW + 1000, _get(), _post([_retry502()], sent2),
+                                 grants_fn=lambda a: [_batch(NOW - 3 * 3600)])
+    assert out2.startswith("retry:502") and sent2[0][1]["nonce"] == rec["nonce"]        # vẫn giữ nonce
+
+
+def test_grant_lookup_error_falls_back_to_posting():
+    rec, _, _ = fac.run_step({}, KEY, ADDR, NOW, _get(), _post([_retry502()], []))
+
+    def boom(a):
+        raise RuntimeError("explorer down")
+    sent = []
+    _, out, _ = fac.run_step(rec, KEY, ADDR, NOW + 1000, _get(), _post([_retry502()], sent), grants_fn=boom)
+    assert out.startswith("retry:502") and len(sent) == 1
+
+
+def test_pending_nonce_is_replaced_after_max_age():
+    rec, _, _ = fac.run_step({}, KEY, ADDR, NOW, _get(), _post([_retry502()], []))
+    old = rec["nonce"]
+    sent = []
+    later = NOW + fac.NONCE_MAX_AGE + 60
+    fac.run_step(rec, KEY, ADDR, later, _get(), _post([_retry502()], sent), grants_fn=lambda a: [])
+    assert sent[0][1]["nonce"] != old and int(sent[0][1]["nonce"]) >= int(later * 1000)
