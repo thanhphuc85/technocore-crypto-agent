@@ -2843,3 +2843,14 @@ def test_repeated_failures_back_off_exponentially():
     assert waits == [3600, 7200, 14400, 28800, 28800]
     step(st, CLI(), now=t)                                                    # thành công -> hết chuỗi lỗi
     assert "fail_streak" not in mst(st)
+
+
+def test_stale_probe_is_not_spent_when_the_run_stops_before_the_session():
+    table = {MINER: [_hch(fd.HEALTH_STALE_SEC + 600)]}
+    st, cli = {}, CLI()
+    r = step(st, cli, miner_channels_fn=_health_fn(table), rpc_ready_fn=lambda: "RPC lệch 3000s")
+    assert r["outcome"] == "rpc_down" and cli.sessions() == []
+    assert "probe_at" not in mst(st)                                           # chưa thăm dò thật
+    cli2 = CLI()
+    step(st, cli2, now=NOW + fd.RPC_BACKOFF_SEC + 60, miner_channels_fn=_health_fn(table))
+    assert len(cli2.sessions()) == 1 and mst(st)["probe_at"] == NOW + fd.RPC_BACKOFF_SEC + 60

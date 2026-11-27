@@ -1476,11 +1476,6 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
             if pick is None:
                 break
             m, st = pick, mstate(pick)
-            hp = health(m)
-            if hp[0] == "stale":
-                st["probe_at"] = now                   # thăm dò miner ngừng trả: tối đa một lần mỗi STALE_PROBE_SEC
-                last_paid = time.strftime("%d/%m %H:%MZ", time.gmtime(hp[2])) if hp[2] else "chưa từng"
-                log(f"[direct] thăm dò miner {m['miner'][:8]}… (không trả tiền cho ai từ {last_paid})")
             # Escrow: cố định (FLOP_DIRECT_MAX_FLOP) hoặc theo offer miner công bố. Chế độ offer mà miner không có
             # offer -> không gọi CLI (khỏi kéo image + mở kết nối chain chỉ để nhận "no live signed offer").
             max_flop, tokens, plan = cfg["max_flop"], cfg["max_tokens"], None
@@ -1665,6 +1660,13 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
             if cfg.get("max_duration"):
                 cmd += ["--max-duration", str(int(cfg["max_duration"]))]
             cmd += ["--via", cfg["via"]]
+            hp = health(m)
+            if hp[0] == "stale":
+                # Chỉ tính là đã thăm dò khi THẬT SỰ gọi CLI mở phiên: dừng ở chốt trước (RPC chưa sẵn sàng, trần ngày,
+                # hết giờ lượt...) mà đã ghi probe_at thì miner ngừng trả phải chờ thêm STALE_PROBE_SEC vô ích.
+                st["probe_at"] = now
+                last_paid = time.strftime("%d/%m %H:%MZ", time.gmtime(hp[2])) if hp[2] else "chưa từng"
+                log(f"[direct] thăm dò miner {m['miner'][:8]}… (không trả tiền cho ai từ {last_paid})")
             ds = {"day": day, "escrow": round(float(ds["escrow"]) + per_session, 9)}
             g["day"] = ds
             g["last_attempt"] = now
