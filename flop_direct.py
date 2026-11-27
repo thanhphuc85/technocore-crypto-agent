@@ -85,6 +85,12 @@ ERROR_BACKOFF_SEC = 3600
 # mạng chung, không phải của miner -> nghỉ CHUNG ngắn rồi thử lại, không chặn miner 1 giờ. Testnet 27/11: RPC quá tải
 # (trả lời 4-10 s, sát ngưỡng 10 s của CLI) khiến cả 2 miner bị chặn 1 giờ mỗi lần chập chờn.
 RPC_BACKOFF_SEC = 600
+# Giới hạn KẾT NỐI RPC của CLI (`--rpc-timeout`, mặc định của CLI 10 s): gồm mở wss + tải metadata (~1 MB) + phiên bản
+# runtime + genesis. Testnet 27/11 quá tải: mỗi lệnh đọc state ~3 s (từ VN) tới 5-10 s (runner Mỹ) -> 10 s không đủ
+# dù đường mạng thông (rpc-probe: wss 5/5 OK). Chỉ là thời gian CHỜ kết nối, không đổi gì on-chain.
+DEFAULT_RPC_TIMEOUT_MS = 60_000
+MIN_RPC_TIMEOUT_MS = 10_000
+MAX_RPC_TIMEOUT_MS = 180_000
 _RPC_DOWN_MARKERS = ("rpc unreachable", "could not connect to wss://", "could not connect to ws://")
 UNKNOWN_HOLD_SEC = 6 * 3600        # không rõ kết quả (CLI bị ngắt): không mở kênh mới chừng này
 # Gỡ SỚM khoản giữ "không rõ kết quả" khi CHAIN chứng minh không có giao dịch nào của ví được ghi: nonce ví (đọc lúc
@@ -434,6 +440,16 @@ def image_problem(image: str) -> str:
     return "FLOP_DIRECT_IMAGE phải ghim digest (`…@sha256:<64 hex>`) — container nhận khoá ví"
 
 
+def rpc_timeout_ms() -> int:
+    """FLOP_DIRECT_RPC_TIMEOUT_MS (số nguyên ms, kẹp [10 000, 180 000]); trống/sai -> 60 000."""
+    raw = _env("FLOP_DIRECT_RPC_TIMEOUT_MS")
+    try:
+        v = int(raw) if raw else DEFAULT_RPC_TIMEOUT_MS
+    except ValueError:
+        v = DEFAULT_RPC_TIMEOUT_MS
+    return max(MIN_RPC_TIMEOUT_MS, min(MAX_RPC_TIMEOUT_MS, v))
+
+
 def docker_network() -> str:
     """Mạng của container CLI: `bridge` (mặc định — tách khỏi mạng và dịch vụ localhost của máy chạy) hoặc `host`
     (FLOP_DIRECT_DOCKER_NETWORK=host, như trước — chỉ khi CLI cần dịch vụ chạy trên chính máy đó). Giá trị lạ -> bridge."""
@@ -666,6 +682,7 @@ def finalize_channels(channels, *, wkey, addr: str, network: str, runner, log=pr
     res = {}
     if not channels:
         return res
+    rpc_ms = rpc_timeout_ms()
     work = tempfile.mkdtemp(prefix="flop-direct-fin-")
     try:
         password = secrets.token_hex(24)
@@ -679,8 +696,9 @@ def finalize_channels(channels, *, wkey, addr: str, network: str, runner, log=pr
             return {c: (False, "keys import") for c in channels}
         for cid in channels:
             base, ks = cli_command(work, [PASSWORD_ENV], name=f"flop-direct-{secrets.token_hex(6)}")
-            rc, so, se = runner(base + ["--network", network, "--keystore", ks, "--password-env", PASSWORD_ENV,
-                                        "--output", "agent", "channel", "finalize", cid], {PASSWORD_ENV: password}, 180)
+            rc, so, se = runner(base + ["--network", network, "--rpc-timeout", str(rpc_ms), "--keystore", ks,
+                                        "--password-env", PASSWORD_ENV, "--output", "agent", "channel", "finalize",
+                                        cid], {PASSWORD_ENV: password}, 180 + rpc_ms // 1000)
             if rc == 0:
                 tx = str((last_json(so) or {}).get("tx_hash") or "")[:80]
                 res[cid] = (True, tx)
@@ -1326,11 +1344,12 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
             # Escrow: cố định (FLOP_DIRECT_MAX_FLOP) hoặc theo offer miner công bố. Chế độ offer mà miner không có
             # offer -> không gọi CLI (khỏi kéo image + mở kết nối chain chỉ để nhận "no live signed offer").
             max_flop, tokens, plan = cfg["max_flop"], cfg["max_tokens"], None
-            sess_timeout = cfg["timeout"]
+            rpc_s = rpc_timeout_ms() // 1000               # CLI chờ kết nối RPC chừng này TRƯỚC khi làm gì on-chain
+            sess_timeout = cfg["timeout"] + rpc_s
             prompt_i = plist[int(g.get("prompt_idx") or 0) % len(plist)]
             if cfg.get("max_duration"):
                 # CLI phải sống quá thời hạn kênh: SDK chỉ thu hồi escrow của kênh hỏng SAU openedAt + maxDuration.
-                sess_timeout = max(sess_timeout, int(cfg["max_duration"]) + MAXDUR_MARGIN_SEC)
+                sess_timeout = max(sess_timeout, int(cfg["max_duration"]) + MAXDUR_MARGIN_SEC + rpc_s)
             if offers_fn is not None and (max_flop is None or cfg["via"] == "offer"):
                 k = _mkey(m["miner"])
                 if k not in offer_cache:
@@ -1349,7 +1368,7 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
                     last = ("no_offer", why)
                     continue
                 if info["max_duration"]:
-                    sess_timeout = max(sess_timeout, int(info["max_duration"]) + MAXDUR_MARGIN_SEC)
+                    sess_timeout = max(sess_timeout, int(info["max_duration"]) + MAXDUR_MARGIN_SEC + rpc_s)
                 esc = _flop_str(info["min_escrow"])
                 if max_flop is None:
                     # Định cỡ theo việc thật: GFLOP/token (đã học, hoặc suy từ cỡ model), công suất miner, giá.
@@ -1488,8 +1507,8 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
             if indexer_url:
                 env_run["FLOP_INDEXER_URL"] = str(indexer_url).rstrip("/")
             base, ks = cli_command(work, list(env_run), name=f"flop-direct-{secrets.token_hex(6)}")
-            cmd = base + ["--network", network, "--keystore", ks, "--password-env", PASSWORD_ENV,
-                          "--output", "agent", "session", "run", "--miner", m["miner"], "--model", m["model"],
+            cmd = base + ["--network", network, "--rpc-timeout", str(rpc_s * 1000), "--keystore", ks,
+                          "--password-env", PASSWORD_ENV, "--output", "agent", "session", "run", "--miner", m["miner"], "--model", m["model"],
                           "--endpoint", m["endpoint"], "--prompt", prompt_i[:4000], "--max-flop", max_flop,
                           "--max-tokens", str(tokens)]
             if cfg.get("max_duration"):

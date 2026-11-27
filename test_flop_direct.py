@@ -359,6 +359,20 @@ def test_rpc_unreachable_stops_the_run_before_other_miners(monkeypatch, three_mi
     assert all(not (ms.get(fd._mkey(k)) or {}).get("wait_until") for k in (MINER, M2, M3))
 
 
+def test_cli_gets_a_longer_rpc_connect_bound(monkeypatch):
+    cli = CLI()
+    step({}, cli)
+    cmd = cli.sessions()[0]["cmd"]
+    assert cmd[cmd.index("--rpc-timeout") + 1] == str(fd.DEFAULT_RPC_TIMEOUT_MS)
+    assert cmd.index("--rpc-timeout") < cmd.index("session")              # tuỳ chọn toàn cục: trước lệnh con
+    monkeypatch.setenv("FLOP_DIRECT_RPC_TIMEOUT_MS", "999999")
+    assert fd.rpc_timeout_ms() == fd.MAX_RPC_TIMEOUT_MS
+    monkeypatch.setenv("FLOP_DIRECT_RPC_TIMEOUT_MS", "5")
+    assert fd.rpc_timeout_ms() == fd.MIN_RPC_TIMEOUT_MS
+    monkeypatch.setenv("FLOP_DIRECT_RPC_TIMEOUT_MS", "abc")
+    assert fd.rpc_timeout_ms() == fd.DEFAULT_RPC_TIMEOUT_MS
+
+
 def test_no_offer_backs_off_without_a_channel():
     err = json.dumps({"ok": False, "code": "SESSION_FAILED",
                       "message": "no live signed offer for the named miner and model within maxFlop", "channel": None})
@@ -632,6 +646,7 @@ def test_several_sessions_per_run_with_one_keystore_and_distinct_prompts(monkeyp
 
 def test_sessions_stop_when_the_run_budget_runs_out(monkeypatch):
     monkeypatch.setenv("FLOP_DIRECT_MAX_PER_RUN", "10")
+    monkeypatch.setenv("FLOP_DIRECT_RPC_TIMEOUT_MS", "10000")              # +10 s chờ kết nối RPC mỗi phiên
     monkeypatch.setenv("FLOP_DIRECT_TIMEOUT_SEC", "100")
     clock = [0.0]
     cli = MultiCLI(clock=clock, cost=100)
@@ -1255,16 +1270,16 @@ def test_cli_gets_the_indexer_url_for_offer_discovery():
 def test_session_timeout_covers_the_channel_max_duration():
     cli = CLI()
     step({}, cli, offers=[_dur_offer(600)])
-    assert cli.sessions()[0]["timeout"] == 600 + fd.MAXDUR_MARGIN_SEC
+    assert cli.sessions()[0]["timeout"] == 600 + fd.MAXDUR_MARGIN_SEC + fd.DEFAULT_RPC_TIMEOUT_MS // 1000
     cli = CLI()
     step({}, cli, offers=[_dur_offer(120)])
-    assert cli.sessions()[0]["timeout"] == fd.DEFAULT_TIMEOUT_SEC                    # không thấp hơn cấu hình
+    assert cli.sessions()[0]["timeout"] == fd.DEFAULT_TIMEOUT_SEC + fd.DEFAULT_RPC_TIMEOUT_MS // 1000                  # không thấp hơn cấu hình
 
 
 def test_a_session_that_cannot_outlive_its_channel_is_not_started():
     cli = CLI()
     r = step({}, cli, offers=[_dur_offer(900)], deadline=NOW + 900.0, clock=lambda: float(NOW))
-    assert r["outcome"] == "run_budget" and cli.sessions() == [] and str(900 + fd.MAXDUR_MARGIN_SEC) in r["reason"]
+    assert r["outcome"] == "run_budget" and cli.sessions() == [] and str(900 + fd.MAXDUR_MARGIN_SEC + fd.DEFAULT_RPC_TIMEOUT_MS // 1000) in r["reason"]
 
 
 def test_a_long_offer_is_skipped_for_a_miner_that_fits(monkeypatch, three_miners):
@@ -1284,7 +1299,7 @@ def test_sizing_uses_the_shortest_offer_duration(monkeypatch):
     step({}, cli, prompt=LONG, offers=[_dur_offer(600), _dur_offer(60)], miner_cap_fn=lambda m: 130.0)
     run = cli.sessions()[0]
     assert int(run["cmd"][run["cmd"].index("--max-tokens") + 1]) == int(130 * 60 / 28.0) - len(LONG) // 4
-    assert run["timeout"] == 600 + fd.MAXDUR_MARGIN_SEC                                 # chờ theo offer DÀI nhất
+    assert run["timeout"] == 600 + fd.MAXDUR_MARGIN_SEC + fd.DEFAULT_RPC_TIMEOUT_MS // 1000                                 # chờ theo offer DÀI nhất
 
 
 def test_escrow_fits_every_precision_the_miner_offers():
