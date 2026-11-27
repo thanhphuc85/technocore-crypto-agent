@@ -127,6 +127,9 @@ def test_gateway_and_direct_together_over_many_runs(monkeypatch, tmp_path, gatew
     import time as _clock
 
     def cli(cmd, envx, timeout):
+        if "--entrypoint" in cmd:                         # flop_recover.mjs: kênh mô phỏng chưa tới hạn hoàn
+            ids = [c for c in (envx or {}).get("FLOP_RECOVER_CHANNELS", "").split(",") if c]
+            return 0, "\n".join(json.dumps({"channel": c, "state": "open", "action": "wait"}) for c in ids), ""
         if "import" in cmd:
             return 0, json.dumps({"ok": True, "address": addr}), ""
         esc = int(float(cmd[cmd.index("--max-flop") + 1]) * RAW)
