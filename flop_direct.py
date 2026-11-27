@@ -89,6 +89,11 @@ RPC_BACKOFF_SEC = 600
 # runtime + genesis. Testnet 27/11 quá tải: mỗi lệnh đọc state ~3 s (từ VN) tới 5-10 s (runner Mỹ) -> 10 s không đủ
 # dù đường mạng thông (rpc-probe: wss 5/5 OK). Chỉ là thời gian CHỜ kết nối, không đổi gì on-chain.
 DEFAULT_RPC_TIMEOUT_MS = 60_000
+# SDK chỉ KÝ lệnh chi khi block finalized mà RPC thấy có timestamp cách giờ máy <= 1/4 era (64 block x 1 s = 16 s);
+# không thì ném lỗi TRƯỚC khi gửi — CLI lại báo "open submission outcome unknown". Testnet 27/11: RPC công khai đồng
+# bộ dở, chậm ~2 800 block (~46 phút) -> mọi phiên đều "không rõ kết quả" dù không gì được gửi. Kiểm trước, rẻ hơn.
+SPEND_FRESH_LIMIT_MS = 16_000
+_TIMESTAMP_NOW_KEY = "0xf0c365c3cf59d671eb72da0e7a4113c49f1f0515f462cdcf84e0f1d6045dfcbb"   # Timestamp::Now
 MIN_RPC_TIMEOUT_MS = 10_000
 MAX_RPC_TIMEOUT_MS = 180_000
 _RPC_DOWN_MARKERS = ("rpc unreachable", "could not connect to wss://", "could not connect to ws://")
@@ -438,6 +443,28 @@ def image_problem(image: str) -> str:
     if _PINNED_IMAGE_RE.match(image or ""):
         return ""
     return "FLOP_DIRECT_IMAGE phải ghim digest (`…@sha256:<64 hex>`) — container nhận khoá ví"
+
+
+def rpc_not_ready_reason(call, now_ms) -> str:
+    """'' nếu RPC đủ mới để SDK chịu ký lệnh chi; ngược lại là lý do. `call(method, params)` -> result JSON-RPC;
+    `now_ms()` -> giờ máy (ms) đọc SAU khi có trả lời (như SDK). Lỗi đọc/giải mã -> lý do (không mở phiên)."""
+    try:
+        head = call("chain_getFinalizedHead", [])
+        raw = call("state_getStorage", [_TIMESTAMP_NOW_KEY, head])
+        stamped = int.from_bytes(bytes.fromhex(str(raw)[2:])[:8], "little")
+        lag = now_ms() - stamped
+    except Exception as e:
+        return f"không đọc được block finalized từ RPC ({type(e).__name__})"
+    if stamped <= 0 or abs(lag) > SPEND_FRESH_LIMIT_MS:
+        syncing = ""
+        try:
+            if (call("system_health", []) or {}).get("isSyncing"):
+                syncing = ", RPC đang đồng bộ"
+        except Exception:
+            pass
+        return (f"block finalized của RPC lệch {lag / 1000:.0f}s so với giờ máy (SDK chỉ ký khi <= "
+                f"{SPEND_FRESH_LIMIT_MS // 1000}s{syncing})")
+    return ""
 
 
 def rpc_timeout_ms() -> int:
@@ -891,7 +918,7 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
              prompts=None, book_fn=None, deny=(), deadline=None, runner=None, alert=None, log=print,
              clock=time.time, offers_fn=None, price_fn=None, miner_cap_fn=None, balance_fn=None,
              indexer_url=None, own_channels_fn=None, checkpoint=None, spend_room=None, booked_fn=None,
-             nonce_fn=None) -> dict:
+             nonce_fn=None, rpc_ready_fn=None) -> dict:
     """Một nhịp mua trực tiếp: tối đa FLOP_DIRECT_MAX_PER_RUN phiên, xoay vòng các miner. Trả {"outcome", ...};
     KHÔNG ném lỗi. `book_fn(amount, channel_id, model, escrow=)` ghi sổ (None = chạy tập devnet, không ghi).
     `fetch_channel(channel_id)` -> dict explorer | None. `offers_fn(miner, model_hash)` -> các dòng
@@ -911,6 +938,9 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
     tìm kênh mồ côi, chặn miner 6 giờ) thay vì quên hẳn kênh và trần ngày.
 
     `spend_room()` -> FLOP còn được cam kết hôm nay dưới trần CHUNG của mọi đường mua (None = không có trần chung).
+
+    `rpc_ready_fn()` -> '' khi RPC đủ mới để SDK ký | lý do. Gọi MỘT lần mỗi lượt ngay trước phiên đầu tiên; chưa sẵn
+    sàng -> nghỉ chung RPC_BACKOFF_SEC, không chặn miner, không giữ trần ngày, không báo động.
 
     `nonce_fn(address)` -> nonce ví trên chain | None. Đọc lúc bắt đầu mỗi phiên; khoản giữ "không rõ kết quả" được gỡ
     sớm (NONCE_RELEASE_SEC) khi nonce vẫn y nguyên = chain chứng minh không giao dịch nào của ví đã được ghi.
@@ -1304,6 +1334,7 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
                 f"phí) < {_flop_str(Decimal(str(need)))} FLOP cần cho một phiên")
 
     offer_cache = {}
+    rpc_checked = rpc_ready_fn is None
     work, password, ks = None, None, None
     last = ("idle", "")                                               # (kết quả, lý do) của lần thử cuối
     start = int(g.get("miner_idx") or 0)
@@ -1485,6 +1516,17 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
                 if sess_timeout > cfg["timeout"]:
                     continue                          # offer thời hạn dài: miner khác có thể vừa
                 break
+            if not rpc_checked:
+                rpc_checked = True
+                try:
+                    why = rpc_ready_fn()
+                except Exception as e:
+                    why = f"không kiểm được RPC ({type(e).__name__})"
+                if why:
+                    g.update(wait_until=now + RPC_BACKOFF_SEC, wait_why="rpc not ready")
+                    log(f"[direct] RPC chưa sẵn sàng để ký — {why}; nghỉ chung {RPC_BACKOFF_SEC // 60} phút")
+                    last = ("rpc_down", why)
+                    break
             # Keystore tạm: nạp MỘT lần cho cả lượt.
             if work is None:
                 work = tempfile.mkdtemp(prefix="flop-direct-")
