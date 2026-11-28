@@ -40,7 +40,7 @@ jobs:
           case "$IMAGE" in *@sha256:*) ;; *) echo "::error::DEFAULT_IMAGE is not pinned by digest"; exit 1;; esac
           docker pull -q "$IMAGE"
           echo "image version: $(docker run --rm "$IMAGE" --version)"
-          echo "npm packages: $(docker run --rm -w /app --entrypoint node "$IMAGE" -p "'@flop-labs/cli ' + require('./package.json').version + ', @flop-labs/sdk ' + require('@flop-labs/sdk/package.json').version")"
+          echo "npm packages: $(docker run --rm -w /app --entrypoint node "$IMAGE" -p "const v = (p) => JSON.parse(require('fs').readFileSync(p, 'utf8')).version; '@flop-labs/cli ' + v('package.json') + ', @flop-labs/sdk ' + v('node_modules/@flop-labs/sdk/package.json')")"
           # Mọi tuỳ chọn flop_direct.py truyền cho CLI phải còn (đổi tên/bỏ = mở phiên hỏng lúc chạy thật).
           help_has() { out=$(docker run --rm "$IMAGE" "$@" --help 2>&1); for f in $FLAGS; do echo "$out" | grep -q -- "$f" || { echo "::error::'$*' lacks $f"; exit 1; }; done; }
           FLAGS="--network --rpc-timeout --keystore --password-env --output" help_has
