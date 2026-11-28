@@ -94,11 +94,10 @@ STALE_PROBE_SEC = 3 * 3600
 # còn PAID trong cửa sổ 3 giờ. Testnet 27/11: 5EyqNiBM trả đều tới 19:09Z rồi chỉ còn timedout/REFUNDED, nhưng luật
 # 3 giờ vẫn coi là "ok" tới 22:09Z. Kênh còn mở (LOCKED) chỉ tính là "không PAID" khi đã quá HEALTH_LOCKED_SEC.
 HEALTH_DEGRADED_N = 3
-# Miner "đang trả" có PAID trong chừng này giây = "tươi": các miner tươi được dùng LẦN LƯỢT (miner lâu chưa dùng nhất
-# trước) thay vì luôn miner có PAID mới nhất — 28/11 cả 18 phiên dồn vào một miner (5FZAzdnV). Chia nhu cầu cho nhiều
-# miner độc lập trông giống nhu cầu thật hơn và một miner hỏng không làm hụt cả ngày.
-HEALTH_FRESH_SEC = 3600
 HEALTH_LOCKED_SEC = 30 * 60
+# Luân phiên các miner "đang trả" có KẾT CỤC GẦN NHẤT (kênh của bất kỳ agent nào) là PAID và ví mình không đang
+# lỗi liên tiếp với miner đó: miner lâu chưa dùng nhất trước. Trước đây chỉ luân phiên miner có PAID trong 1 giờ ->
+# miner khoẻ nhưng tạm ít khách (28/11: 5EfSPZVx, 5DZg2SeJ) bị loại, mọi phiên lại dồn vào một miner.
 # CLI từ chối RÕ RÀNG vì không tới được RPC chain (vd. "RPC unreachable: connection to wss://... timed out"): lỗi của
 # mạng chung, không phải của miner -> nghỉ CHUNG ngắn rồi thử lại, không chặn miner 1 giờ. Testnet 27/11: RPC quá tải
 # (trả lời 4-10 s, sát ngưỡng 10 s của CLI) khiến cả 2 miner bị chặn 1 giờ mỗi lần chập chờn.
@@ -941,6 +940,29 @@ def miner_health(rows, now: int) -> tuple:
     return ("ok" if recent else "stale"), len(recent), last_paid
 
 
+def latest_outcome_paid(rows, now: int):
+    """Kết cục của kênh GẦN NHẤT đã có kết cục của một miner (mọi agent): True = PAID, False = hoàn tiền hoặc còn khoá
+    quá HEALTH_LOCKED_SEC, None = chưa có kênh nào có kết cục."""
+    best = None
+    for r in rows or []:
+        if not isinstance(r, dict):
+            continue
+        try:
+            t = int(r.get("openedAt")) // 1000
+        except (TypeError, ValueError):
+            continue
+        pay = str(r.get("paymentStatus") or "").upper()
+        if pay == "PAID":
+            ok = True
+        elif pay == "REFUNDED" or now - t > HEALTH_LOCKED_SEC:
+            ok = False
+        else:
+            continue
+        if best is None or t > best[0]:
+            best = (t, ok)
+    return None if best is None else best[1]
+
+
 def _health_on() -> bool:
     return _env("FLOP_DIRECT_HEALTH").lower() not in ("off", "0", "false", "no")
 
@@ -1526,13 +1548,14 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
         k = _mkey(m["miner"])
         if k not in _health:
             if miner_channels_fn is None or not _health_on():
-                _health[k] = ("unknown", 0, None)
+                _health[k] = ("unknown", 0, None, None)
             else:
                 try:
-                    _health[k] = miner_health(miner_channels_fn(m["miner"]), now)
+                    rows = miner_channels_fn(m["miner"])
+                    _health[k] = miner_health(rows, now) + (latest_outcome_paid(rows, now),)
                 except Exception as e:
                     log(f"[direct] đọc kênh của miner {m['miner'][:8]}… lỗi ({type(e).__name__}) — không chấm sức khoẻ")
-                    _health[k] = ("unknown", 0, None)
+                    _health[k] = ("unknown", 0, None, None)
         return _health[k]
 
     def blocked(m):
@@ -1628,8 +1651,9 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
         _rank = {"ok": 0, "unknown": 1, "new": 1, "stale": 2}
         def _order(m):
             h = health(m)
-            if h[0] == "ok" and h[2] and now - h[2] <= HEALTH_FRESH_SEC:
-                return (0, 0, int(mstate(m).get("last_used") or 0), 0)      # tươi: lần lượt, lâu chưa dùng trước
+            st_m = mstate(m)
+            if h[0] == "ok" and h[3] is True and not int(st_m.get("fail_streak") or 0):
+                return (0, 0, int(st_m.get("last_used") or 0), 0)       # khoẻ: lần lượt, lâu chưa dùng trước
             return (_rank.get(h[0], 1), 1, -(h[2] or 0), -h[1])
         rr.sort(key=_order)
     dirty = False                                                     # có kết quả phiên chưa lưu xuống đĩa
