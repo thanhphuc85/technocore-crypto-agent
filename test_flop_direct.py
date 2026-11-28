@@ -2796,7 +2796,7 @@ def _health_fn(table):
 
 def test_paying_miner_is_tried_first(monkeypatch, three_miners):
     stale = [_hch(fd.HEALTH_STALE_SEC + 600)]
-    table = {MINER: stale, M2: [_hch(fd.HEALTH_FRESH_SEC + 600)], M3: [_hch(300), _hch(700), _hch(800)]}
+    table = {MINER: stale, M2: [_hch(200, "REFUNDED"), _hch(900)], M3: [_hch(300), _hch(700), _hch(800)]}
     cli = MultiCLI()
     r = step({}, cli, offers_fn=_offers_for(MINER, M2, M3), miner_channels_fn=_health_fn(table))
     assert r["opened"] == 1 and cli.miners() == [M3]
@@ -2804,7 +2804,7 @@ def test_paying_miner_is_tried_first(monkeypatch, three_miners):
 
 def test_most_recently_paying_miner_beats_a_busier_one_that_just_stopped(monkeypatch, three_miners):
     # M2: nhiều PAID nhưng PAID cuối đã 2 giờ trước (vừa hỏng); M3: ít PAID nhưng vừa trả 5 phút trước.
-    busy_dead = [_hch(7200 + 60 * i) for i in range(20)]
+    busy_dead = [_hch(fd.HEALTH_LOCKED_SEC + 600, "LOCKED")] + [_hch(7200 + 60 * i) for i in range(20)]
     table = {MINER: [_hch(fd.HEALTH_STALE_SEC + 600)], M2: busy_dead, M3: [_hch(300), _hch(900)]}
     cli = MultiCLI()
     step({}, cli, offers_fn=_offers_for(MINER, M2, M3), miner_channels_fn=_health_fn(table))
@@ -3038,8 +3038,8 @@ def test_miner_with_recent_failures_counts_as_degraded():
 
 
 def test_fresh_paying_miners_take_turns_and_beat_older_ones(monkeypatch, three_miners):
-    # M2 và M3 đều vừa trả tiền (tươi) -> lần lượt; MINER còn "ok" nhưng PAID cuối đã cũ -> chỉ khi không còn miner tươi.
-    table = {MINER: [_hch(fd.HEALTH_FRESH_SEC + 600)], M2: [_hch(120)], M3: [_hch(300)]}
+    # M2 và M3: kết cục gần nhất là PAID -> lần lượt; MINER còn "ok" nhưng kênh gần nhất bị hoàn tiền -> xếp sau.
+    table = {MINER: [_hch(600, "REFUNDED"), _hch(4000)], M2: [_hch(120)], M3: [_hch(300)]}
     st, used = {}, []
     for k in range(4):
         cli = MultiCLI()
@@ -3058,3 +3058,30 @@ def test_paced_run_stops_before_reading_miner_health(monkeypatch, three_miners):
     cli = MultiCLI()
     r = step(st, cli, offers_fn=_offers_for(MINER, M2, M3), miner_channels_fn=lambda m: seen.append(m) or [])
     assert r["outcome"] in ("paced", "daily_cap") and seen == [] and cli.sessions() == []
+
+
+def test_quiet_but_healthy_miners_join_the_rotation(monkeypatch, three_miners):
+    # Cả ba: PAID cuối 2 giờ trước, không lỗi nào sau đó (ít khách, không hỏng) -> đều được luân phiên.
+    table = {MINER: [_hch(7000)], M2: [_hch(7100)], M3: [_hch(7200)]}
+    st, used = {}, []
+    for k in range(3):
+        cli = MultiCLI()
+        step(st, cli, offers_fn=_offers_for(MINER, M2, M3), miner_channels_fn=_health_fn(table), now=NOW + 600 * k)
+        used += cli.miners()
+    assert sorted(used) == sorted([MINER, M2, M3])
+
+
+def test_own_failure_streak_takes_a_miner_out_of_the_rotation(monkeypatch, three_miners):
+    table = {MINER: [_hch(7000)], M2: [_hch(100)], M3: [_hch(200)]}
+    st = {fd.KEY: {"miners": {fd._mkey(M2): {"fail_streak": 1}}}}
+    cli = MultiCLI()
+    step(st, cli, offers_fn=_offers_for(MINER, M2, M3), miner_channels_fn=_health_fn(table))
+    assert cli.miners() and cli.miners()[0] != M2
+
+
+def test_latest_outcome_paid():
+    assert fd.latest_outcome_paid([], NOW) is None
+    assert fd.latest_outcome_paid([_hch(300, "LOCKED")], NOW) is None                 # còn mới, chưa có kết cục
+    assert fd.latest_outcome_paid([_hch(300, "REFUNDED"), _hch(900)], NOW) is False
+    assert fd.latest_outcome_paid([_hch(300), _hch(900, "REFUNDED")], NOW) is True
+    assert fd.latest_outcome_paid([_hch(fd.HEALTH_LOCKED_SEC + 60, "LOCKED"), _hch(4000)], NOW) is False
