@@ -46,8 +46,10 @@ KEY = "flop_direct"
 # 1014039 và có `session run --max-duration`. v0.1.505 (releases.json lúc đó) chỉ có CLI 0.9.1: không có --max-duration, kênh
 # mặc định 120 block -> settle hỏng (AttestationStale, flop-labs/network#1338) nên bị bỏ qua. Các tham số agent dùng
 # (keys import --secret-env/--out/--password-env/--type, --output agent, session run, channel finalize) vẫn còn.
-DEFAULT_IMAGE = ("ghcr.io/flop-labs/flop-core/cli:v0.1.514"
-                 "@sha256:e14e2208df0754957d6732894bf3e7ed79c24d6729e9723813bb5b60ac397318")
+# v0.1.523 (build 2026-11-27 02:08Z, revision b12ab55a) mang CLI 0.10.3: Flop Labs 28/11 "Use the latest command line
+# tool, older versions get refused by the chain". Job `cli-image` trong CI kéo đúng digest này và in phiên bản CLI.
+DEFAULT_IMAGE = ("ghcr.io/flop-labs/flop-core/cli:v0.1.523"
+                 "@sha256:d5f57fc65786baa877d16964b648a4cd69ce1158315ec88fb22a3715d91513aa")
 # ESCROW LÀ CHI PHÍ: SDK (compute-channel/session-estimate) ghi "A cooperative spot settle pays the whole escrow
 # to the miner (D-0403), so the escrow is the cost, not a ceiling". Không đặt FLOP_DIRECT_MAX_FLOP -> escrow =
 # minEscrow của offer miner công bố (mức thấp nhất miner nhận), kẹp dưới FLOP_DIRECT_ESCROW_CAP.

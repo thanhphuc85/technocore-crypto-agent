@@ -27,6 +27,28 @@ jobs:
           fi
           echo "OK: PR does not modify the generated contributions-log.md."
 
+  # Image CLI ghim theo digest (flop_direct.DEFAULT_IMAGE) mà agent chạy để mở phiên và lấy lại escrow: kéo đúng digest,
+  # in phiên bản CLI, kiểm SDK của image vẫn có những gì flop_recover.mjs dùng. Không seed, không ký, không mạng chain.
+  cli-image:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5 (pinned)
+      - name: Pinned CLI image runs and ships the SDK pieces the agent uses
+        run: |
+          IMAGE=$(python3 -c "import ast; t = ast.parse(open('flop_direct.py').read()); print([ast.literal_eval(n.value) for n in t.body if isinstance(n, ast.Assign) and getattr(n.targets[0], 'id', '') == 'DEFAULT_IMAGE'][0])")
+          echo "image: $IMAGE"
+          case "$IMAGE" in *@sha256:*) ;; *) echo "::error::DEFAULT_IMAGE is not pinned by digest"; exit 1;; esac
+          docker pull -q "$IMAGE"
+          echo "CLI: $(docker run --rm "$IMAGE" --version)"
+          docker run --rm -w /app --entrypoint node "$IMAGE" --input-type=module -e "
+            const sdk = await import('@flop-labs/sdk');
+            await import('@polkadot/keyring'); await import('@polkadot/util-crypto');
+            const cc = sdk.computeChannel;
+            const need = [typeof sdk.connectFlopApi, typeof cc.ComputeChannelChainClient, typeof cc.FlopChainSubmitter,
+                          typeof cc.ComputeChannelChainClient.prototype.timeout, typeof cc.ComputeChannelChainClient.prototype.expireForceOpen];
+            if (need.some(t => t !== 'function')) { console.error('missing SDK pieces', need); process.exit(1); }
+            console.log('SDK pieces for flop_recover.mjs: OK');"
+
   # Workflow cầm seed (agent_cron) và workflow có quyền ghi (contributions-log) chỉ cài từ
   # file khoá + hash. Job này bắt lệch: thêm phụ thuộc vào pyproject mà quên tạo lại khoá
   # thì agent sẽ hỏng lúc chạy thật — báo ở PR thay vì lúc đó.
