@@ -39,7 +39,15 @@ jobs:
           echo "image: $IMAGE"
           case "$IMAGE" in *@sha256:*) ;; *) echo "::error::DEFAULT_IMAGE is not pinned by digest"; exit 1;; esac
           docker pull -q "$IMAGE"
-          echo "CLI: $(docker run --rm "$IMAGE" --version)"
+          echo "image version: $(docker run --rm "$IMAGE" --version)"
+          echo "npm packages: $(docker run --rm -w /app --entrypoint node "$IMAGE" -p "'@flop-labs/cli ' + require('./package.json').version + ', @flop-labs/sdk ' + require('@flop-labs/sdk/package.json').version")"
+          # Mọi tuỳ chọn flop_direct.py truyền cho CLI phải còn (đổi tên/bỏ = mở phiên hỏng lúc chạy thật).
+          help_has() { out=$(docker run --rm "$IMAGE" "$@" --help 2>&1); for f in $FLAGS; do echo "$out" | grep -q -- "$f" || { echo "::error::'$*' lacks $f"; exit 1; }; done; }
+          FLAGS="--network --rpc-timeout --keystore --password-env --output" help_has
+          FLAGS="--secret-env --out --password-env --type" help_has keys import
+          FLAGS="--miner --model --prompt --max-flop --max-tokens --max-duration --via --endpoint" help_has session run
+          FLAGS="" help_has channel finalize
+          echo "CLI options used by the agent: OK"
           docker run --rm -w /app --entrypoint node "$IMAGE" --input-type=module -e "
             const sdk = await import('@flop-labs/sdk');
             await import('@polkadot/keyring'); await import('@polkadot/util-crypto');
