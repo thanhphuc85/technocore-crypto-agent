@@ -3047,3 +3047,14 @@ def test_fresh_paying_miners_take_turns_and_beat_older_ones(monkeypatch, three_m
         used += cli.miners()
     assert set(used[:2]) == {M2, M3} and used[2:] == used[:2] and MINER not in used
     assert mst(st, M2)["last_used"] and mst(st, M3)["last_used"]
+
+
+def test_paced_run_stops_before_reading_miner_health(monkeypatch, three_miners):
+    # Đã cam kết đủ phần được phép tới giờ này -> dừng "paced"/"daily_cap" mà KHÔNG đọc explorer cho từng miner.
+    monkeypatch.setenv("FLOP_DIRECT_MAX_PER_DAY", "1")
+    seen = []
+    day = __import__("time").strftime("%Y-%m-%d", __import__("time").gmtime(NOW))
+    st = {fd.KEY: {"day": {"day": day, "escrow": 1.0}}}
+    cli = MultiCLI()
+    r = step(st, cli, offers_fn=_offers_for(MINER, M2, M3), miner_channels_fn=lambda m: seen.append(m) or [])
+    assert r["outcome"] in ("paced", "daily_cap") and seen == [] and cli.sessions() == []

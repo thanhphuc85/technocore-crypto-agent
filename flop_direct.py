@@ -1607,6 +1607,17 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
     last = ("idle", "")                                               # (kết quả, lý do) của lần thử cuối
     start = int(g.get("miner_idx") or 0)
     tried = 0
+    # Chưa tới hạn mức (nhịp rải đều / trần ngày) thì không phiên nào mở được: dừng NGAY, trước khi đọc explorer chấm sức
+    # khoẻ từng miner. Trước đây lượt "paced" (phần lớn các lượt) vẫn đọc kênh của mọi miner (7 miner x tới 3 lần thử khi
+    # explorer 503) chỉ để rồi dừng ở chốt hạn mức. Ngưỡng khớp đúng chốt trong vòng lặp: escrow cố định (đường force có
+    # FLOP_DIRECT_MAX_FLOP) cần đủ cả phiên; escrow theo offer cần ít nhất `chunk` khi đang rải đều.
+    if cfg["per_day"] > 0:
+        fixed = cfg.get("max_flop") is not None and cfg.get("via") != "offer"
+        need = float(cfg["max_flop"]) if fixed else (chunk if paced else 0.0)
+        room = float(limit) - float(ds["escrow"])
+        if room <= 0 or room + 1e-9 < need:
+            return done(cap_kind, reason=cap_reason())
+
     # Thứ tự thử: xoay vòng như cũ, rồi xếp ỔN ĐỊNH theo sức khoẻ — đang trả > chưa rõ/mới > ngừng trả; trong nhóm "đang
     # trả", miner có kênh PAID GẦN NHẤT đứng trước. Xếp theo SỐ kênh PAID trong 3 giờ (trước đây) để miner chạy nhiều mà
     # vừa hỏng đứng đầu suốt 3 giờ (27/11: 5FJ34C7r 21 PAID, chết từ 17:30Z, vẫn được thử trước 5FZAzdnV đang trả đều);
