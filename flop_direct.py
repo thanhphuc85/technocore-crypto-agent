@@ -94,6 +94,10 @@ STALE_PROBE_SEC = 3 * 3600
 # còn PAID trong cửa sổ 3 giờ. Testnet 27/11: 5EyqNiBM trả đều tới 19:09Z rồi chỉ còn timedout/REFUNDED, nhưng luật
 # 3 giờ vẫn coi là "ok" tới 22:09Z. Kênh còn mở (LOCKED) chỉ tính là "không PAID" khi đã quá HEALTH_LOCKED_SEC.
 HEALTH_DEGRADED_N = 3
+# Miner "đang trả" có PAID trong chừng này giây = "tươi": các miner tươi được dùng LẦN LƯỢT (miner lâu chưa dùng nhất
+# trước) thay vì luôn miner có PAID mới nhất — 28/11 cả 18 phiên dồn vào một miner (5FZAzdnV). Chia nhu cầu cho nhiều
+# miner độc lập trông giống nhu cầu thật hơn và một miner hỏng không làm hụt cả ngày.
+HEALTH_FRESH_SEC = 3600
 HEALTH_LOCKED_SEC = 30 * 60
 # CLI từ chối RÕ RÀNG vì không tới được RPC chain (vd. "RPC unreachable: connection to wss://... timed out"): lỗi của
 # mạng chung, không phải của miner -> nghỉ CHUNG ngắn rồi thử lại, không chặn miner 1 giờ. Testnet 27/11: RPC quá tải
@@ -691,7 +695,7 @@ def pace_limit(cfg: dict, now: int, salt: str = "") -> tuple[float, bool]:
 _DURABLE_TOP = ("day", "unknown_until", "wait_until", "wait_why", "prompt_idx", "miner_idx", "gnpt", "stats",
                 "last_attempt", "orphan_since", "orphan_last", "done", "unknown_escrow", "attempt", "rev")
 _DURABLE_MINER = ("unknown_until", "wait_until", "wait_why", "cap", "sessions", "unknown_nonce", "unknown_since",
-                  "unknown_escrow", "unknown_day", "fail_streak", "probe_at")
+                  "unknown_escrow", "unknown_day", "fail_streak", "probe_at", "last_used")
 _PENDING_CORE = ("channel", "ts", "network", "miner", "error", "alerted", "force", "fin_tries", "fin_at", "fin_tx",
                  "fin_alerted", "max_flop", "rec_at", "rec_tries", "rec_tx", "hold")
 _PENDING_LEARN = ("model", "model_hash", "ptok", "completion_tokens")
@@ -1611,7 +1615,12 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
     rr = [miners[(start + j) % len(miners)] for j in range(len(miners))]
     if len(rr) > 1 and miner_channels_fn is not None and _health_on():
         _rank = {"ok": 0, "unknown": 1, "new": 1, "stale": 2}
-        rr.sort(key=lambda m: (_rank.get(health(m)[0], 1), -(health(m)[2] or 0), -health(m)[1]))
+        def _order(m):
+            h = health(m)
+            if h[0] == "ok" and h[2] and now - h[2] <= HEALTH_FRESH_SEC:
+                return (0, 0, int(mstate(m).get("last_used") or 0), 0)      # tươi: lần lượt, lâu chưa dùng trước
+            return (_rank.get(h[0], 1), 1, -(h[2] or 0), -h[1])
+        rr.sort(key=_order)
     dirty = False                                                     # có kết quả phiên chưa lưu xuống đĩa
 
     def save():
@@ -1840,6 +1849,7 @@ def run_step(state: dict, *, agent_key, now: int, network: str, fetch_channel, p
             ds = {"day": day, "escrow": round(float(ds["escrow"]) + per_session, 9)}
             g["day"] = ds
             g["last_attempt"] = now
+            st["last_used"] = now
             if bal["avail"] is not None:
                 bal["avail"] -= Decimal(max_flop)
             # Mốc "phiên đang chạy" + trần ngày đã giữ XUỐNG ĐĨA trước khi CLI có thể khoá escrow on-chain.
